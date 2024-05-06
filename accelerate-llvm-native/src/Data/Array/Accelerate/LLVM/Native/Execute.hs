@@ -129,14 +129,14 @@ executeBinding workers !env tp = \case
     return $ ValuesSingle (Value $ Ref ioref) `ValuesPair` ValuesSingle (Value $ OutputRef ioref)
   Alloc shr tp sh -> do
     let n = size' shr $ prjVars sh env
-    MutableBuffer buffer <- newBuffer tp n
-    return $ ValuesSingle $ Value $ Buffer buffer
+    MutableBuffer n buffer <- newBuffer tp n
+    return $ ValuesSingle $ Value $ Buffer n buffer
   Use _ _ buffer ->
     return $ ValuesSingle $ Value buffer
   Unit (Var tp ix) -> do
-    mbuffer@(MutableBuffer buffer) <- newBuffer tp 1
+    mbuffer@(MutableBuffer 1 buffer) <- newBuffer tp 1
     writeBuffer tp mbuffer 0 $ prjGroundVar (Var (GroundRscalar tp) ix) env
-    return $ ValuesSingle $ Value $ Buffer buffer
+    return $ ValuesSingle $ Value $ Buffer 1 buffer
   RefRead ref@(Var (BaseRref tp) ix) -> do
     let Ref ioref = prj ix env
     ValuesSingle . groundValue tp <$> readIORef ioref

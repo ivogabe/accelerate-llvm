@@ -91,7 +91,7 @@ touchKernel env = go
 
 touchArg :: NativeEnv env -> KernelArgR t s -> SArg env t -> IO ()
 touchArg env (KernelArgRbuffer _ _) (SArgBuffer _ var) = 
-  let Buffer ua = prj (varIdx var) env
+  let Buffer _ ua = prj (varIdx var) env
   in touchUniqueArray ua
 touchArg _ _ _ = return ()
 
@@ -104,7 +104,7 @@ touchArg _ _ _ = return ()
 --
 unsafeWriteArg :: NativeEnv env -> KernelArgR t s -> Ptr (MarshalArg s) -> SArg env t -> IO ()
 unsafeWriteArg env (KernelArgRbuffer _ _) ptr (SArgBuffer _ var) = do
-  let Buffer ua = prj (varIdx var) env
+  let Buffer _ ua = prj (varIdx var) env
   poke ptr (unsafeUniqueArrayPtr ua)
 unsafeWriteArg env (KernelArgRscalar tp'@(SingleScalarType tp)) ptr (SArgScalar var)
   | SingleDict <- singleDict tp

@@ -45,7 +45,7 @@ marshalInt = $( case finiteBitSize (undefined::Int) of
                     _  -> error "I don't know what architecture I am" )
 
 marshalBuffer :: Buffer t -> FFI.Arg
-marshalBuffer (Buffer ua) = FFI.argPtr $ unsafeUniqueArrayPtr ua
+marshalBuffer (Buffer _ ua) = FFI.argPtr $ unsafeUniqueArrayPtr ua
 
 sizeOfEnv :: KernelFun kernel f -> Int
 sizeOfEnv = sizeOfEnv' 0
