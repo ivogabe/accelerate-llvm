@@ -281,7 +281,7 @@ workstealLoop counter activeThreads size doWork = do
 
 workstealChunked :: ShapeR sh -> Operand (Ptr Int32) -> Operand (Ptr Int32) -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)), StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
 workstealChunked shr counter activeThreads sh tys loopwork = do
-  let chunkSz = chunkSize' shr sh
+  chunkSz <- lift $ chunkSize' shr sh
   chunkCounts <- lift $ chunkCount shr sh chunkSz
   chunkCnt <- lift $ shapeSize shr chunkCounts
   chunkCnt' :: Operand Int32 <- lift $ instr' $ Trunc boundedType boundedType $ op TypeInt chunkCnt
@@ -295,10 +295,14 @@ workstealChunked shr counter activeThreads sh tys loopwork = do
 
 
 
-chunkSize' :: ShapeR sh -> Operands sh -> Operands sh
-chunkSize' ShapeRz OP_Unit = OP_Unit
-chunkSize' (ShapeRsnoc ShapeRz) (OP_Pair _ sz) = OP_Pair OP_Unit sz
-chunkSize' (ShapeRsnoc shr) (OP_Pair sh _) = OP_Pair (chunkSize' shr sh) (liftInt 1)
+chunkSize' :: ShapeR sh -> Operands sh -> CodeGen Native (Operands sh)
+chunkSize' ShapeRz OP_Unit = return OP_Unit
+chunkSize' (ShapeRsnoc ShapeRz) (OP_Pair _ sz) = do
+  sz' <- A.max singleType sz (liftInt 1)
+  return $ OP_Pair OP_Unit sz'
+chunkSize' (ShapeRsnoc shr) (OP_Pair sh _) = do
+  sh' <- chunkSize' shr sh
+  return $ OP_Pair sh' (liftInt 1)
 -- chunkSize' (ShapeRsnoc shr) (OP_Pair _ sz) = OP_Pair (ones shr) sz 
 --   where
 --     ones :: ShapeR sh -> Operands sh
