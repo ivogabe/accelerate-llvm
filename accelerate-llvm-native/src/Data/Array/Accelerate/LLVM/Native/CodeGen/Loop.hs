@@ -224,7 +224,7 @@ workstealLoop counter activeThreads size doWork = do
   -- Check whether there might be work for us
   initialCounter <- lift $ instr' $ Load scalarType NonVolatile counter
   initialCondition <- lift $ lt singleType (OP_Int32 initialCounter) (OP_Int32 size)
-  lift $ cbr initialCondition start finished
+  lift $ cbr initialCondition start exitLast
 
   lift $ setBlock start
   -- Might be work for us!
