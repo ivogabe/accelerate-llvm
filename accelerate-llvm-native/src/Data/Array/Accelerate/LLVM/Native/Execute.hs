@@ -9,6 +9,7 @@
 {-# LANGUAGE ScopedTypeVariables      #-}
 {-# LANGUAGE TemplateHaskell          #-}
 {-# LANGUAGE TypeApplications         #-}
+{-# LANGUAGE TypeFamilies             #-}
 {-# LANGUAGE TypeOperators            #-}
 {-# LANGUAGE ViewPatterns             #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
@@ -61,7 +62,11 @@ don't f = return ()
 
 
 instance Execute UniformScheduleFun NativeKernel where
-  executeAfunSchedule tp fun = runValuesIOFun workers tp $ scheduleScheduleFun workers Empty fun
+  -- TODO: When moving the Accelerate runtime away from Haskell,
+  -- store a compiled version of the program in NativeLinked
+  data Linked UniformScheduleFun NativeKernel t = NativeLinked (UniformScheduleFun NativeKernel () t)
+  linkAfunSchedule = NativeLinked
+  executeAfunSchedule tp (NativeLinked fun) = runValuesIOFun workers tp $ scheduleScheduleFun workers Empty fun
     where
       workers = defaultWorkers
 
@@ -150,11 +155,7 @@ executeEffect !workers !threadIdx !env !effect !next = case effect of
     executeKernel workers threadIdx kernelCall (Job $ \threadIdx' -> touchKernel env kernelFun args >> runJob next threadIdx)
   SignalAwait signals -> do
     don't $ hPutStr stderr $ show $ ("wait",length signals)
---    scheduleAfterOrRun (map (`prj` env) signals) threadIdx $ next
-    let Job f = next
-    let f' tid = don't (hPutStr stderr (show ("waited", length signals))) >> f tid
-    let next' = Job f'
-    scheduleAfter workers (map (`prj` env) signals) $ next'
+    scheduleAfterOrRun (map (`prj` env) signals) threadIdx $ next
   SignalResolve signals -> do
     don't $ hPutStr stderr "resolved!!!!"
     mapM_ resolve signals

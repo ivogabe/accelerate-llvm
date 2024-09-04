@@ -39,22 +39,6 @@ import System.IO.Unsafe
 import Control.Concurrent
 import Control.Concurrent.MVar
 
-
-
-
-poorReadMVar :: MVar a -> IO a
-poorReadMVar mvar = do
-  value <- tryReadMVar mvar
-  case value 
-    of
-    Just a -> return a
-    Nothing -> 
-      do
-      threadDelay 100000
-      poorReadMVar mvar
-
-
-
 type family ValueR e where
   ValueR Signal         = NativeSignal
   ValueR SignalResolver = NativeSignal

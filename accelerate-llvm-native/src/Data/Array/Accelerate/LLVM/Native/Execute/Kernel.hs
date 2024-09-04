@@ -40,7 +40,6 @@ import GHC.ForeignPtr
 import Foreign.Marshal.Alloc
 import Foreign.Storable
 import Data.Typeable
-import qualified Debug.Trace
 
 foreign import ccall "dynamic"  
   callKernelPtr :: FunPtr (Ptr () -> IO Bool) -> Ptr () -> IO Bool
@@ -54,5 +53,5 @@ data KernelCall env where
 --
 callKernel :: FunPtr (KernelType env) -> (ForeignPtr ()) -> IO Bool
 callKernel funPtr foreignPtr =
-  withForeignPtr foreignPtr $ \argPtr -> --Debug.Trace.traceShowId <$>
+  withForeignPtr foreignPtr $ \argPtr ->
       callKernelPtr (castFunPtr funPtr) (castPtr argPtr)
