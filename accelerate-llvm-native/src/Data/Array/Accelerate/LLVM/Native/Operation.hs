@@ -37,10 +37,10 @@ import Data.Array.Accelerate.Eval
 
 
 import qualified Data.Set as Set
-import Data.Array.Accelerate.AST.Environment (weakenId, weakenEmpty, (.>), weakenSucc' )
+import Data.Array.Accelerate.AST.Environment (weakenId, weakenEmpty, weakenSucc' )
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Var (DeclareVars(..), declareVars)
-import Data.Array.Accelerate.Representation.Ground (buffersR, typeRtoGroundsR)
+import Data.Array.Accelerate.Representation.Ground (buffersR)
 import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken, LHS (..), mkLHS)
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
@@ -57,11 +57,9 @@ import qualified Data.Map as M
 import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Trafo.Desugar (desugarAlloc)
 
-import qualified Debug.Trace
-import GHC.Stack
 import Data.Array.Accelerate.AST.Idx (Idx(..))
 import Data.Array.Accelerate.Pretty.Operation (prettyFun)
-import Data.Array.Accelerate.Pretty.Exp (PrettyEnv(..), Val (Push))
+import Data.Array.Accelerate.Pretty.Exp (Val (Push))
 import Prettyprinter (pretty)
 import Unsafe.Coerce (unsafeCoerce)
 
