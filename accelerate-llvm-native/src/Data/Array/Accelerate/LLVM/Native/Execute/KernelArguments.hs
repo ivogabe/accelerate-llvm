@@ -27,7 +27,6 @@ import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Array.Buffer
-import Data.Array.Accelerate.Array.Unique
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Error
@@ -91,8 +90,7 @@ touchKernel env = go
 
 touchArg :: NativeEnv env -> KernelArgR t s -> SArg env t -> IO ()
 touchArg env (KernelArgRbuffer _ _) (SArgBuffer _ var) = 
-  let Buffer ua = prj (varIdx var) env
-  in touchUniqueArray ua
+  touchBuffer $ prj (varIdx var) env
 touchArg _ _ _ = return ()
 
 -- Writes the value of an argument to the arguments struct.
@@ -104,8 +102,8 @@ touchArg _ _ _ = return ()
 --
 unsafeWriteArg :: NativeEnv env -> KernelArgR t s -> Ptr (MarshalArg s) -> SArg env t -> IO ()
 unsafeWriteArg env (KernelArgRbuffer _ _) ptr (SArgBuffer _ var) = do
-  let Buffer ua = prj (varIdx var) env
-  poke ptr (unsafeUniqueArrayPtr ua)
+  let Buffer buffer = prj (varIdx var) env
+  poke ptr (unsafeForeignPtrToPtr buffer)
 unsafeWriteArg env (KernelArgRscalar tp'@(SingleScalarType tp)) ptr (SArgScalar var)
   | SingleDict <- singleDict tp
   , Refl <- marshalScalarArg (SingleScalarType tp) = do

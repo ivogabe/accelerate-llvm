@@ -26,7 +26,6 @@ module Data.Array.Accelerate.LLVM.Native.Execute.Kernel where
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Array.Buffer
-import Data.Array.Accelerate.Array.Unique
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.LLVM.CodeGen.Environment       ( MarshalArg, marshalScalarArg )

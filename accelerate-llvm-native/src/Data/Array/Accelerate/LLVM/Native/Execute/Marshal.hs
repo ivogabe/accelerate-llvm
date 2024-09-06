@@ -26,7 +26,7 @@ module Data.Array.Accelerate.LLVM.Native.Execute.Marshal
   where
 
 -- accelerate
-import Data.Array.Accelerate.Array.Unique
+import Foreign.ForeignPtr.Unsafe
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.Type
@@ -45,7 +45,7 @@ marshalInt = $( case finiteBitSize (undefined::Int) of
                     _  -> error "I don't know what architecture I am" )
 
 marshalBuffer :: Buffer t -> FFI.Arg
-marshalBuffer (Buffer ua) = FFI.argPtr $ unsafeUniqueArrayPtr ua
+marshalBuffer (Buffer ua) = FFI.argPtr $ unsafeForeignPtrToPtr ua
 
 sizeOfEnv :: KernelFun kernel f -> Int
 sizeOfEnv = sizeOfEnv' 0
