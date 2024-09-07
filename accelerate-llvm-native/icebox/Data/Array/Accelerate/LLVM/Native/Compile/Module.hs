@@ -29,7 +29,6 @@ import qualified Data.Array.Accelerate.LLVM.Native.Debug            as Debug
 import Control.Exception
 import Control.Concurrent
 import Data.List
-import Foreign.LibFFI
 import Foreign.Ptr
 import Text.Printf
 import Data.ByteString.Short                                        ( ShortByteString )

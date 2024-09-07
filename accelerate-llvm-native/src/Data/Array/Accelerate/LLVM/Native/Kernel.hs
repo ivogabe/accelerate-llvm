@@ -56,7 +56,6 @@ import System.FilePath                                              ( FilePath, 
 import System.IO.Unsafe
 import Control.DeepSeq
 import Data.Typeable
-import Foreign.LibFFI
 import Foreign.Ptr
 import Prettyprinter
 import Data.String
