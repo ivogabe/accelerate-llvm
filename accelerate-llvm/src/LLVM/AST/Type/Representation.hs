@@ -25,7 +25,10 @@ module LLVM.AST.Type.Representation (
 ) where
 
 import Data.Array.Accelerate.Type
+import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.AST.LeftHandSide
 
 import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Downcast
@@ -36,6 +39,7 @@ import qualified LLVM.AST.Type                                      as LLVM
 import Data.List
 import Data.Text.Lazy.Builder
 import Foreign.Ptr
+import Foreign.Storable
 import Formatting
 import Text.Printf
 import qualified Data.ByteString.Short.Char8                        as S8
@@ -83,8 +87,11 @@ data PrimType a where
   PtrPrimType     :: PrimType a -> AddrSpace -> PrimType (Ptr a)    -- pointers (XXX: volatility?)
   ArrayPrimType   :: Word64 -> ScalarType a  -> PrimType a          -- static arrays
   StructPrimType  :: Bool -> TupR PrimType l -> PrimType (Struct l) -- aggregate structures
-  NamedPrimType   :: Label                   -> PrimType a          -- typedef (TODO: add a type witness)
+  NamedPrimType   :: Label -> PrimType a     -> PrimType a          -- typedef
 
+skipTypeAlias :: PrimType a -> PrimType a
+skipTypeAlias (NamedPrimType _ t) = skipTypeAlias t
+skipTypeAlias t = t
 
 -- | All types
 --
@@ -266,11 +273,11 @@ instance Show (Type a) where
   show (PrimType t) = show t
 
 instance Show (PrimType a) where
-  show BoolPrimType              = "Bool"
-  show (ScalarPrimType t)        = show t
-  show (NamedPrimType (Label l)) = S8.unpack l
-  show (ArrayPrimType n t)       = printf "[%d x %s]" n (show t)
-  show (StructPrimType _ t)      = printf "{ %s }" (intercalate ", " (go t))
+  show BoolPrimType                = "Bool"
+  show (ScalarPrimType t)          = show t
+  show (NamedPrimType (Label l) _) = S8.unpack l
+  show (ArrayPrimType n t)         = printf "[%d x %s]" n (show t)
+  show (StructPrimType _ t)        = printf "{ %s }" (intercalate ", " (go t))
     where
       go :: TupR PrimType t -> [String]
       go TupRunit         = []
@@ -292,11 +299,11 @@ formatType = later $ \case
 
 formatPrimType :: Format r (PrimType a -> r)
 formatPrimType = later $ \case
-  BoolPrimType            -> "Bool"
-  ScalarPrimType t        -> bformat formatScalarType t
-  NamedPrimType (Label t) -> bformat string (S8.unpack t)
-  ArrayPrimType n t       -> bformat (squared (int % " x " % formatScalarType)) n t
-  StructPrimType _ t      -> bformat (braced (commaSpaceSep builder)) (go t)
+  BoolPrimType              -> "Bool"
+  ScalarPrimType t          -> bformat formatScalarType t
+  NamedPrimType (Label t) _ -> bformat string (S8.unpack t)
+  ArrayPrimType n t         -> bformat (squared (int % " x " % formatScalarType)) n t
+  StructPrimType _ t        -> bformat (braced (commaSpaceSep builder)) (go t)
     where
       go :: TupR PrimType t -> [Builder]
       go TupRunit         = []
@@ -360,7 +367,7 @@ instance Downcast (Type a) LLVM.Type where
 
 instance Downcast (PrimType a) LLVM.Type where
   downcast BoolPrimType         = LLVM.IntegerType 1
-  downcast (NamedPrimType t)    = LLVM.NamedTypeReference (downcast t)
+  downcast (NamedPrimType t _)  = LLVM.NamedTypeReference (downcast t)
   downcast (ScalarPrimType t)   = downcast t
 #if MIN_VERSION_llvm_hs_pure(15,0,0)
   downcast (PtrPrimType _ a)    = LLVM.PointerType a
@@ -380,3 +387,30 @@ llvmTypeToAccTypeR VoidType = Just TupRunit
 llvmTypeToAccTypeR (PrimType (ScalarPrimType st)) = Just $ TupRsingle st
 llvmTypeToAccTypeR _ = Nothing
 
+primSizeAlignment :: PrimType a -> (Int, Int)
+primSizeAlignment BoolPrimType = (1, 1)
+primSizeAlignment (ScalarPrimType (SingleScalarType tp)) = (sz, sz)
+  where sz = bytesElt $ TupRsingle $ SingleScalarType tp
+primSizeAlignment (ScalarPrimType (VectorScalarType (VectorType n tp))) = (sz * n, sz)
+  where sz = bytesElt $ TupRsingle $ SingleScalarType tp
+primSizeAlignment (PtrPrimType _ _) = (sz, sz)
+  where sz = sizeOf (undefined :: Ptr ())
+primSizeAlignment (ArrayPrimType n tp) = (sz * fromIntegral n, sz)
+  where sz = bytesElt (TupRsingle tp)
+primSizeAlignment (StructPrimType False tup) = (makeAligned sz a, a)
+  where (sz, a) = primTupSizeAlignment tup
+primSizeAlignment (StructPrimType True _) = internalError "Packed structs not supported"
+primSizeAlignment (NamedPrimType _ tp) = primSizeAlignment tp
+
+primTupSizeAlignment :: TupR PrimType l -> (Int, Int)
+primTupSizeAlignment = foldl f (0, 1) . flattenTupR
+  where
+    f :: (Int, Int) -> Exists PrimType -> (Int, Int)
+    f (sz1, a1) (Exists tp) = (makeAligned sz1 a2 + sz2, max a1 a2)
+      where
+        (sz2, a2) = primSizeAlignment tp
+
+makeAligned :: Int -> Int -> Int
+makeAligned cursor align = cursor + m
+  where
+    m = -cursor `mod` align

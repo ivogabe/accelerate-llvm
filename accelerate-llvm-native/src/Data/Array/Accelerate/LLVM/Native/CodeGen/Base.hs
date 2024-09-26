@@ -46,16 +46,19 @@ import Data.String
 import qualified Data.ByteString.Short.Char8                        as S8
 
 -- The struct passed as argument to a call contains:
---   * An integer to denote the index of the next chunk to be started
---   * An integer to denote the number of threads currently working on this task
---   * Padding to assure that the environment is aligned by 2 cache lines
---     (The size of the header is now 2 cache lines)
---
--- The integers are incremented with atomic instructions.
-type Header = Vec 32 Int32
+--  * work_function: ptr
+--  * continuation: ptr, u32 (program, location)
+--  * active_threads: u32,
+--  * work_index: u32,
+--  * In the future, perhaps also store a work_size: u32
+type Header = (((((Ptr Int8), Ptr Int8), Word32), Word32), Word32)
 
-headerType :: PrimType Header
-headerType = ScalarPrimType scalarType
+headerType :: TupR PrimType Header
+headerType = TupRsingle primType
+  `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle primType
 
 type KernelType env = Ptr (Struct (Header, Struct (MarshalEnv env))) -> Bool
 
@@ -63,16 +66,15 @@ bindHeaderEnv
   :: forall env. Env AccessGroundR env
   -> ( PrimType (Ptr (Struct (Header, Struct (MarshalEnv env))))
      , CodeGen Native ()
-     , Operand (Ptr Int32)
-     , Operand (Ptr Int32)
+     , Operand (Ptr Word32)
+     , Operand (Ptr Word32)
      , Gamma env
      )
 bindHeaderEnv env = 
   ( argTp
   , do
-      instr_ $ downcast $ nameHeader := GetStructElementPtr headerType arg (TupleIdxLeft TupleIdxSelf)
-      instr_ $ downcast $ nameIndex := GetVecElementPtr TypeInt32 header (integral TypeInt32 0)
-      instr_ $ downcast $ nameActiveThreads := GetVecElementPtr TypeInt32 header (integral TypeInt32 1)
+      instr_ $ downcast $ nameIndex := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameActiveThreads := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ "env" := GetStructElementPtr envTp arg (TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
@@ -80,12 +82,10 @@ bindHeaderEnv env =
   , gamma
   )
   where
-    argTp = PtrPrimType (StructPrimType False (TupRsingle headerType `TupRpair` TupRsingle envTp)) defaultAddrSpace
+    argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp)) defaultAddrSpace
     (envTp, extractEnv, gamma) = bindEnv env
 
-    nameHeader = "header"
     nameIndex = "worksteal.index"
     nameActiveThreads = "worksteal.activethreads"
 
     arg = LocalReference (PrimType argTp) "arg"
-    header = LocalReference (PrimType (PtrPrimType headerType defaultAddrSpace)) nameHeader

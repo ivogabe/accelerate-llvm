@@ -209,40 +209,39 @@ iterFromTo tp start end seed body =
   Loop.iterFromStepTo tp start (liftInt 1) end seed body
 
 workstealLoop
-    :: Operand (Ptr Int32)                  -- index into work
-    -> Operand (Ptr Int32)                  -- number of threads that are working
-    -> Operand Int32                        -- size of total work
-    -> (Operand Int32 -> StateT (Operands s) (CodeGen Native) ())
+    :: Operand (Ptr Word32)                 -- index into work
+    -> Operand (Ptr Word32)                 -- number of threads that are working
+    -> Operand Word32                        -- size of total work
+    -> (Operand Word32 -> StateT (Operands s) (CodeGen Native) ())
     -> StateT (Operands s) (CodeGen Native) ()
-workstealLoop counter activeThreads size doWork = do
+workstealLoop counter _activeThreads size doWork = do
   start    <- lift $ newBlock "worksteal.start"
   work     <- lift $ newBlock "worksteal.loop.work"
   exit     <- lift $ newBlock "worksteal.exit"
-  exitLast <- lift $ newBlock "worksteal.exit.last"
   finished <- lift $ newBlock "worksteal.finished"
 
   -- Check whether there might be work for us
   initialCounter <- lift $ instr' $ Load scalarType NonVolatile counter
-  initialCondition <- lift $ lt singleType (OP_Int32 initialCounter) (OP_Int32 size)
-  lift $ cbr initialCondition start exitLast
+  initialCondition <- lift $ lt singleType (OP_Word32 initialCounter) (OP_Word32 size)
+  _ <- lift $ cbr initialCondition start exit
 
-  lift $ setBlock start
+  _ <- lift $ setBlock start
   -- Might be work for us!
   -- First mark that this thread is doing work.
-  lift $ atomicAdd Acquire activeThreads (integral TypeInt32 1)
-  startIndex <- lift $ atomicAdd Unordered counter (integral TypeInt32 1)
-  startCondition <- lift $ lt singleType (OP_Int32 startIndex) (OP_Int32 size)
-  lift $ cbr startCondition work exit
+  -- _ <- lift $ atomicAdd Acquire activeThreads (integral TypeWord32 1)
+  startIndex <- lift $ atomicAdd Unordered counter (integral TypeWord32 1)
+  startCondition <- lift $ lt singleType (OP_Word32 startIndex) (OP_Word32 size)
+  _ <- lift $ cbr startCondition work exit
 
-  lift $ setBlock work
+  _ <- lift $ setBlock work
   indexName <- lift $ freshLocalName
   let index = LocalReference type' indexName
 
   -- Already claim the next work, to hide the latency of the atomic instruction
-  nextIndex <- lift $ atomicAdd Unordered counter (integral TypeInt32 1)
+  nextIndex <- lift $ atomicAdd Unordered counter (integral TypeWord32 1)
 
   doWork index
-  condition <- lift $ lt singleType (OP_Int32 nextIndex) (OP_Int32 size)
+  condition <- lift $ lt singleType (OP_Word32 nextIndex) (OP_Word32 size)
 
   -- Append the phi node to the start of the 'work' block.
   -- We can only do this now, as we need to have 'nextIndex', and know the
@@ -253,7 +252,7 @@ workstealLoop counter activeThreads size doWork = do
   lift $ cbr condition work exit
 
   lift $ setBlock exit
-  -- Decrement activeThreads
+  {- -- Decrement activeThreads
   remaining <- lift $ atomicAdd Release activeThreads (integral TypeInt32 (-1))
   -- If 'activeThreads' was 1 (now 0), then all work is definitely done.
   -- Note that there may be multiple threads returning true here.
@@ -269,22 +268,22 @@ workstealLoop counter activeThreads size doWork = do
   --    will see the counter ever drop to 0.
   -- Hence we get a unique thread to continue the computation after this kernel.
   casResult <- lift $ instr' $ CmpXchg TypeInt32 NonVolatile activeThreads (integral TypeInt32 0) (integral TypeInt32 1) (CrossThread, Monotonic) Monotonic
-  last <- lift $ instr' $ ExtractValue primType (TupleIdxRight TupleIdxSelf) casResult
-  lift $ retval_ last
+  last' <- lift $ instr' $ ExtractValue primType (TupleIdxRight TupleIdxSelf) casResult
+  lift $ retval_ last'
 
   lift $ setBlock finished
-  -- Work was already finished
+  -- Work was already finished -}
   lift $ retval_ $ boolean False
 
   -- lift $ setBlock dummy -- without this, the previous block always returns True for some reason
   
 
-workstealChunked :: ShapeR sh -> Operand (Ptr Int32) -> Operand (Ptr Int32) -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)), StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
+workstealChunked :: ShapeR sh -> Operand (Ptr Word32) -> Operand (Ptr Word32) -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)), StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
 workstealChunked shr counter activeThreads sh tys loopwork = do
   chunkSz <- lift $ chunkSize' shr sh
   chunkCounts <- lift $ chunkCount shr sh chunkSz
   chunkCnt <- lift $ shapeSize shr chunkCounts
-  chunkCnt' :: Operand Int32 <- lift $ instr' $ Trunc boundedType boundedType $ op TypeInt chunkCnt
+  chunkCnt' :: Operand Word32 <- lift $ instr' $ Trunc boundedType boundedType $ op TypeInt chunkCnt
   workstealLoop counter activeThreads chunkCnt' $ \chunkLinearIndex -> do
     chunkLinearIndex' <- lift $ instr' $ Ext boundedType boundedType chunkLinearIndex
     chunkIndex <- lift $ indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
@@ -377,7 +376,7 @@ chunkEnd (ShapeRsnoc shr) (OP_Pair sh0 sz0) (OP_Pair sh1 sz1) (OP_Pair sh2 sz2) 
   sz3' <- A.min singleType sz3 sz0
   return $ OP_Pair sh3 sz3'
 
-atomicAdd :: MemoryOrdering -> Operand (Ptr Int32) -> Operand Int32 -> CodeGen Native (Operand Int32)
+atomicAdd :: MemoryOrdering -> Operand (Ptr Word32) -> Operand Word32 -> CodeGen Native (Operand Word32)
 atomicAdd ordering ptr increment = do
   instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)
 
@@ -421,5 +420,5 @@ putcharH = void $ lift $ putchar $ liftInt 72
 printShape :: ShapeR sh -> Operands sh -> CodeGen Native ()
 printShape ShapeRz _ = void $ putchar $ liftInt $ 65+25
 printShape (ShapeRsnoc shr) (OP_Pair sh sz) = do
-  putchar =<< add numType (liftInt 48) sz
+  _ <- putchar =<< add numType (liftInt 48) sz
   printShape shr sh

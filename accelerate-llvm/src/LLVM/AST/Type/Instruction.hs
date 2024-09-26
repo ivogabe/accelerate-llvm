@@ -430,7 +430,7 @@ instance Downcast (Instruction a) LLVM.Instruction where
     LoadPtr v p           -> LLVM.Load (downcast v) (downcast $ typeOf p) (downcast p) atomicity alignment md
     GetElementPtr t n i   -> LLVM.GetElementPtr inbounds (downcast t) (downcast n) (downcast i) md
     GetStructElementPtr _ n i -> case typeOf n of
-      (PrimType (PtrPrimType t@(StructPrimType _ tp) _)) ->
+      (PrimType (PtrPrimType t@(skipTypeAlias -> StructPrimType _ tp) _)) ->
                              LLVM.GetElementPtr inbounds (downcast t) (downcast n) [constant (0 :: Int), constant (fromIntegral $ tupleIdxToInt tp i :: Int32)] md
       _ -> internalError "Struct ptr impossible"
     GetVecElementPtr _ n i -> case typeOf n of

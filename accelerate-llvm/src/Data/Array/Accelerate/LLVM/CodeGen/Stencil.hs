@@ -44,12 +44,12 @@ import Prelude
 
 -- Stencil boundary conditions
 --
-data IRBoundary arch genv t where
-  IRClamp     :: IRBoundary arch genv t
-  IRMirror    :: IRBoundary arch genv t
-  IRWrap      :: IRBoundary arch genv t
-  IRConstant  :: Operands e -> IRBoundary arch genv (Array sh e)
-  IRFunction  :: IRFun1 arch genv (sh -> e) -> IRBoundary arch genv (Array sh e)
+data IRBoundary arch t where
+  IRClamp     :: IRBoundary arch t
+  IRMirror    :: IRBoundary arch t
+  IRWrap      :: IRBoundary arch t
+  IRConstant  :: Operands e -> IRBoundary arch (Array sh e)
+  IRFunction  :: IRFun1 arch (sh -> e) -> IRBoundary arch (Array sh e)
 
 
 -- Generate the stencil pattern including boundary conditions
@@ -58,10 +58,10 @@ stencilAccess
     :: HasCallStack
     => Gamma genv
     -> StencilR sh e stencil
-    -> Maybe (IRBoundary arch genv (Array sh e))
+    -> Maybe (IRBoundary arch (Array sh e))
     -> Arg genv (In sh e)
     -> Operands sh
-    -> IRExp arch genv stencil
+    -> IRExp arch stencil
 stencilAccess env sR mbndy arr =
   case mbndy of
     Nothing   -> goR sR (inbounds env      arr)
@@ -71,9 +71,9 @@ stencilAccess env sR mbndy arr =
     -- dimension is Z.
     --
     goR :: StencilR sh e stencil
-        -> (Operands sh -> IRExp arch genv e)
+        -> (Operands sh -> IRExp arch e)
         -> Operands sh
-        -> IRExp arch genv stencil
+        -> IRExp arch stencil
     goR (StencilRunit3 _) rf ix
       = let (z, i) = unindex ix
             rf' d  = do d' <- A.add numType i (int d)
@@ -190,7 +190,7 @@ inbounds
     :: Gamma genv
     -> Arg genv (In sh e)
     -> Operands sh
-    -> IRExp arch genv e
+    -> IRExp arch e
 inbounds = readArrayIndex
   
 
@@ -200,10 +200,10 @@ inbounds = readArrayIndex
 bounded
     :: forall sh e arch genv. HasCallStack
     => Gamma genv
-    -> IRBoundary arch genv (Array sh e)
+    -> IRBoundary arch (Array sh e)
     -> Arg genv (In sh e)
     -> Operands sh
-    -> IRExp arch genv e
+    -> IRExp arch e
 bounded env bndy array@(ArgArray _ (ArrayR shr tp) _ _) ix = do
   let sh = arraySize array env
   case bndy of

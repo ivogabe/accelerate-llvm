@@ -24,6 +24,6 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 class CompileForeignExp arch where
   foreignExp :: A.Foreign asm
              => asm (x -> y)
-             -> Maybe (IRFun1 arch () (x -> y))
+             -> Maybe (IRFun1 arch (x -> y))
   foreignExp _ = Nothing
 

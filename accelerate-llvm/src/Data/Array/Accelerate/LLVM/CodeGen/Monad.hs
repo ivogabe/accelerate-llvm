@@ -30,7 +30,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Monad (
 
   -- basic blocks
   Block,
-  newBlock, setBlock, getBlock, beginBlock, createBlocks,
+  newBlock, newBlockNamed, setBlock, getBlock, beginBlock, createBlocks,
 
   -- instructions
   instr, instr', do_, return_, retval_, br, cbr, switch, phi, phi', phi1,
@@ -119,12 +119,13 @@ liftCodeGen :: LLVM arch a -> CodeGen arch a
 liftCodeGen = CodeGen . lift
 
 codeGenFunction
-  :: forall arch f. (HasCallStack, Target arch, Intrinsic arch, Result f ~ Bool)
+  :: forall arch f t. (HasCallStack, Target arch, Intrinsic arch, Result f ~ t, Result t ~ t)
   => ShortByteString
-  -> (GlobalFunctionDefinition Bool -> GlobalFunctionDefinition f)
+  -> Type t
+  -> (GlobalFunctionDefinition t -> GlobalFunctionDefinition f)
   -> CodeGen arch ()
   -> LLVM arch (Module f)
-codeGenFunction name bind body = do
+codeGenFunction name returnTp bind body = do
   -- Execute the CodeGen monad and retrieve the code of the function and final state.
   (code, st) <- runStateT
     ( runCodeGen $ do
@@ -155,7 +156,7 @@ codeGenFunction name bind body = do
     , moduleSourceFileName   = B.empty
     , moduleDataLayout       = targetDataLayout @arch
     , moduleTargetTriple     = targetTriple @arch
-    , moduleMain             = bind $ Body (PrimType BoolPrimType) Nothing (GlobalFunctionBody (Label name) code)
+    , moduleMain             = bind $ Body returnTp Nothing (GlobalFunctionBody (Label name) code)
     , moduleOtherDefinitions = typeDefs ++ symbols ++ metadata
     }
 
@@ -208,6 +209,11 @@ newBlock nm =
     in
     ( next, s { blocksAllocated = 1 + idx } )
 
+-- Variant of newBlock, where the caller should assure that the name is unique
+newBlockNamed :: HasCallStack => String -> Block
+newBlockNamed label = Block (fromString label) Seq.empty err
+  where
+    err = internalError ("block `" % string % "' has no terminator") label
 
 -- | Add this block to the block stream. Any instructions pushed onto the stream
 -- by 'instr' and friends will now apply to this block.
@@ -329,8 +335,11 @@ cbr (OP_Bool cond) t f = terminate $ CondBr cond (blockLabel t) (blockLabel f)
 
 -- | Switch statement. Return the name of the block that was branched from.
 --
-switch :: HasCallStack => Operands TAG -> Block -> [(TAG, Block)] -> CodeGen arch Block
-switch tag def eqs = terminate $ Switch (op scalarType tag) (blockLabel def) [(ScalarConstant scalarType t, blockLabel b) | (t,b) <- eqs]
+switch :: forall arch tag. (HasCallStack, IsIntegral tag) => Operands tag -> Block -> [(tag, Block)] -> CodeGen arch Block
+switch tag def eqs = terminate $ Switch (op tp tag) (blockLabel def) [(ScalarConstant tp t, blockLabel b) | (t,b) <- eqs]
+  where
+    tp :: ScalarType tag
+    tp = SingleScalarType $ NumSingleType $ IntegralNumType integralType
 
 -- | Add a phi node to the top of the current block
 --

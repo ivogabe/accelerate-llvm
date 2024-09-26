@@ -58,6 +58,8 @@ category:               Accelerate, Compilers/Interpreters, Concurrency, Data, P
 extra-source-files:
     CHANGELOG.md
     README.md
+    cbits/*.c
+    cbits/*.h
 
 custom-setup
   setup-depends:
@@ -103,6 +105,7 @@ Library
     Data.Array.Accelerate.LLVM.Native.Link.Cache
     Data.Array.Accelerate.LLVM.Native.Link.Object
     Data.Array.Accelerate.LLVM.Native.Link.Runtime
+    Data.Array.Accelerate.LLVM.Native.Link.Schedule
 
     Data.Array.Accelerate.LLVM.Native.Embed
 
@@ -184,6 +187,12 @@ Library
           process                       >= 1.4.3
         , unix                          >= 2.7
 
+  c-sources:
+    cbits/scheduler.c
+    cbits/runtime.c
+    cbits/program.c
+
+  cc-options: -O2 -Wall -Wextra
 
 test-suite nofib-llvm-native
   type:                 exitcode-stdio-1.0

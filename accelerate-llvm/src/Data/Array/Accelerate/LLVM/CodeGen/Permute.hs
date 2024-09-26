@@ -48,7 +48,6 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW                                as RMW
 import LLVM.AST.Type.Instruction.Volatile
-import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
@@ -67,14 +66,14 @@ import Prelude
 -- For the atomicRMW case, the function is applied to the new value before
 -- feeding to the atomic instruction to combine with the old.
 --
-data IRPermuteFun arch aenv t where
-  IRPermuteFun :: { combine   :: IRFun2 arch aenv (e -> e -> e)
+data IRPermuteFun arch t where
+  IRPermuteFun :: { combine   :: IRFun2 arch (e -> e -> e)
                   , atomicRMW :: Maybe
                       ( RMWOperation
-                      , IRFun1 arch aenv (e -> e)
+                      , IRFun1 arch (e -> e)
                       )
                   }
-               -> IRPermuteFun arch aenv (e -> e -> e)
+               -> IRPermuteFun arch (e -> e -> e)
 
 
 -- | Analysis and code generation for forward permutation combination function.
@@ -87,10 +86,10 @@ llvmOfPermuteFun
     :: forall arch aenv e. CompileForeignExp arch
     => Fun aenv (e -> e -> e)
     -> Gamma aenv
-    -> IRPermuteFun arch aenv (e -> e -> e)
+    -> IRPermuteFun arch (e -> e -> e)
 llvmOfPermuteFun fun aenv = IRPermuteFun{..}
   where
-    combine   = llvmOfFun2 fun aenv
+    combine   = llvmOfFun2 (compileArrayInstrGamma aenv) fun
     atomicRMW
       -- If the old value is not used (i.e. permute const) then we can just
       -- store the new value directly. Since we do not require the return value
@@ -102,7 +101,7 @@ llvmOfPermuteFun fun aenv = IRPermuteFun{..}
       --
       | Lam lhs (Lam (LeftHandSideWildcard tp) (Body body)) <- fun
       , True                  <- fast tp
-      , fun'                  <- llvmOfFun1 (Lam lhs (Body body)) aenv
+      , fun'                  <- llvmOfFun1 (compileArrayInstrGamma aenv) (Lam lhs (Body body))
       = Just (Exchange, fun')
 
       -- LLVM natively supports atomic operations on integral types only.
@@ -117,7 +116,7 @@ llvmOfPermuteFun fun aenv = IRPermuteFun{..}
       | Lam lhs@(LeftHandSideSingle _) (Lam (LeftHandSideSingle _) (Body body)) <- fun
       , Just (rmw, x)         <- rmwOp body
       , Just x'               <- strengthenE latest x
-      , fun'                  <- llvmOfFun1 (Lam lhs (Body x')) aenv
+      , fun'                  <- llvmOfFun1 (compileArrayInstrGamma aenv) (Lam lhs (Body x'))
       = Just (rmw, fun')
 
       | otherwise

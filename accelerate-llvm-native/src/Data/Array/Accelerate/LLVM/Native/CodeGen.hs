@@ -51,12 +51,13 @@ import Data.Array.Accelerate.LLVM.Native.Target
 import Data.Typeable
 
 import LLVM.AST.Type.Module
+import LLVM.AST.Type.Representation
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Unsafe.Coerce (unsafeCoerce)
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
-import Data.Array.Accelerate.LLVM.CodeGen.Exp (llvmOfFun1, intOfIndex, llvmOfFun2)
+import Data.Array.Accelerate.LLVM.CodeGen.Exp (llvmOfFun1, intOfIndex, llvmOfFun2, compileArrayInstrGamma)
 import Data.Array.Accelerate.Trafo.Desugar (ArrayDescriptor(..))
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic ( when, ifThenElse, eq, fromJust, isJust, liftInt )
 import Data.Array.Accelerate.Analysis.Match (matchShapeR)
@@ -85,7 +86,7 @@ codegen :: ShortByteString
         -> Args env args
         -> LLVM Native (Module (KernelType env))
 codegen name env (Clustered c b) args =
-  codeGenFunction name (LLVM.Lam argTp "arg") $ do
+  codeGenFunction name (PrimType BoolPrimType) (LLVM.Lam argTp "arg") $ do
     extractEnv
     let b' = mapArgs BCAJA b
     (acc, loopsize) <- execStateT (evalCluster (toOnlyAcc c) b' args gamma ()) (mempty, LS ShapeRz OP_Unit)
@@ -208,7 +209,7 @@ instance EvalOp NativeOp where
     | Just Refl <- varsContainsThisShape sh shr2
     , shr1 `isAtDepth'` d
     = lift $ CJ . ir tp <$> do
-      sh2 <- app1 (llvmOfFun1 @Native f gamma) $ multidim shr1 ix
+      sh2 <- app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) $ multidim shr1 ix
       -- let sh' = unsafeCoerce @(GroundVars env sh) @(GroundVars env sh2) sh -- "trust me", the shapeR in the BP should match the shape of the buffer
       let sh' = aprjParameters (groundToExpVar (shapeType shr2) sh) gamma
       i <- intOfIndex shr2 sh' sh2
@@ -236,27 +237,27 @@ instance EvalOp NativeOp where
   -- evalOp _ _ _ _ _ = error "todo: add depth checks to all matches"
   evalOp (d,_,_) _ NMap gamma (Push (Push (Push Env.Empty (BAE _ _)) (BAE (Value' x' (Shape' shr sh)) (BCAN2 _ d'))) (BAE f _))
     = lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr sh) <$> case x' of
-      CJ x | d == d' -> CJ <$> traceIfDebugging ("map" <> show d') (app1 (llvmOfFun1 @Native f gamma) x)
+      CJ x | d == d' -> CJ <$> traceIfDebugging ("map" <> show d') (app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) x)
       _   -> pure CN
   evalOp _ _ NBackpermute _ (Push (Push (Push Env.Empty (BAE (Shape' shr sh) _)) (BAE (Value' x _) _)) _)
     = lift $ pure $ Push Env.Empty $ FromArg $ Value' x $ Shape' shr sh
   evalOp (d',_,is) _ NGenerate gamma (Push (Push Env.Empty (BAE (Shape' shr (CJ sh)) _)) (BAE f (BCAN2 Nothing _d)))
-    | shr `isAtDepth'` d' = traceIfDebugging ("generate" <> show d') $ lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr (CJ sh)) . CJ <$> app1 (llvmOfFun1 @Native f gamma) (multidim shr is)
+    | shr `isAtDepth'` d' = traceIfDebugging ("generate" <> show d') $ lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr (CJ sh)) . CJ <$> app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) (multidim shr is)
     -- | d' == d = error $ "how come we didn't hit the case above?" <> show (d', d, rank shr)
     | otherwise        = pure $ Push Env.Empty $ FromArg $ Value' CN (Shape' shr (CJ sh))
   evalOp (d',_,is) _ NGenerate gamma (Push (Push Env.Empty (BAE (Shape' shr sh) _)) (BAE f (BCAN2 (Just (BP shrO shrI idxTransform _ls)) _d)))
     | not $ shrO `isAtDepth'` d'
     = pure $ Push Env.Empty $ FromArg $ Value' CN (Shape' shr sh)
     | Just Refl <- matchShapeR shrI shr
-    = traceIfDebugging ("generate" <> show d') $ lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr sh) . CJ <$> app1 (llvmOfFun1 @Native (compose f idxTransform) gamma) (multidim shrO is)
+    = traceIfDebugging ("generate" <> show d') $ lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr sh) . CJ <$> app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) (compose f idxTransform)) (multidim shrO is)
     | otherwise = error "bp shapeR doesn't match generate's output"
   -- For Permute, we ignore all the BP info here and simply assume that there is none
   evalOp (d',_,is) _ NPermute gamma (Push (Push (Push (Push (Push Env.Empty
     (BAE (Value' x' (Shape' shrx _))           (BCAN2 _ d))) -- input
-    (BAE (flip (llvmOfFun1 @Native) gamma -> f) _)) -- index function
+    (BAE (llvmOfFun1 @Native (compileArrayInstrGamma gamma) -> f) _)) -- index function
     (BAE (ArrayDescriptor shrl shl bufl, lty)   _)) -- lock
     (BAE (ArrayDescriptor shrt sht buft, tty)   _)) -- target
-    (BAE (flip (llvmOfFun2 @Native) gamma -> c) _)) -- combination function
+    (BAE (llvmOfFun2 @Native (compileArrayInstrGamma gamma) -> c) _)) -- combination function
     | CJ x <- x'
     , d == d'
     = traceIfDebugging ("permute" <> show d') $ lift $ do
@@ -274,7 +275,7 @@ instance EvalOp NativeOp where
     | d == d' = error "case above?"
     | otherwise = pure Env.Empty
   evalOp (d',_,ixs) l NScanl1 gamma (Push (Push _ (BAE (Value' x' sh) (BCAN2 Nothing d))) (BAE f' _))
-    | f <- llvmOfFun2 @Native f' gamma
+    | f <- llvmOfFun2 @Native (compileArrayInstrGamma gamma) f'
     , Lam (lhsToTupR -> ty :: TypeR e) _ <- f'
     , CJ x <- x'
     , d == d'
@@ -288,7 +289,7 @@ instance EvalOp NativeOp where
   evalOp _ _ NFold1 _ _ = error "todo: fold1"
   -- we can ignore the index permutation for folds here
   evalOp (d',_,ixs) l NFold2 gamma (Push (Push _ (BAE (Value' x' (Shape' (ShapeRsnoc shr') (CJ (OP_Pair sh _)))) (BCAN2 _ d))) (BAE f' _))
-    | f <- llvmOfFun2 @Native f' gamma
+    | f <- llvmOfFun2 @Native (compileArrayInstrGamma gamma) f'
     , Lam (lhsToTupR -> ty :: TypeR e) _ <- f'
     , CJ x <- x'
     , d == d'

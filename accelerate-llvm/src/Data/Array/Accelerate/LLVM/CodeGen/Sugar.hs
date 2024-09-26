@@ -38,20 +38,20 @@ import Data.Array.Accelerate.LLVM.CodeGen.Monad
 -- | LLVM IR is in single static assignment, so we need to be able to generate
 -- fresh names for each application of a scalar function or expression.
 --
-type IRExp     arch     aenv t = IROpenExp arch () aenv t
-type MIRExp    arch     aenv t = Maybe (IRExp arch aenv t)
-type IROpenExp arch env aenv t = CodeGen arch (Operands t)
+type IRExp     arch     t = IROpenExp arch () t
+type MIRExp    arch     t = Maybe (IRExp arch t)
+type IROpenExp arch env t = CodeGen arch (Operands t)
 
-type IRFun1 arch aenv t = IROpenFun1 arch () aenv t
-type IRFun2 arch aenv t = IROpenFun2 arch () aenv t
+type IRFun1 arch t = IROpenFun1 arch () t
+type IRFun2 arch t = IROpenFun2 arch () t
 
-data IROpenFun1 arch env aenv t where
-  IRFun1 :: { app1 :: Operands a -> IROpenExp arch (env,a) aenv b }
-         -> IROpenFun1 arch env aenv (a -> b)
+data IROpenFun1 arch env t where
+  IRFun1 :: { app1 :: Operands a -> IROpenExp arch (env,a) b }
+         -> IROpenFun1 arch env (a -> b)
 
-data IROpenFun2 arch env aenv t where
-  IRFun2 :: { app2 :: Operands a -> Operands b -> IROpenExp arch ((env,a),b) aenv c }
-         -> IROpenFun2 arch env aenv (a -> b -> c)
+data IROpenFun2 arch env t where
+  IRFun2 :: { app2 :: Operands a -> Operands b -> IROpenExp arch ((env,a),b) c }
+         -> IROpenFun2 arch env (a -> b -> c)
 
 
 -- Arrays

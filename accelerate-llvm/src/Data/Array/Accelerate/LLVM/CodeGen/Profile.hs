@@ -39,14 +39,15 @@ import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 
 import Data.Array.Accelerate.Sugar.Elt
+import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Debug.Internal                         ( debuggingIsEnabled, SrcLoc, Zone )
 
 import Control.Monad
 import Data.Char
 
 
-call' :: GlobalFunction t -> Arguments t -> CodeGen arch (Operands (Result t))
-call' f args = call f args [NoUnwind, NoDuplicate]
+call1 :: GlobalFunction t -> Arguments t -> CodeGen arch (Operands (Result t))
+call1 f args = call f args [NoUnwind, NoDuplicate]
 
 lam :: IsPrim a => GlobalFunction t -> GlobalFunction (a -> t)
 lam = lamUnnamed primType
@@ -67,6 +68,13 @@ global_string str = do
     }
   return (nm, l)
 
+locationDataType :: PrimType (Struct ((((Ptr Int8, Ptr Int8), Ptr Int8), Int32), Int32))
+locationDataType = StructPrimType False
+  $ TupRsingle primType
+  `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle primType
 
 -- struct ___tracy_source_location_data
 -- {
@@ -148,7 +156,7 @@ alloc_srcloc_name l src fun nm
           functionSz = ConstantOperand $ ScalarConstant scalarType (fl-1) -- null
           nameSz     = ConstantOperand $ ScalarConstant scalarType (nl-1) -- null
       --
-      call'
+      call1
         (lam
           $ lam
           $ lam
@@ -177,9 +185,9 @@ zone_begin line src fun name colour
   | not debuggingIsEnabled = return (constant (eltR @SrcLoc) 0)
   | otherwise              = do
       srcloc <- source_location_data name fun src line colour
-      let srcloc_ty = PtrPrimType (NamedPrimType "___tracy_source_location_data") defaultAddrSpace
+      let srcloc_ty = PtrPrimType (NamedPrimType "___tracy_source_location_data" locationDataType) defaultAddrSpace
       --
-      call'
+      call1
         (lamUnnamed srcloc_ty
           $ lam
           $ Body (type' @SrcLoc) (Just Tail) "___tracy_emit_zone_begin")
@@ -198,12 +206,12 @@ zone_begin_alloc line src fun name colour
   | not debuggingIsEnabled = return (constant (eltR @Zone) 0)
   | otherwise              = do
       srcloc <- alloc_srcloc_name line src fun name
-      zone   <- call'
+      zone   <- call1
         (lam $ lam $ Body (type' @SrcLoc) (Just Tail) "___tracy_emit_zone_begin_alloc")
         (ArgumentsCons (op primType srcloc) []
           $ ArgumentsCons (ConstantOperand (ScalarConstant scalarType (1 :: Int32))) []
             ArgumentsNil)
-      when (colour /= 0) $ void $ call'
+      when (colour /= 0) $ void $ call1
           (lam $ lam $ Body (type' :: Type ()) (Just Tail) "___tracy_emit_zone_color")
           (ArgumentsCons (op primType zone) []
             $ ArgumentsCons (ConstantOperand (ScalarConstant scalarType colour)) []
@@ -215,7 +223,7 @@ zone_end
     -> CodeGen arch ()
 zone_end zone
   | not debuggingIsEnabled = return ()
-  | otherwise = void $ call'
+  | otherwise = void $ call1
       (lam (Body VoidType (Just Tail) "___tracy_emit_zone_end"))
       (ArgumentsCons (op primType zone) [] ArgumentsNil)
 

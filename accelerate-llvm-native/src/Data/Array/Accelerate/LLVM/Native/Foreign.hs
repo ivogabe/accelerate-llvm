@@ -75,7 +75,7 @@ data ForeignAcc f where
 --
 data ForeignExp f where
   ForeignExp :: String
-             -> IRFun1 Native () (x -> y)
+             -> IRFun1 Native (x -> y)
              -> ForeignExp (x -> y)
 
 deriving instance Typeable ForeignAcc

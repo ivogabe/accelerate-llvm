@@ -1,3 +1,4 @@
+{-# LANGUAGE EmptyCase           #-}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RankNTypes          #-}
@@ -30,7 +31,6 @@ import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Slice
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Vec
-import Data.Array.Accelerate.Trafo.Exp.Substitution                 ( rebuildNoArrayInstr )
 import Data.Array.Accelerate.Type
 import qualified Data.Array.Accelerate.Sugar.Foreign                as A
 
@@ -61,22 +61,42 @@ import GHC.TypeNats
 
 {-# INLINEABLE llvmOfFun1 #-}
 llvmOfFun1
-    :: (HasCallStack, CompileForeignExp arch)
-    => Fun genv (a -> b)
-    -> Gamma genv
-    -> IRFun1 arch genv (a -> b)
-llvmOfFun1 (Lam lhs (Body body)) genv = IRFun1 $ \x -> llvmOfOpenExp body (Empty `pushE` (lhs, x)) genv
-llvmOfFun1  _                    _    = internalError "impossible evaluation"
+    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    => CompileArrayInstr arch arr
+    -> PreOpenFun arr () (a -> b)
+    -> IRFun1 arch (a -> b)
+llvmOfFun1 arrayInstr (Lam lhs (Body body))
+  = IRFun1 $ \x -> llvmOfOpenExp arrayInstr body (Empty `pushE` (lhs, x))
+llvmOfFun1 _ _ = internalError "impossible evaluation"
 
 {-# INLINEABLE llvmOfFun2 #-}
 llvmOfFun2
-    :: (HasCallStack, CompileForeignExp arch)
-    => Fun genv (a -> b -> c)
-    -> Gamma genv
-    -> IRFun2 arch genv (a -> b -> c)
-llvmOfFun2 (Lam lhs1 (Lam lhs2 (Body body))) genv = IRFun2 $ \x y -> llvmOfOpenExp body (Empty `pushE` (lhs1, x) `pushE` (lhs2, y)) genv
-llvmOfFun2 _                                 _    = internalError "impossible evaluation"
+    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    => CompileArrayInstr arch arr
+    -> PreOpenFun arr () (a -> b -> c)
+    -> IRFun2 arch (a -> b -> c)
+llvmOfFun2 arrayInstr (Lam lhs1 (Lam lhs2 (Body body)))
+  = IRFun2 $ \x y -> llvmOfOpenExp arrayInstr body (Empty `pushE` (lhs1, x) `pushE` (lhs2, y))
+llvmOfFun2 _ _ = internalError "impossible evaluation"
 
+type CompileArrayInstr arch arr = forall env s t. arr (s -> t) -> Operands s -> IROpenExp arch env t
+
+compileArrayInstrGamma :: forall arch genv. Gamma genv -> CompileArrayInstr arch (ArrayInstr genv)
+compileArrayInstrGamma genv arr arg = case arr of
+  Parameter var -> param var
+  Index var -> linearIndex var arg
+  where
+    linearIndex :: GroundVar genv (Buffer e) -> Operands Int -> IROpenExp arch env e
+    linearIndex var@(Var (GroundRbuffer tp) _) idx = fmap (ir tp) <$> readBuffer tp integralType irbuffer $ op scalarTypeInt idx
+      where
+        irbuffer = aprjBuffer var genv
+    linearIndex (Var (GroundRscalar tp) _) _ = bufferImpossible tp
+
+    param :: ExpVar genv e -> IROpenExp arch env e
+    param var@(Var tp _) = return $ ir tp $ aprjParameter var genv
+
+compileNoArrayInstr :: CompileArrayInstr arch NoArrayInstr
+compileNoArrayInstr arr _ = case arr of {}
 
 -- | Convert an open scalar expression into a sequence of LLVM Operands instructions.
 -- Code is generated in depth first order, and uses a monad to collect the
@@ -84,23 +104,23 @@ llvmOfFun2 _                                 _    = internalError "impossible ev
 --
 {-# INLINEABLE llvmOfOpenExp #-}
 llvmOfOpenExp
-    :: forall arch env genv _t. (HasCallStack, CompileForeignExp arch)
-    => OpenExp env genv _t
+    :: forall arr arch env _t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    => CompileArrayInstr arch arr
+    -> PreOpenExp arr env _t
     -> Val env
-    -> Gamma genv
-    -> IROpenExp arch env genv _t
-llvmOfOpenExp top env genv = cvtE top
+    -> IROpenExp arch env _t
+llvmOfOpenExp arrayInstr top env = cvtE top
   where
 
-    cvtF1 :: OpenFun env genv (a -> b) -> IROpenFun1 arch env genv (a -> b)
-    cvtF1 (Lam lhs (Body body)) = IRFun1 $ \x -> llvmOfOpenExp body (env `pushE` (lhs, x)) genv
+    cvtF1 :: PreOpenFun arr env (a -> b) -> IROpenFun1 arch env (a -> b)
+    cvtF1 (Lam lhs (Body body)) = IRFun1 $ \x -> llvmOfOpenExp arrayInstr body (env `pushE` (lhs, x))
     cvtF1 _                     = internalError "impossible evaluation"
 
-    cvtE :: forall t. OpenExp env genv t -> IROpenExp arch env genv t
+    cvtE :: forall t. PreOpenExp arr env t -> IROpenExp arch env t
     cvtE exp =
       case exp of
         Let lhs bnd body            -> do x <- cvtE bnd
-                                          llvmOfOpenExp body (env `pushE` (lhs, x)) genv
+                                          llvmOfOpenExp arrayInstr body (env `pushE` (lhs, x))
         Evar (Var tp ix)            -> return $ ir tp $ prj ix env
         Const tp c                  -> return $ ir tp $ scalar tp c
         PrimConst c                 -> let tp = (SingleScalarType $ primConstType c)
@@ -111,15 +131,14 @@ llvmOfOpenExp top env genv = cvtE top
         Pair e1 e2                  -> join $ pair <$> cvtE e1 <*> cvtE e2
         VecPack   vecr e            -> vecPack   vecr =<< cvtE e
         VecUnpack vecr e            -> vecUnpack vecr =<< cvtE e
-        Foreign tp asm f x          -> foreignE tp asm (rebuildNoArrayInstr f) =<< cvtE x
+        Foreign tp asm f x          -> foreignE tp asm f =<< cvtE x
         Case tag xs mx              -> A.caseof (expType (snd (head xs))) (cvtE tag) [(t,cvtE e) | (t,e) <- xs] (fmap cvtE mx)
         Cond c t e                  -> cond (expType t) (cvtE c) (cvtE t) (cvtE e)
         IndexSlice slice slix sh    -> indexSlice slice <$> cvtE slix <*> cvtE sh
         IndexFull slice slix sh     -> indexFull slice  <$> cvtE slix <*> cvtE sh
         ToIndex shr sh ix           -> join $ intOfIndex shr <$> cvtE sh <*> cvtE ix
         FromIndex shr sh ix         -> join $ indexOfInt shr <$> cvtE sh <*> cvtE ix
-        ArrayInstr (Parameter var) _ -> param var
-        ArrayInstr (Index var) ix   -> linearIndex var =<< cvtE ix
+        ArrayInstr arr arg          -> arrayInstr arr =<< cvtE arg
         ShapeSize shr sh            -> shapeSize shr =<< cvtE sh
         While c f x                 -> while (expType x) (cvtF1 c) (cvtF1 f) (cvtE x)
         Coerce t1 t2 x              -> coerce t1 t2 =<< cvtE x
@@ -168,45 +187,36 @@ llvmOfOpenExp top env genv = cvtE top
         singleTp :: SingleType single -- GHC 8.4 cannot infer this type for some reason
         VectorType n singleTp = vecRvector vecr
 
-    linearIndex :: GroundVar genv (Buffer e) -> Operands Int -> IROpenExp arch env genv e
-    linearIndex var@(Var (GroundRbuffer tp) _) idx = fmap (ir tp) <$> readBuffer tp integralType irbuffer $ op scalarTypeInt idx
-      where
-        irbuffer = aprjBuffer var genv
-    linearIndex (Var (GroundRscalar tp) _) _ = bufferImpossible tp
-
-    param :: ExpVar genv e -> IROpenExp arch env genv e
-    param var@(Var tp _) = return $ ir tp $ aprjParameter var genv
-
-    pair :: Operands t1 -> Operands t2 -> IROpenExp arch env genv (t1, t2)
+    pair :: Operands t1 -> Operands t2 -> IROpenExp arch env (t1, t2)
     pair a b = return $ OP_Pair a b
 
-    bool :: IROpenExp arch env genv PrimBool
-         -> IROpenExp arch env genv Bool
+    bool :: IROpenExp arch env PrimBool
+         -> IROpenExp arch env Bool
     bool p = instr . IntToBool integralType . op integralType =<< p
 
-    primbool :: IROpenExp arch env genv Bool
-             -> IROpenExp arch env genv PrimBool
+    primbool :: IROpenExp arch env Bool
+             -> IROpenExp arch env PrimBool
     primbool b = instr . BoolToInt integralType . A.unbool =<< b
 
     cond :: TypeR a
-         -> IROpenExp arch env genv PrimBool
-         -> IROpenExp arch env genv a
-         -> IROpenExp arch env genv a
-         -> IROpenExp arch env genv a
+         -> IROpenExp arch env PrimBool
+         -> IROpenExp arch env a
+         -> IROpenExp arch env a
+         -> IROpenExp arch env a
     cond tp p t e =
       A.ifThenElse (tp, bool p) t e
 
     while :: TypeR a
-          -> IROpenFun1 arch env genv (a -> PrimBool)
-          -> IROpenFun1 arch env genv (a -> a)
-          -> IROpenExp  arch env genv a
-          -> IROpenExp  arch env genv a
+          -> IROpenFun1 arch env (a -> PrimBool)
+          -> IROpenFun1 arch env (a -> a)
+          -> IROpenExp  arch env a
+          -> IROpenExp  arch env a
     while tp p f x =
       L.while tp (bool . app1 p) (app1 f) =<< x
 
     land :: Operands PrimBool
          -> Operands PrimBool
-         -> IROpenExp arch env genv PrimBool
+         -> IROpenExp arch env PrimBool
     land x y = do
       x' <- instr (IntToBool integralType (op integralType x))
       y' <- instr (IntToBool integralType (op integralType y))
@@ -214,7 +224,7 @@ llvmOfOpenExp top env genv = cvtE top
 
     lor :: Operands PrimBool
         -> Operands PrimBool
-        -> IROpenExp arch env genv PrimBool
+        -> IROpenExp arch env PrimBool
     lor x y = do
       x' <- instr (IntToBool integralType (op integralType x))
       y' <- instr (IntToBool integralType (op integralType y))
@@ -223,23 +233,23 @@ llvmOfOpenExp top env genv = cvtE top
     foreignE :: A.Foreign asm
              => TypeR b
              -> asm    (a -> b)
-             -> Fun () (a -> b)
+             -> PreOpenFun NoArrayInstr () (a -> b)
              -> Operands a
-             -> IRExp arch () b
+             -> IRExp arch b
     foreignE _ asm no x =
       case foreignExp asm of
         Just f                           -> app1 f x
-        Nothing | Lam lhs (Body b) <- no -> llvmOfOpenExp b (Empty `pushE` (lhs, x)) Empty
+        Nothing | Lam lhs (Body b) <- no -> llvmOfOpenExp compileNoArrayInstr b (Empty `pushE` (lhs, x))
         _                                -> error "when a grid's misaligned with another behind / that's a moiré..."
 
-    coerce :: ScalarType a -> ScalarType b -> Operands a -> IROpenExp arch env genv b
+    coerce :: ScalarType a -> ScalarType b -> Operands a -> IROpenExp arch env b
     coerce s t x
       | Just Refl <- matchScalarType s t = return $ x
       | otherwise                        = ir t <$> instr' (BitCast t (op s x))
 
     primFun :: PrimFun (a -> r)
-            -> OpenExp env genv a
-            -> IROpenExp arch env genv r
+            -> PreOpenExp arr env a
+            -> IROpenExp arch env r
     primFun f x =
       case f of
         PrimAdd t                 -> A.uncurry (A.add t)            =<< cvtE x
