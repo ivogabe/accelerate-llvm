@@ -683,7 +683,11 @@ convert (Alet lhs (NewRef (GroundRbuffer tp)) next)
 
       ptr <- getPtr'
       ptr' <- instr' $ PtrCast primType ptr
-      _ <- instr' $ Store NonVolatile ptr' $ integral TypeWord initialRefCount
+      _ <- instr' $ Store NonVolatile ptr' $ integral TypeWord
+        -- Least significant bit is a tag.
+        -- The reference count of an unfilled Ref is stored in the other bits.
+        -- See: [reference counting for Ref]
+        (initialRefCount * 2 + 1)
 
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }

@@ -106,9 +106,11 @@ prepareProgram (Slam lhs f) accum final =
       case tp of
         -- Intialize reference count of Ref with 1.
         -- Number is shifted by one bit.
+        -- The last bit denotes that this is an unfilled Ref,
+        -- hence we get 0b11 = 3.
         -- See: [reference counting for Ref]
         GroundRbuffer _ -> do
-          poke (plusPtr ptr cursor2) (2 :: Word)
+          poke (plusPtr ptr cursor2) (3 :: Word)
         _ -> return ()
       -- In a separate thread, wait on the MVar and resolve the signal
       runtimeProgramRetain ptr
