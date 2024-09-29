@@ -1,23 +1,23 @@
 #include "types.h"
 
 void accelerate_schedule_after(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter) {
-  if (!accelerate_schedule_after_or(workers, program, location, signal, waiter)) {
+  if (0 == accelerate_schedule_after_or(workers, program, location, signal, waiter)) {
     // Signal is already resolved
     accelerate_schedule(workers, program, location);
   }
 }
 // Tries to schedules this program after the given signal.
 // If the signal is already resolved,
-// this function will not schedule it but instead return false.
+// this function will not schedule it but instead return false (0).
 // If the signal is not resolved,
 // this function will schedule this program after the given signal
 // and retain (increment the reference count of) the program.
-bool accelerate_schedule_after_or(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter) {
+char accelerate_schedule_after_or(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter) {
   // Check if signal is already resolved.
   size_t current = atomic_load_explicit(&signal->state, memory_order_acquire);
   if (current == 1) {
     // Signal is already resolved.
-    return false;
+    return 0;
   }
 
   // Try to store this task in the linked list of waiting tasks for this signal.
@@ -29,12 +29,12 @@ bool accelerate_schedule_after_or(struct Workers *workers, struct Program *progr
   while (true) {
     waiter->next = (struct SignalWaiter*) current;
     if (atomic_compare_exchange_weak_explicit(&signal->state, &current, (size_t) waiter, memory_order_acq_rel, memory_order_acquire)) {
-      return true;
+      return 1;
     }
     if (current == 1) {
       accelerate_program_release(program);
       // Signal was resolved while trying to register this task as waiting.
-      return false;
+      return 0;
     }
   }
 }

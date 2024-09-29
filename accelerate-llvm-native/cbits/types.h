@@ -57,7 +57,7 @@ void accelerate_program_release(struct Program *program);
 void accelerate_schedule(struct Workers *workers, struct Program *program, uint32_t location);
 void accelerate_schedule_owned(struct Workers *workers, struct Program *program, uint32_t location);
 void accelerate_schedule_after(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter);
-bool accelerate_schedule_after_or(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter);
+char accelerate_schedule_after_or(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter);
 
 struct Task accelerate_dequeue(struct Workers *workers);
 

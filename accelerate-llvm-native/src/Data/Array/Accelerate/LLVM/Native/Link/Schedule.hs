@@ -524,10 +524,10 @@ convert (Effect (SignalAwait signals) next)
         go waiter i (idx : idxs) = do
           let blockContinue = if i == 0 then blockNext else newBlockNamed $ blockName nextBlock ++ ".continue." ++ show i
           signal <- getPtr structVars idx
-          p <- call
+          p <- call'
             (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
               LLVM.lamUnnamed primType $ LLVM.lamUnnamed (PtrPrimType typeSignalWaiter defaultAddrSpace) $
-              LLVM.Body (PrimType BoolPrimType) Nothing (Label "accelerate_schedule_after_or"))
+              LLVM.Body (type') Nothing (Label "accelerate_schedule_after_or"))
             (LLVM.ArgumentsCons operandWorkers []
               $ LLVM.ArgumentsCons operandProgram []
               $ LLVM.ArgumentsCons (integral TypeWord32 $ fromIntegral nextBlock) []
@@ -535,11 +535,12 @@ convert (Effect (SignalAwait signals) next)
               $ LLVM.ArgumentsCons waiter []
               LLVM.ArgumentsNil)
             []
-          _ <- cbr p blockAwait blockContinue
+          p' <- instr $ IntToBool TypeWord8 p
+          _ <- cbr p' blockAwait blockContinue
           setBlock blockContinue
           -- Since function may suspend and return here if i == 0, we must again get a pointer to the waiter here.
           waiter' <-
-            if i == 0 then
+            if i == 0 && not (null idxs) then
               instr' $ GetStructElementPtr typeSignalWaiter fullState (tupleLeft stateIdx)
             else
               return waiter
