@@ -38,6 +38,7 @@ import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.AST.Schedule
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Array.Buffer
+import Data.Array.Accelerate.Analysis.Hash.Schedule.Uniform
 import Data.Array.Accelerate.Interpreter                ( evalExp, EvalArrayInstr(..) )
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.LLVM.Native.Kernel
@@ -69,7 +70,8 @@ instance Execute UniformScheduleFun NativeKernel where
 
   linkAfunSchedule schedule =
     NativeLinked
-      (linkSchedule (Hash.hash $ fromString "todo") schedule) schedule
+      (linkSchedule (hashUniformScheduleFun schedule) schedule)
+      schedule
   executeAfunSchedule _ (NativeLinked (NativeProgram fun size imports offset) schedule) =
     prepareProgram schedule start final
     where

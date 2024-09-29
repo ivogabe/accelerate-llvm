@@ -66,13 +66,14 @@ data NativeKernel env where
   NativeKernel
     :: { kernelFunction   :: !(Lifetime (FunPtr (KernelType env)))
        , kernelId         :: {-# UNPACK #-} !ShortByteString
+       , kernelUID        :: {-# UNPACK #-} !UID
        , kernelDescDetail :: String
        , kernelDescBrief  :: String
        }
     -> NativeKernel env
 
 instance NFData' NativeKernel where
-  rnf' (NativeKernel fn !_ s l) = unsafeGetValue fn `seq` rnf s `seq` rnf l
+  rnf' (NativeKernel fn !_ !_ s l) = unsafeGetValue fn `seq` rnf s `seq` rnf l
 
 newtype NativeKernelMetadata f =
   NativeKernelMetadata { kernelArgsSize :: Int }
@@ -89,7 +90,7 @@ instance IsKernel NativeKernel where
     module' <- codegen fullName env cluster args
     obj <- compile uid fullName module'
     funPtr <- link obj
-    return $ NativeKernel funPtr fullName detail brief
+    return $ NativeKernel funPtr fullName uid detail brief
     where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = fromString $ name ++ "-" ++ show uid
@@ -97,14 +98,16 @@ instance IsKernel NativeKernel where
 
   kernelMetadata kernel = NativeKernelMetadata $ sizeOfEnv kernel
 
+  encodeKernel = Left . kernelUID
+
 instance PrettyKernel NativeKernel where
   prettyKernel = PrettyKernelFun go
     where
       go :: OpenKernelFun NativeKernel env t -> Adoc
       go (KernelFunLam _ f) = go f
-      go (KernelFunBody (NativeKernel _ name "" _))
+      go (KernelFunBody (NativeKernel _ name _ "" _))
         = fromString $ take 32 $ toString name
-      go (KernelFunBody (NativeKernel _ name detail brief))
+      go (KernelFunBody (NativeKernel _ name _ detail brief))
         = fromString (take 32 $ toString name)
         <+> flatAlt (group $ line' <> "-- " <> desc)
           ("{- " <> desc <> "-}")

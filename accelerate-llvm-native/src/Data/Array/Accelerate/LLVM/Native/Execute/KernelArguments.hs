@@ -66,7 +66,7 @@ prepareKernel env (NativeKernelMetadata envSize) fun args = do
 
     let
       go :: forall kenv f'. Int -> OpenKernelFun NativeKernel kenv f' -> SArgs env f' -> IO (Exists KernelCall)
-      go cursor (KernelFunBody (NativeKernel funLifetime _ _ _)) ArgsNil
+      go cursor (KernelFunBody (NativeKernel funLifetime _ _ _ _)) ArgsNil
         | cursor == cacheLineSize * 2 + envSize =
           return $ Exists $ KernelCall @kenv (unsafeGetValue funLifetime) foreignPtr
         | otherwise = internalError "Cursor and size do not match. prepareKernel and sizeOfEnv might be inconsistent."
@@ -83,7 +83,7 @@ touchKernel :: forall env f. NativeEnv env -> KernelFun NativeKernel f -> SArgs 
 touchKernel env = go
   where
     go :: OpenKernelFun NativeKernel kenv f' -> SArgs env f' -> IO ()
-    go (KernelFunBody (NativeKernel funLifetime _ _ _)) ArgsNil = touchLifetime funLifetime
+    go (KernelFunBody (NativeKernel funLifetime _ _ _ _)) ArgsNil = touchLifetime funLifetime
     go (KernelFunLam argR fun) (arg :>: args) = do
       touchArg env argR arg
       go fun args
