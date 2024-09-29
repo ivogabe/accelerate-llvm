@@ -55,12 +55,18 @@ void accelerate_program_retain(struct Program *program);
 void accelerate_program_release(struct Program *program);
 
 void accelerate_schedule(struct Workers *workers, struct Program *program, uint32_t location);
+void accelerate_schedule_owned(struct Workers *workers, struct Program *program, uint32_t location);
 void accelerate_schedule_after(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter);
 bool accelerate_schedule_after_or(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter);
 
 struct Task accelerate_dequeue(struct Workers *workers);
 
 void accelerate_signal_resolve(struct Workers *workers, struct Signal *signal);
+
+void accelerate_buffer_retain(void* interior);
+void accelerate_buffer_retain_by(void* interior, uint64_t amount);
+void accelerate_buffer_release(void* interior);
+void accelerate_buffer_release_by(void* interior, uint64_t amount);
 
 inline uintptr_t accelerate_pack(void *pointer, uint16_t tag) {
   const uintptr_t MASK = ~(1ULL << 48);

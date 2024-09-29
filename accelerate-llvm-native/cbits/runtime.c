@@ -9,6 +9,7 @@ void* accelerate_worker(void* data_packed) {
     struct Task task = accelerate_dequeue(workers);
     if (task.program != NULL) {
       task.program->run(workers, task.program, task.location);
+      accelerate_program_release(task.program);
     }
     // TODO: Try to assist another task via work assisting
     // TODO: yield, and eventually park this thread and let it be woken via the scheduler.
@@ -18,7 +19,7 @@ void* accelerate_worker(void* data_packed) {
 struct Workers* accelerate_start_workers(uint64_t thread_count) {
   struct Workers *workers = malloc(sizeof(struct Workers));
 
-  workers->scheduler.lock = 16;
+  workers->scheduler.lock = 0;
   workers->scheduler.task_capacity = 32 * 1024;
   workers->scheduler.task_count = 0;
   workers->scheduler.tasks = malloc(sizeof(struct Task) * workers->scheduler.task_capacity);

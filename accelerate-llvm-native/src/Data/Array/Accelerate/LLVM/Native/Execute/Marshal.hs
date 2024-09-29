@@ -62,7 +62,7 @@ alignmentAndSizeOfArgument = \case
 makeAligned :: Int -> Int -> Int
 makeAligned cursor align = cursor + m
   where
-    m = -cursor `mod` align
+    m = (-cursor) `mod` align
 
 -- Rounds a number up to the next power of 2
 nextPowerOfTwo :: Int -> Int

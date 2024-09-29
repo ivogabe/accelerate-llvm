@@ -57,6 +57,7 @@ import qualified Crypto.Hash.XKCP as Hash
 import Control.Concurrent
 import Foreign.Ptr
 import Foreign.StablePtr
+import Foreign.ForeignPtr
 import Foreign.Storable
 import GHC.Conc
 import System.IO
@@ -84,6 +85,7 @@ instance Execute UniformScheduleFun NativeKernel where
       final program = do
         -- All imports and arguments are placed in the struct, we can start the program
         runtimeSchedule defaultRuntimeWorkers program 0
+        runtimeProgramRelease program
 
 prepareProgram
   :: UniformScheduleFun NativeKernel env f
@@ -99,12 +101,21 @@ prepareProgram (Slam lhs f) accum final =
     -- An input value
     write (LeftHandSideSingle BaseRsignal `LeftHandSidePair` LeftHandSideSingle (BaseRref tp)) (Signal mvar, Ref ioref) (ptr, cursor) = do
       poke (plusPtr ptr cursor1) (0 :: Word)
+      case tp of
+        -- Intialize reference count of Ref with 1.
+        -- Number is shifted by one bit.
+        -- See: [reference counting for Ref]
+        GroundRbuffer _ -> do
+          poke (plusPtr ptr cursor2) (2 :: Word)
+        _ -> return ()
       -- In a separate thread, wait on the MVar and resolve the signal
+      runtimeProgramRetain ptr
       _ <- forkIO $ do
         readMVar mvar
         value <- readIORef ioref
         pokeGround tp (plusPtr ptr cursor2) value
         runtimeSignalResolve defaultRuntimeWorkers (plusPtr ptr cursor1)
+        runtimeProgramRelease ptr
       return (ptr, cursor2 + sz)
       where
         cursor1 = makeAligned cursor (sizeOf (0 :: Int))
@@ -115,10 +126,19 @@ prepareProgram (Slam lhs f) accum final =
       localMVar <- newEmptyMVar
       sp <- newStablePtrPrimMVar localMVar
       poke (plusPtr ptr cursor1) sp
+      runtimeProgramRetain ptr
+      case tp of
+        -- Intialize reference count of OutputRef with 1.
+        -- Number is shifted by one bit.
+        -- See: [reference counting for Ref]
+        GroundRbuffer _ -> do
+          poke (plusPtr ptr cursor2) (2 :: Word)
+        _ -> return ()
       _ <- forkIO $ do
         readMVar localMVar
         value <- peekGround tp (plusPtr ptr cursor2)
         writeIORef ioref value
+        runtimeProgramRelease ptr
         putMVar mvar ()
       return (ptr, cursor2 + sz)
       where
@@ -134,9 +154,9 @@ prepareProgram (Sbody _) accum final = do
   final ptr
 
 pokeGround :: GroundR a -> Ptr Int8 -> a -> IO ()
-pokeGround (GroundRbuffer _) dest buffer = do
-  ptr <- bufferRetainAndGetRef buffer
-  poke (castPtr dest) ptr
+pokeGround (GroundRbuffer _) dest (Buffer fp) =
+  withForeignPtr fp $ \ptr ->
+    runtimeRefWriteBuffer (castPtr dest) (castPtr ptr)
 pokeGround (GroundRscalar (SingleScalarType tp)) dest value
   | SingleDict <- singleDict tp = do
     poke (castPtr dest) value
@@ -314,4 +334,7 @@ defaultRuntimeWorkers = unsafePerformIO $ runtimeStartWorkers 1 -- TODO: Set cor
 foreign import ccall unsafe "accelerate_start_workers" runtimeStartWorkers :: Word64 -> IO (Ptr Int8)
 foreign import ccall unsafe "accelerate_signal_resolve" runtimeSignalResolve :: Ptr Int8 -> Ptr Int8 -> IO ()
 foreign import ccall unsafe "accelerate_program_alloc" runtimeProgramAlloc :: Word64 -> Ptr Int8 -> IO (Ptr Int8)
+foreign import ccall unsafe "accelerate_program_retain" runtimeProgramRetain :: Ptr Int8 -> IO ()
+foreign import ccall unsafe "accelerate_program_release" runtimeProgramRelease :: Ptr Int8 -> IO ()
 foreign import ccall unsafe "accelerate_schedule" runtimeSchedule :: Ptr Int8 -> Ptr Int8 -> Word32 -> IO ()
+foreign import ccall unsafe "accelerate_ref_write_buffer" runtimeRefWriteBuffer :: Ptr (Ptr Int8) -> Ptr Int8 -> IO ()

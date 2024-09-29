@@ -413,4 +413,4 @@ primTupSizeAlignment = foldl f (0, 1) . flattenTupR
 makeAligned :: Int -> Int -> Int
 makeAligned cursor align = cursor + m
   where
-    m = -cursor `mod` align
+    m = (-cursor) `mod` align
