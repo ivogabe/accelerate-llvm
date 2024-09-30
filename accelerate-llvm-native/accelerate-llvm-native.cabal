@@ -159,6 +159,7 @@ Library
         , unique
         , unordered-containers          >= 0.2
         , vector                        >= 0.11
+        , system-cxx-std-lib == 1.0
 
   hs-source-dirs:
         src
@@ -192,7 +193,11 @@ Library
     cbits/runtime.c
     cbits/program.c
 
+  cxx-sources:
+    cbits/queue.cpp
+
   cc-options: -O2 -Wall -Wextra
+  cxx-options: -O2 -Wall -Wextra
 
 test-suite nofib-llvm-native
   type:                 exitcode-stdio-1.0

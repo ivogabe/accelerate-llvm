@@ -21,11 +21,14 @@ struct Task {
   uint32_t location;
 };
 
+// Bindings to concurrentqueue (implemented in C++)
+typedef void Queue;
+Queue* accelerate_queue_new();
+bool accelerate_queue_enqueue(Queue *queue, struct Task task);
+struct Task accelerate_queue_dequeue(Queue *queue);
+
 struct Scheduler {
-  uint64_t lock;
-  uint64_t task_capacity;
-  uint64_t task_count;
-  struct Task* tasks;
+  Queue* queue;
 };
 
 struct Workers {

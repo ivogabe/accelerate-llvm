@@ -19,10 +19,7 @@ void* accelerate_worker(void* data_packed) {
 struct Workers* accelerate_start_workers(uint64_t thread_count) {
   struct Workers *workers = malloc(sizeof(struct Workers));
 
-  workers->scheduler.lock = 0;
-  workers->scheduler.task_capacity = 32 * 1024;
-  workers->scheduler.task_count = 0;
-  workers->scheduler.tasks = malloc(sizeof(struct Task) * workers->scheduler.task_capacity);
+  workers->scheduler.queue = accelerate_queue_new();
 
   workers->thread_count = thread_count;
 

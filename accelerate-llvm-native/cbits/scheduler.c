@@ -56,31 +56,14 @@ void accelerate_signal_resolve(struct Workers *workers, struct Signal *signal) {
   }
 }
 
-static void accelerate_lock(uint64_t *lock) {
-  while (true) {
-    uint64_t zero = 0;
-    if (atomic_compare_exchange_weak_explicit(lock, &zero, 1, memory_order_acquire, memory_order_relaxed)) {
-      return;
-    }
-  }
-}
-static void accelerate_unlock(uint64_t *lock) {
-  atomic_store_explicit(lock, 0, memory_order_release);
-}
 // Variant of 'accelerate_schedule' which takes ownership of the program.
 void accelerate_schedule_owned(struct Workers *workers, struct Program *program, uint32_t location) {
-  accelerate_lock(&workers->scheduler.lock);
-
-  uint64_t index = workers->scheduler.task_count;
-  if (index == workers->scheduler.task_capacity) {
-    printf("Scheduler is full, cannot schedule this task.\n");
-    // TODO: We could allocate a larger array now.
-  } else {
-    workers->scheduler.task_count = index + 1;
-    workers->scheduler.tasks[index].program = program;
-    workers->scheduler.tasks[index].location = location;
+  struct Task task;
+  task.program = program;
+  task.location = location;
+  if (!accelerate_queue_enqueue(workers->scheduler.queue, task)) {
+    printf("Scheduling a task failed. Out of memory?\n");
   }
-  accelerate_unlock(&workers->scheduler.lock);
 }
 // Schedules a program at a given location for execution.
 void accelerate_schedule(struct Workers *workers, struct Program *program, uint32_t location) {
@@ -89,23 +72,7 @@ void accelerate_schedule(struct Workers *workers, struct Program *program, uint3
 }
 
 struct Task accelerate_dequeue(struct Workers *workers) {
-  accelerate_lock(&workers->scheduler.lock);
-
-  struct Task result;
-
-  uint64_t task_count = workers->scheduler.task_count;
-  if (task_count == 0) {
-    result.program = NULL;
-    result.location = 0;
-  } else {
-    uint64_t index = task_count - 1;
-    workers->scheduler.task_count = index;
-    result.program = workers->scheduler.tasks[index].program;
-    result.location = workers->scheduler.tasks[index].location;
-  }
-
-  accelerate_unlock(&workers->scheduler.lock);
-  return result;
+  return accelerate_queue_dequeue(workers->scheduler.queue);
 }
 
 void accelerate_execute_kernel(struct Workers *workers, struct KernelLaunch *kernel) {
