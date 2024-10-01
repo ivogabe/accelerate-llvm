@@ -155,7 +155,7 @@ instance DesugarAcc NativeOp where
   --   , DeclareVars lhsTemp (wTemp :: env' :> env'') kTemp <- declareVars $ buffersR tp =
   --     let w = wTemp .> wSize in
   --     case shr of
-  --       ShapeRsnoc ShapeRz -> aletUnique lhsSize (Compute $ Const scalarTypeInt 2) $ -- magic constant 2; TODO change into `size/workstealsize` rounded up
+  --       ShapeRsnoc ShapeRz -> aletUnique lhsSize (Compute $ Const scalarTypeInt 2) $ -- magic constant 2; TODO change into `size/workassistsize` rounded up
   --         let sh = TupRpair TupRunit (kSize weakenId) in
   --         aletUnique lhsTemp (desugarAlloc (ArrayR shr tp) $ fromGrounds sh) $ 
   --           let tmpArrArg :: Modifier m -> Arg env'' (m ((),Int) e)
@@ -387,7 +387,7 @@ bcan2id IsUnit = unsafeCoerce IsUnit -- error "bcan2id unit"
 
 fold1bp :: BackendClusterArg2 NativeOp env (Out sh e) -> BackendClusterArg2 NativeOp env (In sh e)
 fold1bp (BCAN2 Nothing i) = BCAN2 Nothing i
-fold1bp (BCAN2 (Just (BP shr1 shr2 g sh)) i) = flip BCAN2 i $ Just $ BP shr1 shr2 (error "todo: multiply the innermost (outer constructor) dimension by the workstealsize" g) undefined
+fold1bp (BCAN2 (Just (BP shr1 shr2 g sh)) i) = flip BCAN2 i $ Just $ BP shr1 shr2 (error "todo: multiply the innermost (outer constructor) dimension by the workassistsize" g) undefined
 fold1bp IsUnit = error "unit"
 
 fold2bp :: BackendClusterArg2 NativeOp env (Out sh e) -> GroundVars env Int -> BackendClusterArg2 NativeOp env (In (sh,Int) e)

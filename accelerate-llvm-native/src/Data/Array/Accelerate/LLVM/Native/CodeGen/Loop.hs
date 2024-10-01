@@ -208,46 +208,37 @@ iterFromTo
 iterFromTo tp start end seed body =
   Loop.iterFromStepTo tp start (liftInt 1) end seed body
 
-workstealLoop
+workassistLoop
     :: Operand (Ptr Word32)                 -- index into work
-    -> Operand (Ptr Word32)                 -- number of threads that are working
-    -> Operand Word32                        -- size of total work
+    -> Operand Word32                       -- index of the first block to work on
+    -> Operand (Ptr Word64)                 -- number of threads that are working
+    -> Operand Word32                       -- size of total work
     -> (Operand Word32 -> StateT (Operands s) (CodeGen Native) ())
     -> StateT (Operands s) (CodeGen Native) ()
-workstealLoop counter _activeThreads size doWork = do
-  start    <- lift $ newBlock "worksteal.start"
-  work     <- lift $ newBlock "worksteal.loop.work"
-  exit     <- lift $ newBlock "worksteal.exit"
-  finished <- lift $ newBlock "worksteal.finished"
+workassistLoop counter firstIndex activitiesSlot size doWork = do
+  entry    <- lift getBlock
+  work     <- lift $ newBlock "workassist.loop.work"
+  claimed  <- lift $ newBlock "workassist.all.claimed"
+  exit     <- lift $ newBlock "workassist.exit"
+  finished <- lift $ newBlock "workassist.finished"
 
-  -- Check whether there might be work for us
-  initialCounter <- lift $ instr' $ Load scalarType NonVolatile counter
-  initialCondition <- lift $ lt singleType (OP_Word32 initialCounter) (OP_Word32 size)
-  _ <- lift $ cbr initialCondition start exit
-
-  _ <- lift $ setBlock start
-  -- Might be work for us!
-  -- First mark that this thread is doing work.
-  -- _ <- lift $ atomicAdd Acquire activeThreads (integral TypeWord32 1)
-  startIndex <- lift $ atomicAdd Unordered counter (integral TypeWord32 1)
-  startCondition <- lift $ lt singleType (OP_Word32 startIndex) (OP_Word32 size)
-  _ <- lift $ cbr startCondition work exit
+  initialCondition <- lift $ lt singleType (OP_Word32 firstIndex) (OP_Word32 size)
+  _ <- lift $ cbr initialCondition work exit
 
   _ <- lift $ setBlock work
-  indexName <- lift $ freshLocalName
+  let indexName = "block_index"
   let index = LocalReference type' indexName
 
-  -- Already claim the next work, to hide the latency of the atomic instruction
-  nextIndex <- lift $ atomicAdd Unordered counter (integral TypeWord32 1)
-
   doWork index
+
+  nextIndex <- lift $ atomicAdd Unordered counter (integral TypeWord32 1)
   condition <- lift $ lt singleType (OP_Word32 nextIndex) (OP_Word32 size)
 
   -- Append the phi node to the start of the 'work' block.
   -- We can only do this now, as we need to have 'nextIndex', and know the
   -- exit block of 'doWork'.
   currentBlock <- lift $ getBlock
-  lift $ phi1 work indexName [(startIndex, start), (nextIndex, currentBlock)]
+  lift $ phi1 work indexName [(firstIndex, entry), (nextIndex, currentBlock)]
 
   lift $ cbr condition work exit
 
@@ -278,13 +269,13 @@ workstealLoop counter _activeThreads size doWork = do
   -- lift $ setBlock dummy -- without this, the previous block always returns True for some reason
   
 
-workstealChunked :: ShapeR sh -> Operand (Ptr Word32) -> Operand (Ptr Word32) -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)), StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
-workstealChunked shr counter activeThreads sh tys loopwork = do
+workassistChunked :: ShapeR sh -> Operand (Ptr Word32) -> Operand Word32 -> Operand (Ptr Word64) -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)), StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
+workassistChunked shr counter firstIndex activitiesSlot sh tys loopwork = do
   chunkSz <- lift $ chunkSize' shr sh
   chunkCounts <- lift $ chunkCount shr sh chunkSz
   chunkCnt <- lift $ shapeSize shr chunkCounts
   chunkCnt' :: Operand Word32 <- lift $ instr' $ Trunc boundedType boundedType $ op TypeInt chunkCnt
-  workstealLoop counter activeThreads chunkCnt' $ \chunkLinearIndex -> do
+  workassistLoop counter firstIndex activitiesSlot chunkCnt' $ \chunkLinearIndex -> do
     chunkLinearIndex' <- lift $ instr' $ Ext boundedType boundedType chunkLinearIndex
     chunkIndex <- lift $ indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- lift $ chunkStart shr chunkSz chunkIndex

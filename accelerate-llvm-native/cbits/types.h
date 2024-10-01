@@ -7,9 +7,10 @@
 #include <pthread.h>
 
 struct Workers;
-
 struct Program;
-typedef void ProgramFunction(struct Workers*, struct Program* data, uint32_t location);
+struct KernelLaunch;
+
+typedef struct KernelLaunch* ProgramFunction(struct Workers* workers, uint16_t thread_index, struct Program* data, uint32_t location);
 struct Program {
   uint64_t reference_count;
   ProgramFunction *run;
@@ -40,6 +41,10 @@ void accelerate_parker_wake_all(struct ThreadParker *parker);
 
 struct Scheduler {
   Queue* queue;
+  // Array of packed pointers refering to KernelLaunch objects.
+  // One entry per thread, containing their current data-parallel activity (kernel).
+  // NULL if they are not executing a kernel.
+  uintptr_t* activities;
   struct ThreadParker parker;
 };
 
@@ -96,13 +101,12 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
-struct KernelLaunch;
-typedef void KernelFunction(struct KernelLaunch *kernel, uint32_t first_index, struct KernelLaunch **activities_slot);
+typedef void KernelFunction(struct KernelLaunch *kernel, uint32_t first_index, uintptr_t *activities_slot);
 struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;
   uint32_t program_continuation;
-  uint32_t active_threads;
+  int32_t active_threads;
   uint32_t work_index;
   // In the future, perhaps also store a uint32_t work_size
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.

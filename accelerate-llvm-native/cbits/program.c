@@ -19,8 +19,8 @@ void accelerate_program_release(struct Program *program) {
   uint64_t old = atomic_fetch_add_explicit(&program->reference_count, -1, memory_order_acq_rel);
   if (old == 1) {
     // Location 1 of the program is the destructor,
-    // which may be invoked without a Worker* pointer.
-    program->run(NULL, program, 1);
+    // which may be invoked without a Worker* pointer and without a thread index.
+    program->run(NULL, 0, program, 1);
     accelerate_function_release(&program->run);
     free(program);
   }

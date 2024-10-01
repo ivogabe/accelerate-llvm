@@ -58,7 +58,7 @@ prepareKernel env (NativeKernelMetadata envSize) fun args = do
   withForeignPtr foreignPtr $ \argPtr -> do
     -- putStrLn "Trying to launch kernel"
 
-    -- Initialise 'worksteal index' to 0
+    -- Initialise 'workassist index' to 0
     poke (castPtr argPtr) (0 :: Int32)
 
     -- Initialise 'active threads' to 0

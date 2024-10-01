@@ -63,32 +63,34 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
 
-type KernelType env = Ptr (Struct (Header, Struct (MarshalEnv env))) -> Bool
+type KernelType env = Ptr (Struct (Header, Struct (MarshalEnv env))) -> Word32 -> Ptr Word64 -> Bool
 
 bindHeaderEnv
   :: forall env. Env AccessGroundR env
   -> ( PrimType (Ptr (Struct (Header, Struct (MarshalEnv env))))
      , CodeGen Native ()
      , Operand (Ptr Word32)
-     , Operand (Ptr Word32)
+     , Operand (Word32)
+     , Operand (Ptr Word64)
      , Gamma env
      )
-bindHeaderEnv env = 
+bindHeaderEnv env =
   ( argTp
   , do
       instr_ $ downcast $ nameIndex := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameActiveThreads := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ "env" := GetStructElementPtr envTp arg (TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
-  , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameActiveThreads
+  , LocalReference type' nameFirstIndex
+  , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameActivitiesSlot
   , gamma
   )
   where
     argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp)) defaultAddrSpace
     (envTp, extractEnv, gamma) = bindEnv env
 
-    nameIndex = "worksteal.index"
-    nameActiveThreads = "worksteal.activethreads"
+    nameIndex = "workassist.index"
+    nameFirstIndex = "workassist.first_index"
+    nameActivitiesSlot = "workassist.activities_slot"
 
     arg = LocalReference (PrimType argTp) "arg"

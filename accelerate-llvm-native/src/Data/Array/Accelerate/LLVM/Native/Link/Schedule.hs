@@ -67,7 +67,7 @@ import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
 
 data NativeProgram = NativeProgram
-  !(Lifetime (FunPtr (Ptr Int8 -> Ptr Int8 -> Int32 -> ())))
+  !(Lifetime (FunPtr (Ptr Int8 -> Int16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
   !Int -- The size of the program structure.
   !(Ptr Int8 -> IO ()) -- The IO action to fill the imports part of a program structure,
   !Int -- The offset of the data in the program structure.
@@ -82,8 +82,8 @@ linkSchedule' uid schedule
     let ptrTp = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
 
     let name = fromString $ "schedule_" ++ show uid
-    m <- codeGenFunction name VoidType
-        (LLVM.Lam ptrTp "workers" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
+    m <- codeGenFunction name (PrimType ptrTp)
+        (LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Int16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
         body
 
     obj <- compile uid name m
@@ -177,12 +177,12 @@ codegenSchedule schedule
           (LocalReference (PrimType ptrImportsTp) "imports")
           (importsType schedule1)
           TupleIdxSelf
-        return_
+        returnNull
 
         -- Return block (for any branch that may return, for instance in SignalAwait)
         let blockRet = newBlockNamed "return"
         setBlock blockRet
-        return_
+        returnNull
     )
 
 operandWorkers :: Operand (Ptr Int8)
@@ -325,7 +325,7 @@ convert Return =
     varsFree = IdxSet.empty,
     varsInStruct = IdxSet.empty,
     maySuspend = False,
-    phase2 = \_ _ _ _ _ _ _ -> return_
+    phase2 = \_ _ _ _ _ _ _ -> returnNull
   }
 -- convert (Spawn (Effect (SignalAwait signals) a) b)
 convert (Spawn a b)
@@ -466,24 +466,19 @@ convert (Effect effect@(Exec _ kernel kargs) next)
       locationPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile locationPtr (integral TypeWord32 $ fromIntegral nextBlock)
       threadsPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 1)
+      _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) -- active_threads
       workIdxPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord32 0)
+      _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord32 1) -- work_index
       -- Arguments
       args' <- instr' $ GetStructElementPtr argsTp' args $ TupleIdxRight TupleIdxSelf
       storeKernelArgs structVars localVars kargs args' TupleIdxSelf
 
-      -- Call runtime function to launch kernel
-      _ <- call
-            (LLVM.lamUnnamed primType $
-              LLVM.lamUnnamed (PtrPrimType argsTp defaultAddrSpace) $
-              LLVM.Body VoidType Nothing (Label "accelerate_execute_kernel")) 
-            (LLVM.ArgumentsCons operandWorkers []
-              $ LLVM.ArgumentsCons args []
-              LLVM.ArgumentsNil)
-            []
+      args'' <- instr' $ PtrCast (primType @(Ptr Int8)) args
+      -- Return a pointer to the kernel structure.
+      -- The runtime will start this kernel.
       -- Function suspends now
-      return_
+      retval_ args''
+
       -- and resumes here
       setBlock blockNext
       phase2Sub next1 imports fullState structVars PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + 1)
@@ -1181,3 +1176,6 @@ callBufferRetain ptr = do
       LLVM.ArgumentsNil)
     []
   return ()
+
+returnNull :: CodeGen arch ()
+returnNull = retval_ $ ConstantOperand $ NullPtrConstant $ type' @(Ptr Int8)

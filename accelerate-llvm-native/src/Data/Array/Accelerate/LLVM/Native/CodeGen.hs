@@ -86,20 +86,20 @@ codegen :: ShortByteString
         -> Args env args
         -> LLVM Native (Module (KernelType env))
 codegen name env (Clustered c b) args =
-  codeGenFunction name (PrimType BoolPrimType) (LLVM.Lam argTp "arg") $ do
+  codeGenFunction name (PrimType BoolPrimType) (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
     extractEnv
     let b' = mapArgs BCAJA b
     (acc, loopsize) <- execStateT (evalCluster (toOnlyAcc c) b' args gamma ()) (mempty, LS ShapeRz OP_Unit)
     _acc' <- operandsMapToPairs acc $ \(accTypeR, toOp, fromOp) -> fmap fromOp $ flip execStateT (toOp acc) $ case loopsize of
       LS loopshr loopsh -> 
-        workstealChunked loopshr workstealIndex workstealActiveThreads (flipShape loopshr loopsh) accTypeR
+        workassistChunked loopshr workassistIndex workassistFirstIndex workassistActivitiesSlot (flipShape loopshr loopsh) accTypeR
           (body loopshr toOp fromOp, -- the LoopWork
           StateT $ \op -> second toOp <$> runStateT (foo (liftInt 0) []) (fromOp op)) -- the action to run after the outer loop
     -- acc'' <- flip execStateT acc' $ foo (liftInt 0) []
     pure ()
     where
       ba = makeBackendArg @NativeOp args gamma c b
-      (argTp, extractEnv, workstealIndex, workstealActiveThreads, gamma) = bindHeaderEnv env
+      (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, gamma) = bindHeaderEnv env
       body :: ShapeR sh -> (Accumulated -> a) -> (a -> Accumulated) -> LoopWork sh (StateT a (CodeGen Native))
       body ShapeRz _ _ = LoopWorkZ
       body (ShapeRsnoc shr) toOp fromOp = LoopWorkSnoc (body shr toOp fromOp) (\i is -> StateT $ \op -> second toOp <$> runStateT (foo i is) (fromOp op))

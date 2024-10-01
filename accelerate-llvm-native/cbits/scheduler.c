@@ -75,9 +75,3 @@ void accelerate_schedule(struct Workers *workers, struct Program *program, uint3
 struct Task accelerate_dequeue(struct Workers *workers) {
   return accelerate_queue_dequeue(workers->scheduler.queue);
 }
-
-void accelerate_execute_kernel(struct Workers *workers, struct KernelLaunch *kernel) {
-  // TODO: Implement work assisting here
-  kernel->work_function(kernel, 0, NULL);
-  accelerate_schedule(workers, kernel->program, kernel->program_continuation);
-}
