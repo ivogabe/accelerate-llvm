@@ -64,6 +64,7 @@ void accelerate_schedule_owned(struct Workers *workers, struct Program *program,
   if (!accelerate_queue_enqueue(workers->scheduler.queue, task)) {
     printf("Scheduling a task failed. Out of memory?\n");
   }
+  accelerate_parker_wake_all(&workers->scheduler.parker);
 }
 // Schedules a program at a given location for execution.
 void accelerate_schedule(struct Workers *workers, struct Program *program, uint32_t location) {

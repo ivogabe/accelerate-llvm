@@ -27,8 +27,20 @@ Queue* accelerate_queue_new();
 bool accelerate_queue_enqueue(Queue *queue, struct Task task);
 struct Task accelerate_queue_dequeue(Queue *queue);
 
+struct ThreadParker {
+  // The lock to take before letting a thread wait, or waking all threads.
+  pthread_mutex_t lock;
+  pthread_cond_t cond_var;
+  // Should be modified with atomic instructions.
+  // Contains 0 (false) or 1 (true).
+  // Denotes whether any thread might be sleeping.
+  uint any_sleeping;
+};
+void accelerate_parker_wake_all(struct ThreadParker *parker);
+
 struct Scheduler {
   Queue* queue;
+  struct ThreadParker parker;
 };
 
 struct Workers {
