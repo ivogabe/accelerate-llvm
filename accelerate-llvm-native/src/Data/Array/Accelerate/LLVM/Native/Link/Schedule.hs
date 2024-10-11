@@ -28,7 +28,6 @@ import qualified Data.Array.Accelerate.AST.IdxSet as IdxSet
 import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.AST.Kernel
-import Data.Array.Accelerate.AST.Schedule
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape
@@ -127,7 +126,7 @@ codegenSchedule schedule
           + fst (primSizeAlignment $ StructPrimType False $ importsType schedule1))
         (snd $ primSizeAlignment $ StructPrimType False $ stateType schedule1)
     , \ptr -> do
-        prepareImports (importsType schedule1) (importsInit schedule1) ptr (2 * sizeOf (1 :: Int))
+        _ <- prepareImports (importsType schedule1) (importsInit schedule1) ptr (2 * sizeOf (1 :: Int))
         return ()
     , do
         -- Add 2 for the initial block and the destructor block
@@ -250,6 +249,11 @@ type family ReprBaseR t where
   ReprBaseR (Buffer t) = Ptr t
   ReprBaseR t = t
 
+type family ReprBasesR t where
+  ReprBasesR () = ()
+  ReprBasesR (a, b) = (ReprBasesR a, ReprBasesR b)
+  ReprBasesR t = ReprBaseR t
+
 -- Note: we store the code to get access to a value here (in the CodeGen monad)
 -- instead of only the operand.
 -- This variable may be accessed in a different block than were it was defined,
@@ -352,12 +356,13 @@ convert (Spawn a b)
           LLVM.ArgumentsNil)
         []
 
-      phase2 b1 imports fullState
-        structVarsB
-        localVarsB
-        (tupleRight importsIdx)
-        (tupleRight stateIdx)
-        nextBlock
+      -- Note: we must first emit the code for 'a' (which is spawned in a new task),
+      -- then the code for 'b'. The reason is that this spawn may for instance be part
+      -- of the true or false branch of an Acond, and the 'next' instruction of the
+      -- Acond must follow 'b', not 'a'.
+      -- We guarantee this by creating a separate block for the code after spawning 'a'.
+      block <- newBlock "spawn.after"
+      _ <- br block
 
       let aBlock = newBlockNamed $ blockName (nextBlock + blockCount b1)
       setBlock aBlock
@@ -367,6 +372,14 @@ convert (Spawn a b)
         (tupleLeft importsIdx)
         (tupleLeft stateIdx)
         (nextBlock + blockCount b1 + 1)
+
+      setBlock block
+      phase2 b1 imports fullState
+        structVarsB
+        localVarsB
+        (tupleRight importsIdx)
+        (tupleRight stateIdx)
+        nextBlock
   }
 -- Control flow
 convert (Acond cond whenTrue whenFalse next)
@@ -432,6 +445,76 @@ convert (Acond cond whenTrue whenFalse next)
         (tupleRight importsIdx)
         (tupleRight stateIdx)
         (nextBlock + blockCount whenTrue1 + blockCount whenFalse1)
+  }
+convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step)))) initial next)
+  | Refl <- awhileIOMatch io
+  , Exists2 step1 <- convert step
+  , Exists2 next1 <- convert next
+  , ioType' <- awhileIOType io
+  , ioType <- StructPrimType False ioType'
+  , stepVars <- IdxSet.drop' lhsInput $ IdxSet.drop' lhsBool $ IdxSet.drop' lhsOutput $ varsFree step1
+  , allVars <- IdxSet.fromVars initial `IdxSet.union` stepVars `IdxSet.union` varsFree next1 =
+  Exists2 $ Phase1{
+    blockCount = blockCount step1 + blockCount next1,
+    importsType = importsType step1 `TupRpair` importsType next1,
+    importsInit = importsInit step1 `TupRpair` importsInit next1,
+    stateType = TupRsingle ioType `TupRpair` TupRsingle (primType @PrimBool) `TupRpair` TupRsingle ioType `TupRpair` stateType step1 `TupRpair` stateType next1,
+    varsFree = allVars,
+    -- Note: this is too pessimistic if 'maySuspend next1' is false. However, I
+    -- think it's to be expected that the body of the loop at least executes a
+    -- kernel, and will thus have 'maySusped next1 = True'.
+    varsInStruct = allVars,
+    maySuspend = True,
+    phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
+      let
+        -- Note: we cannot simply perform GetStructElementPtr now and only
+        -- remember the result, as the function may suspend in 'step'.
+        getInput = instr' $ GetStructElementPtr ioType fullState $ tupleLeft $ tupleLeft $ tupleLeft $ tupleLeft stateIdx
+        getOutput = instr' $ GetStructElementPtr ioType fullState $ tupleRight $ tupleLeft $ tupleLeft stateIdx
+
+      -- Split environment for 'initials' and the remainder ('step' and 'next')
+      (structVarsInit, localVarsInit, structVarsStart, localVarsStart)
+        <- forkEnv structVars localVars (IdxSet.fromVars initial) (stepVars `IdxSet.union` varsFree next1)
+
+      getInput >>= awhileSeqSetInitial structVarsInit localVarsInit io initial
+      getOutput >>= awhilePrepareOutput io lhsInput
+
+      let
+        getBool = instr' $ GetStructElementPtr primType fullState $ tupleRight $ tupleLeft $ tupleLeft $ tupleLeft stateIdx
+        structVars1 = awhileBindInput getInput io lhsInput structVarsStart
+        structVars2 = case lhsBool of
+          LeftHandSideSingle _ -> PPush structVars1
+            $ StructVar True (BaseRrefWrite $ GroundRscalar scalarType) getBool
+          LeftHandSideWildcard _ -> structVars1
+        structVars3 = awhileBindOutput getOutput io lhsOutput structVars2
+
+      blockBody <- newBlock "awhile.body"
+      blockNext <- newBlock "awhile.next"
+      blockExit <- newBlock "awhile.exit"
+
+      _ <- br blockBody
+      setBlock blockBody
+
+      -- TODO: Proper memory management for awhile loops.
+      -- Currently we retain all used variables of the loop at the start, to later release them again.
+      -- However, these retain and release calls for free variables of the loop are redundant.
+      _ <- forkEnv structVarsStart localVarsStart stepVars stepVars
+      -- phase2*Sub* since the LeftHandSides may declare variables that are not used.
+      phase2Sub step1 imports fullState structVars3 PEnd (tupleLeft importsIdx) (tupleRight $ tupleLeft stateIdx) nextBlock
+      conditionalPtr <- getBool
+      conditional <- instr' $ Load scalarType NonVolatile conditionalPtr
+      conditional' <- instr $ IntToBool TypeWord8 conditional
+      _ <- cbr conditional' blockNext blockExit
+
+      setBlock blockNext
+      input1 <- getInput
+      output1 <- getOutput
+      awhilePrepareNext io output1 input1
+      awhilePrepareOutput io lhsInput output1
+      _ <- br blockBody
+
+      setBlock blockExit
+      phase2Sub next1 imports fullState structVarsStart PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + blockCount step1)
   }
 -- TODO: Awhile
 -- Effects
@@ -515,7 +598,7 @@ convert (Effect (SignalAwait signals) next)
       -- Doing this reduces the number of blocks we need.
       let
         go :: Operand (Ptr (Struct (Ptr Int8, (Int32, Ptr Int8)))) -> Int -> [Idx env Signal] -> CodeGen Native ()
-        go waiter _ [] = return ()
+        go _ _ [] = return ()
         go waiter i (idx : idxs) = do
           let blockContinue = if i == 0 then blockNext else newBlockNamed $ blockName nextBlock ++ ".continue." ++ show i
           signal <- getPtr structVars idx
@@ -688,10 +771,12 @@ convert (Alet lhs (NewRef (GroundRbuffer tp)) next)
   }
   where
     t = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
-    initialRefCount = case lhs of
-      LeftHandSidePair _ LeftHandSideSingle{} -> 1
-      _ -> 0
+    initialRefCount = fromIntegral $ lhsSize lhs -- 0 or 1
 -- GroundR bindings
+-- No need to construct anything if the result is not used.
+-- This is required, since pushBindingSingle leaks memory when using LeftHandSideWildcard
+-- for buffers.
+convert (Alet (LeftHandSideWildcard _) _ next) = convert next
 convert (Alet lhs (Alloc shr tp sz) next)
   | Refl <- scalarReprBase tp
   , Exists2 next1 <- convert next
@@ -774,39 +859,51 @@ convert (Alet lhs (Unit (Var tp idx)) next)
   }
   where
     ptrTp = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+-- TODO: Could we use the same entry in stateType? The Ref will already be in there, so we could reuse that here perhaps?
 convert (Alet lhs (RefRead ref) next)
   | Exists2 next1 <- convert next
-  , Exists bnd <- pushBindingSingle lhs (varsInStruct next1) =
+  , LeftHandSideSingle _ <- lhs =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
-    stateType = bStateType bnd `TupRpair` stateType next1,
+    stateType = stateType next1,
     varsFree = IdxSet.insertVar ref $ IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.insertVar ref $ IdxSet.drop' lhs $ varsInStruct next1,
     maySuspend = maySuspend next1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-      (_, value) <- getValue structVars localVars tp $ varIdx ref
+      -- We reuse the existing entry in the state structure.
+      -- Here we get the LLVM code to get a pointer to that field,
+      -- which we later store in a StructVar.
+      let getPtr' = getPtr structVars $ varIdx ref
+      ptr <- getPtr'
+      -- (_, value) <- getValue structVars localVars tp $ varIdx ref
       -- By default we would need to perform a buffer_retain on the read value, if it is a buffer.
       -- In case the Ref is not used in 'next', phase2Sub will release that value.
       -- These two cancel each other out.
       -- Hence we check for this scenario here, and only emit the retain if needed.
-      structVars' <- case tp of
+      (structVars', value) <- case tp of
         -- Reference counting doesn't apply to scalar values, so no need to do anything here.
-        GroundRscalar _ -> return structVars
+        GroundRscalar _ -> return (structVars, Nothing)
         GroundRbuffer _
           -- Best case: 'ref' is not used any more.
           -- Don't call buffer_retain, and remove ref from structVars such that
           -- ref_release won't be called.
           | not $ varIdx ref `IdxSet.member` IdxSet.drop' lhs (varsFree next1) ->
-            return $ partialRemove (varIdx ref) structVars
+            return (partialRemove (varIdx ref) structVars, Nothing)
           -- Default case: we do need to perform buffer_retain
           | otherwise -> do
+            value <- instr' $ LoadPtr NonVolatile ptr
             callBufferRetain value
-            return structVars
-      (structVars'', localVars') <- bPhase2 bnd structVars' localVars fullState (tupleLeft stateIdx) value
-      phase2Sub next1 imports fullState structVars'' localVars' importsIdx (tupleRight stateIdx) nextBlock
+            return (structVars, Just value)
+      let
+        structVars'' = structVars' `PPush` StructVar False (BaseRground tp) getPtr'
+        localVars' = case value of
+          Just v -> localVars `PPush` LocalVar v
+          Nothing -> PNone localVars
+      phase2Sub next1 imports fullState structVars'' localVars' importsIdx stateIdx nextBlock
   }
+  | otherwise = internalError "Expected LeftHandSideSingle"
   where
     tp = case varType ref of
       BaseRref t -> t
@@ -918,6 +1015,7 @@ type Push2 op env env' t state
   -> op t
   -> CodeGen Native (StructVars env', LocalVars env')
 
+-- Should not be called with LeftHandSideWildcard of a Buffer, as this will leak memory.
 pushBindingSingle :: BLeftHandSide t env env' -> IdxSet env' -> Exists (Push1 Operand env env' (ReprBaseR t))
 pushBindingSingle (LeftHandSideWildcard _) _ = Exists $ Push1 TupRunit $
   \structVars localVars _ _ _ -> return (structVars, localVars)
@@ -1079,7 +1177,7 @@ subEnv = \structVars localVars used -> do
 
     release :: Maybe (StructVar t) -> Maybe (LocalVar t) -> CodeGen Native ()
     -- Release a Ref containing a buffer, by calling accelerate_ref_release
-    release (Just (StructVar _ (BaseRref (GroundRbuffer tp)) m)) _ = do
+    release (Just (StructVar _ (BaseRref (GroundRbuffer _)) m)) _ = do
       ptr <- m
       ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
       _ <- call'
@@ -1130,7 +1228,7 @@ forkEnv = \structVars localVars usedLeft usedRight -> do
     go structVars (PPush localVars localVar) (IdxSet (PPush set _)) = do
       retain Nothing (Just localVar)
       go (partialEnvTail structVars) localVars (IdxSet set)
-    go PNone{} PNone{} (IdxSet PPush{}) = internalError "expected binding missing in environment"
+    go _ _ (IdxSet PPush{}) = internalError "expected binding missing in environment"
 
     retain :: Maybe (StructVar t) -> Maybe (LocalVar t) -> CodeGen Native ()
     -- Retain a Ref containing a buffer, by calling accelerate_ref_retain
@@ -1179,3 +1277,149 @@ callBufferRetain ptr = do
 
 returnNull :: CodeGen arch ()
 returnNull = retval_ $ ConstantOperand $ NullPtrConstant $ type' @(Ptr Int8)
+
+-- Utilities for awhile loops
+awhileIOType :: InputOutputR input output -> TupR PrimType (ReprBasesR input)
+awhileIOType (InputOutputRpair io1 io2) = awhileIOType io1 `TupRpair` awhileIOType io2
+awhileIOType InputOutputRunit = TupRunit
+awhileIOType (InputOutputRref (GroundRscalar tp))
+  | Refl <- scalarReprBase tp = TupRsingle $ ScalarPrimType tp
+awhileIOType (InputOutputRref (GroundRbuffer tp)) = TupRsingle $ PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+awhileIOType InputOutputRsignal = TupRsingle primType
+
+awhileIOMatch :: InputOutputR input output -> ReprBasesR input :~: ReprBasesR output
+awhileIOMatch (InputOutputRpair io1 io2)
+  | Refl <- awhileIOMatch io1
+  , Refl <- awhileIOMatch io2 = Refl
+awhileIOMatch (InputOutputRref _) = Refl
+awhileIOMatch InputOutputRsignal = Refl
+awhileIOMatch InputOutputRunit = Refl
+
+-- Copies the result of the current iteration to the input of the next iteration
+awhilePrepareNext :: InputOutputR input output -> Operand (Ptr (Struct (ReprBasesR output))) -> Operand (Ptr (Struct (ReprBasesR input))) -> CodeGen Native ()
+awhilePrepareNext io current next
+  | Refl <- awhileIOMatch io = do
+    value <- instr' $ LoadStruct NonVolatile current
+    _ <- instr' $ Store NonVolatile next value
+    return ()
+
+-- For a sequential awhile, copy the initial values to the state of the loop.
+-- Note that this only works for sequential awhile loops: in case of an async
+-- awhile loop, we cannot simply copy Refs (and Signals), since they might be
+-- unfilled/unresolved and change later.
+awhileSeqSetInitial
+  :: forall env input output.
+     StructVars env
+  -> LocalVars env
+  -> InputOutputR input output
+  -> BaseVars env input
+  -> Operand (Ptr (Struct (ReprBasesR input)))
+  -> CodeGen Native ()
+awhileSeqSetInitial structVars localVars inputOutput inputVars struct = go inputOutput inputVars TupleIdxSelf
+  where
+    go :: InputOutputR i o -> BaseVars env i -> TupleIdx (ReprBasesR input) (ReprBasesR i) -> CodeGen Native ()
+    go InputOutputRsignal _ _ =
+      internalError "Signals not supported in awhile-sequential"
+    go (InputOutputRref t@(GroundRbuffer t')) (TupRsingle (Var _ idx)) tupleIdx = do
+      (_, value) <- getValue structVars localVars t idx
+      ptr <- instr' $ GetStructElementPtr (PtrPrimType (ScalarPrimType t') defaultAddrSpace) struct tupleIdx
+      _ <- instr' $ Store NonVolatile ptr value
+      return ()
+    go (InputOutputRref t@(GroundRscalar t')) (TupRsingle (Var _ idx)) tupleIdx
+      | Refl <- scalarReprBase t' = do
+      (_, value) <- getValue structVars localVars t idx
+      ptr <- instr' $ GetStructElementPtr (ScalarPrimType t') struct tupleIdx
+      _ <- instr' $ Store NonVolatile ptr value
+      return ()
+    go (InputOutputRpair io1 io2) (TupRpair v1 v2) tupleIdx = do
+      go io1 v1 (tupleLeft tupleIdx)
+      go io2 v2 (tupleRight tupleIdx)
+    go InputOutputRunit _ _ = return ()
+    go _ _ _ = internalError "Tuple mismatch"
+
+-- Prepare the output of an iteration of an awhile loop.
+-- We need to set all SignalResolvers to 0 (unresolved),
+-- and for each RefWrite containing a buffer,
+-- set its reference count. See: [reference counting for Ref].
+-- We use the left hand side of the input of the next iteration
+-- to determine that reference count (1 or 0, depending on whether the lhs is
+-- single or wildcard).
+awhilePrepareOutput :: forall input output env env'. InputOutputR input output -> BLeftHandSide input env env' -> Operand (Ptr (Struct (ReprBasesR output))) -> CodeGen Native ()
+awhilePrepareOutput inputOutput lhs output = go inputOutput lhs TupleIdxSelf
+  where
+    go :: InputOutputR i o -> BLeftHandSide i env1 env2 -> TupleIdx (ReprBasesR output) (ReprBasesR o) -> CodeGen Native ()
+    go (InputOutputRref (GroundRbuffer tp)) lhs idx = do
+      ptr <- instr' $ GetStructElementPtr (PtrPrimType (ScalarPrimType tp) defaultAddrSpace) output idx
+      ptr' <- instr' $ PtrCast primType ptr
+      -- Set the reference count of the Ref
+      _ <- instr' $ Store NonVolatile ptr' $ integral TypeWord $ fromIntegral $ lhsSize lhs * 2 + 1
+      return ()
+    go (InputOutputRref (GroundRscalar _)) _ _ = return ()
+    go InputOutputRsignal _ idx = do
+      ptr <- instr' $ GetStructElementPtr primType output idx
+      _ <- instr' $ Store NonVolatile ptr $ integral TypeWord 0
+      return ()
+    go (InputOutputRpair io1 io2) (LeftHandSidePair l1 l2) idx = do
+      go io1 l1 (tupleLeft idx)
+      go io2 l2 (tupleRight idx)
+    go (InputOutputRpair io1 io2) (LeftHandSideWildcard (TupRpair t1 t2)) idx = do
+      go io1 (LeftHandSideWildcard t1) (tupleLeft idx)
+      go io2 (LeftHandSideWildcard t2) (tupleRight idx)
+    go InputOutputRunit _ _ = return ()
+    go _ _ _ = internalError "Tuple mismatch"
+
+awhileBindInput
+  :: forall input output env env'.
+     CodeGen Native (Operand (Ptr (Struct (ReprBasesR input))))
+  -> InputOutputR input output
+  -> BLeftHandSide input env env'
+  -> StructVars env
+  -> StructVars env'
+awhileBindInput getStruct = go TupleIdxSelf
+  where
+    go :: TupleIdx (ReprBasesR input) (ReprBasesR i) -> InputOutputR i o -> BLeftHandSide i env1 env2 -> StructVars env1 -> StructVars env2
+    go _ _ (LeftHandSideWildcard _) env = env
+    go idx (InputOutputRref tp@(GroundRbuffer tp')) (LeftHandSideSingle _) env = PPush env $
+      StructVar False (BaseRref tp) $ do
+        struct <- getStruct
+        instr' $ GetStructElementPtr (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct idx
+    go idx (InputOutputRref tp@(GroundRscalar tp')) (LeftHandSideSingle _) env
+      | Refl <- scalarReprBase tp' = PPush env $
+      StructVar False (BaseRref tp) $ do
+        struct <- getStruct
+        instr' $ GetStructElementPtr (ScalarPrimType tp') struct idx
+    go idx InputOutputRsignal (LeftHandSideSingle _) env = PPush env $
+      StructVar False BaseRsignal $ do
+        struct <- getStruct
+        instr' $ GetStructElementPtr primType struct idx
+    go idx (InputOutputRpair io1 io2) (LeftHandSidePair lhs1 lhs2) env =
+      go (tupleRight idx) io2 lhs2 $ go (tupleLeft idx) io1 lhs1 env
+    go _ _ _ _ = internalError "Tuple mismatch"
+
+awhileBindOutput
+  :: forall input output env env'.
+     CodeGen Native (Operand (Ptr (Struct (ReprBasesR output))))
+  -> InputOutputR input output
+  -> BLeftHandSide output env env'
+  -> StructVars env
+  -> StructVars env'
+awhileBindOutput getStruct = go TupleIdxSelf
+  where
+    go :: TupleIdx (ReprBasesR output) (ReprBasesR o) -> InputOutputR i o -> BLeftHandSide o env1 env2 -> StructVars env1 -> StructVars env2
+    go _ _ (LeftHandSideWildcard _) env = env
+    go idx (InputOutputRref tp@(GroundRbuffer tp')) (LeftHandSideSingle _) env = PPush env $
+      StructVar False (BaseRrefWrite tp) $ do
+        struct <- getStruct
+        instr' $ GetStructElementPtr (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct idx
+    go idx (InputOutputRref tp@(GroundRscalar tp')) (LeftHandSideSingle _) env
+      | Refl <- scalarReprBase tp' = PPush env $
+      StructVar False (BaseRrefWrite tp) $ do
+        struct <- getStruct
+        instr' $ GetStructElementPtr (ScalarPrimType tp') struct idx
+    go idx InputOutputRsignal (LeftHandSideSingle _) env = PPush env $
+      StructVar False BaseRsignalResolver $ do
+        struct <- getStruct
+        instr' $ GetStructElementPtr primType struct idx
+    go idx (InputOutputRpair io1 io2) (LeftHandSidePair lhs1 lhs2) env =
+      go (tupleRight idx) io2 lhs2 $ go (tupleLeft idx) io1 lhs1 env
+    go _ _ _ _ = internalError "Tuple mismatch"

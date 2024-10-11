@@ -219,6 +219,9 @@ data Instruction a where
 
   -- <http://llvm.org/docs/LangRef.html#load-instruction>
   --
+  -- TODO: Instead of a specific Load instructions, could we have a single one?
+  -- The reason we currently have alternatives is that Load requires a
+  -- ScalarType, but could we just drop that?
   Load            :: ScalarType a
                   -> Volatility
                   -> Operand (Ptr a)
@@ -227,6 +230,10 @@ data Instruction a where
   LoadPtr         :: Volatility
                   -> Operand (Ptr (Ptr a))
                   -> Instruction (Ptr a)
+
+  LoadStruct      :: Volatility
+                  -> Operand (Ptr (Struct a))
+                  -> Instruction (Struct a)
 
   -- <http://llvm.org/docs/LangRef.html#store-instruction>
   --
@@ -427,7 +434,8 @@ instance Downcast (Instruction a) LLVM.Instruction where
     ExtractValue _ i s    -> extractStruct i s
 #if MIN_VERSION_llvm_hs_pure(15,0,0)
     Load t v p            -> LLVM.Load (downcast v) (downcast t) (downcast p) atomicity alignment md
-    LoadPtr v p           -> LLVM.Load (downcast v) (downcast $ typeOf p) (downcast p) atomicity alignment md
+    LoadPtr v p           -> LLVM.Load (downcast v) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment md
+    LoadStruct v p        -> LLVM.Load (downcast v) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment md
     GetElementPtr t n i   -> LLVM.GetElementPtr inbounds (downcast t) (downcast n) (downcast i) md
     GetStructElementPtr _ n i -> case typeOf n of
       (PrimType (PtrPrimType t@(skipTypeAlias -> StructPrimType _ tp) _)) ->
@@ -440,6 +448,7 @@ instance Downcast (Instruction a) LLVM.Instruction where
 #else
     Load _ v p            -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
     LoadPtr v p           -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
+    LoadStruct v p        -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
     GetElementPtr _ n i   -> LLVM.GetElementPtr inbounds (downcast n) (downcast i) md
     GetStructElementPtr _ n i -> case typeOf n of
       PrimType (PtrPrimType (StructPrimType _ tp) _) ->
@@ -606,6 +615,10 @@ instance Downcast (Instruction a) LLVM.Instruction where
           ui GT = IP.UGT
           ui GE = IP.UGE
 
+      pointeeType :: Type (Ptr t) -> PrimType t
+      pointeeType (PrimType (PtrPrimType tp _)) = tp
+      pointeeType _ = internalError "Ptr impossible"
+
       call :: Function (Either InlineAssembly Label) t -> Arguments t -> [Either GroupID FunctionAttribute] -> LLVM.Instruction
 #if MIN_VERSION_llvm_hs_pure(15,0,0)
       call f args as = LLVM.Call tail LLVM.C [] fun_ty target (travArgs args) (downcast as) md
@@ -669,6 +682,9 @@ instance TypeOf Instruction where
     ExtractValue t _ _    -> PrimType t
     Load t _ _            -> scalar t
     LoadPtr _ x           -> case typeOf x of
+      PrimType (PtrPrimType t _) -> PrimType t
+      _ -> internalError "Ptr impossible"
+    LoadStruct _ x        -> case typeOf x of
       PrimType (PtrPrimType t _) -> PrimType t
       _ -> internalError "Ptr impossible"
     Store{}               -> VoidType
