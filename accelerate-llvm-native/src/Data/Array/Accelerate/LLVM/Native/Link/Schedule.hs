@@ -473,7 +473,7 @@ convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step))
         getOutput = instr' $ GetStructElementPtr ioType fullState $ tupleRight $ tupleLeft $ tupleLeft stateIdx
 
       -- Split environment for 'initials' and the remainder ('step' and 'next')
-      (structVarsInit, localVarsInit, structVarsStart, localVarsStart)
+      (structVarsInit, localVarsInit, structVarsStart, _)
         <- forkEnv structVars localVars (IdxSet.fromVars initial) (stepVars `IdxSet.union` varsFree next1)
 
       getInput >>= awhileSeqSetInitial structVarsInit localVarsInit io initial
@@ -494,11 +494,13 @@ convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step))
 
       _ <- br blockBody
       setBlock blockBody
+      -- We cannot use localVars from here, as the function may suspend in the body,
+      -- and resume later and then jump back to the start of the loop.
 
       -- TODO: Proper memory management for awhile loops.
       -- Currently we retain all used variables of the loop at the start, to later release them again.
       -- However, these retain and release calls for free variables of the loop are redundant.
-      _ <- forkEnv structVarsStart localVarsStart stepVars stepVars
+      _ <- forkEnv structVarsStart PEnd stepVars stepVars
       -- phase2*Sub* since the LeftHandSides may declare variables that are not used.
       phase2Sub step1 imports fullState structVars3 PEnd (tupleLeft importsIdx) (tupleRight $ tupleLeft stateIdx) nextBlock
       conditionalPtr <- getBool
