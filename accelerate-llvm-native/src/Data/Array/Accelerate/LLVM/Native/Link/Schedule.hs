@@ -773,7 +773,9 @@ convert (Alet lhs (NewRef (GroundRbuffer tp)) next)
   }
   where
     t = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
-    initialRefCount = fromIntegral $ lhsSize lhs -- 0 or 1
+    initialRefCount = case lhs of
+      LeftHandSidePair _ LeftHandSideSingle{} -> 1
+      _ -> 0
 -- GroundR bindings
 -- No need to construct anything if the result is not used.
 -- This is required, since pushBindingSingle leaks memory when using LeftHandSideWildcard
