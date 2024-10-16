@@ -53,6 +53,8 @@ import Data.Int
 import Data.Word
 import Data.IORef
 import Data.Typeable
+import Data.Maybe
+import Text.Read (readMaybe)
 import Language.Haskell.TH.Syntax
 import qualified Crypto.Hash.XKCP as Hash
 import Control.Concurrent
@@ -64,6 +66,7 @@ import GHC.Conc
 import System.IO
 import System.IO.Unsafe ( unsafePerformIO )
 import LLVM.AST.Type.Representation
+import System.Environment
 
 instance Execute UniformScheduleFun NativeKernel where
   data Linked UniformScheduleFun NativeKernel t = NativeLinked !(NativeProgram) !(UniformScheduleFun NativeKernel () t)
@@ -333,7 +336,7 @@ size' (ShapeRsnoc shr) (sh `ValuesPair` ValuesSingle (Value sz))
 
 {-# NOINLINE defaultRuntimeWorkers #-}
 defaultRuntimeWorkers :: Ptr Int8
-defaultRuntimeWorkers = unsafePerformIO $ runtimeStartWorkers 1 -- TODO: Set correct number of threads
+defaultRuntimeWorkers = unsafePerformIO $ threadCount >>= runtimeStartWorkers
 
 foreign import ccall unsafe "accelerate_start_workers" runtimeStartWorkers :: Word64 -> IO (Ptr Int8)
 foreign import ccall unsafe "accelerate_signal_resolve" runtimeSignalResolve :: Ptr Int8 -> Ptr Int8 -> IO ()
@@ -342,3 +345,10 @@ foreign import ccall unsafe "accelerate_program_retain" runtimeProgramRetain :: 
 foreign import ccall unsafe "accelerate_program_release" runtimeProgramRelease :: Ptr Int8 -> IO ()
 foreign import ccall unsafe "accelerate_schedule" runtimeSchedule :: Ptr Int8 -> Ptr Int8 -> Word32 -> IO ()
 foreign import ccall unsafe "accelerate_ref_write_buffer" runtimeRefWriteBuffer :: Ptr (Ptr Int8) -> Ptr Int8 -> IO ()
+
+threadCount :: IO Word64
+threadCount = do
+  nproc <- getNumProcessors
+  menv  <- (readMaybe =<<) <$> lookupEnv "ACCELERATE_LLVM_NATIVE_THREADS"
+
+  return $ fromIntegral $ fromMaybe nproc menv
