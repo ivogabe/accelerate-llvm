@@ -197,7 +197,7 @@ Library
     cbits/queue.cpp
 
   cc-options: -O2 -Wall -Wextra
-  cxx-options: -O2 -Wall -Wextra
+  cxx-options: -O2 -Wall -Wextra -std=c++14
 
 test-suite nofib-llvm-native
   type:                 exitcode-stdio-1.0

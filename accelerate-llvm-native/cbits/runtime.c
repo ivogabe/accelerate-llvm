@@ -33,7 +33,7 @@ void* accelerate_worker(void *data_packed) {
   struct Workers *workers = accelerate_unpack_ptr((uintptr_t) data_packed);
   uint16_t thread_idx = accelerate_unpack_tag((uintptr_t) data_packed);
 
-  uint attempts_remaining = ATTEMPTS;
+  unsigned int attempts_remaining = ATTEMPTS;
 
   struct Task task;
   task.program = NULL;
@@ -59,7 +59,7 @@ void* accelerate_worker(void *data_packed) {
         // start_task from the Work Assisting paper
         atomic_store_explicit(&workers->scheduler.activities[thread_idx], accelerate_pack(kernel, 0), memory_order_release);
         accelerate_parker_wake_all(&workers->scheduler.parker);
-        kernel->work_function(kernel, 0, &workers->scheduler.activities[thread_idx]);
+        kernel->work_function(kernel, 0, (uintptr_t*) &workers->scheduler.activities[thread_idx]);
         // signal_task_empty from the Work Assisting paper,
         // and end_task
         // Note that in the paper, the work function calls this function.
@@ -127,7 +127,7 @@ void* accelerate_worker(void *data_packed) {
       if (other_thread < 0) other_thread += thread_count;
       if (other_thread == thread_idx) break;
 
-      uintptr_t *ptr = &workers->scheduler.activities[other_thread];
+      _Atomic(uintptr_t) *ptr = &workers->scheduler.activities[other_thread];
       if (atomic_load_explicit(ptr, memory_order_relaxed) == 0) continue;
       uintptr_t activity = atomic_fetch_add_explicit(ptr, accelerate_pack(NULL, 1), memory_order_acquire);
       struct KernelLaunch *kernel = accelerate_unpack_ptr(activity);
@@ -137,7 +137,7 @@ void* accelerate_worker(void *data_packed) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
       uint32_t i = atomic_fetch_add_explicit(&kernel->work_index, 1, memory_order_relaxed);
-      kernel->work_function(kernel, i, ptr);
+      kernel->work_function(kernel, i, (uintptr_t*) ptr);
       // signal_task_empty from the Work Assisting paper,
       // and end_task
       // Similar to above, signal_task_empty happens here instead of in the work function.

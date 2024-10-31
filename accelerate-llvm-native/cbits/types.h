@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,7 +13,7 @@ struct KernelLaunch;
 
 typedef struct KernelLaunch* ProgramFunction(struct Workers* workers, uint16_t thread_index, struct Program* data, uint32_t location);
 struct Program {
-  uint64_t reference_count;
+  _Atomic uint64_t reference_count;
   ProgramFunction *run;
   uint8_t data[0]; // Actual type will be different. Only use this field to get a pointer to the data.
 };
@@ -35,7 +36,7 @@ struct ThreadParker {
   // Should be modified with atomic instructions.
   // Contains 0 (false) or 1 (true).
   // Denotes whether any thread might be sleeping.
-  uint any_sleeping;
+  _Atomic unsigned int any_sleeping;
 };
 void accelerate_parker_wake_all(struct ThreadParker *parker);
 
@@ -44,7 +45,7 @@ struct Scheduler {
   // Array of packed pointers refering to KernelLaunch objects.
   // One entry per thread, containing their current data-parallel activity (kernel).
   // NULL if they are not executing a kernel.
-  uintptr_t* activities;
+  _Atomic(uintptr_t)* activities;
   struct ThreadParker parker;
 };
 
@@ -58,7 +59,7 @@ struct Signal {
   // 0 for an unresolved signal without terms that wait on this signal
   // 1 for a resolved signal
   // Otherwise, pointer to a SignalWaiter for an term that waits on this signal
-  size_t state;
+  _Atomic size_t state;
 };
 
 struct SignalWaiter {
@@ -106,8 +107,8 @@ struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;
   uint32_t program_continuation;
-  int32_t active_threads;
-  uint32_t work_index;
+  _Atomic int32_t active_threads;
+  _Atomic uint32_t work_index;
   // In the future, perhaps also store a uint32_t work_size
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
 };

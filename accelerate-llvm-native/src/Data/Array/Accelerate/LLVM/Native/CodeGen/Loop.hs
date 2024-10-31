@@ -231,7 +231,7 @@ workassistLoop counter firstIndex activitiesSlot size doWork = do
 
   doWork index
 
-  nextIndex <- lift $ atomicAdd Unordered counter (integral TypeWord32 1)
+  nextIndex <- lift $ atomicAdd Monotonic counter (integral TypeWord32 1)
   condition <- lift $ lt singleType (OP_Word32 nextIndex) (OP_Word32 size)
 
   -- Append the phi node to the start of the 'work' block.

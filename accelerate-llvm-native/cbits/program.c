@@ -29,7 +29,7 @@ void accelerate_program_release(struct Program *program) {
 // Reference counting on Refs containing Buffers
 // See [reference counting for Ref] in Data.Array.Accelerate.LLVM.Native.Link.Schedule
 void accelerate_ref_write_buffer(void **ref, void *buffer) {
-  size_t *ptr = (size_t*) ref;
+  _Atomic size_t *ptr = (_Atomic size_t*) ref;
   size_t value = *ptr;
   size_t incremented = value >> 1;
   // Add the number of references to the Ref to the Buffer
@@ -52,7 +52,7 @@ void accelerate_ref_write_buffer(void **ref, void *buffer) {
   }
 }
 void accelerate_ref_retain(void **ref) {
-  size_t *ptr = (size_t*) ref;
+  _Atomic(size_t) *ptr = (_Atomic size_t*) ref;
   size_t value = *ptr;
   while (true) {
     // Note: reference count is shifted by one. The least significant bit is a tag to denote that this is an unfilled reference.
@@ -68,7 +68,7 @@ void accelerate_ref_retain(void **ref) {
   }
 }
 void accelerate_ref_release(void **ref) {
-  size_t *ptr = (size_t*) ref;
+  _Atomic(size_t) *ptr = (_Atomic size_t*) ref;
   size_t value = *ptr;
   while (true) {
     // Note: reference count is shifted by one. The least significant bit is a tag to denote that this is an unfilled reference.
