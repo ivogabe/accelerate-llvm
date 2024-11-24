@@ -1,8 +1,6 @@
 #include "types.h"
 
-// Reference counting on linked functions (ProgramFunctions and KernelFunctions)
-void accelerate_function_retain(void *function) {
-}
+// Memory management on linked functions (ProgramFunctions and KernelFunctions)
 void accelerate_function_release(void *function) {
 }
 
@@ -20,7 +18,7 @@ void accelerate_program_release(struct Program *program) {
   if (old == 1) {
     // Location 1 of the program is the destructor,
     // which may be invoked without a Worker* pointer and without a thread index.
-    program->run(NULL, 0, program, 1);
+    program->run(&accelerate_runtime_lib, NULL, 0, program, 1);
     accelerate_function_release(&program->run);
     free(program);
   }

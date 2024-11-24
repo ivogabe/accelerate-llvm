@@ -66,7 +66,7 @@ import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
 
 data NativeProgram = NativeProgram
-  !(Lifetime (FunPtr (Ptr Int8 -> Int16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
+  !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Int16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
   !Int -- The size of the program structure.
   !(Ptr Int8 -> IO ()) -- The IO action to fill the imports part of a program structure,
   !Int -- The offset of the data in the program structure.
@@ -79,10 +79,11 @@ linkSchedule' uid schedule
   | (sz, offset, prepInput, body) <- codegenSchedule schedule
   = do
     let ptrTp = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
+    let ptrPtrTp = PtrPrimType ptrTp defaultAddrSpace
 
     let name = fromString $ "schedule_" ++ show uid
     m <- codeGenFunction name (PrimType ptrTp)
-        (LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Int16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
+        (LLVM.Lam ptrPtrTp "runtime_lib" . LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Int16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
         body
 
     obj <- compile uid name m
@@ -115,6 +116,34 @@ prepareImports (TupRsingle tp) (TupRsingle io) ptr cursor = case tp of
   _ -> internalError "Unexpected type in imports of program"
 prepareImports _ _ _ _ = internalError "Tuple mismatch"
 
+-- Loads all runtime functions from the RuntimeLib struct to local variables.
+loadRuntime :: CodeGen Native ()
+loadRuntime = mapM_ load $ Prelude.zip [0..] runtime
+  where
+    load :: (Int, Name (Ptr Int8)) -> CodeGen Native ()
+    load (idx, name) = do
+      let idx' = ConstantOperand $ ScalarConstant scalarTypeInt idx
+      -- This uses that as of LLVM 15, pointers are opaque.
+      -- Pointee types don't match, as we use a Ptr Int8 as a function pointer.
+      -- This code thus doesn't work on older version of LLVM.
+      ptr <- instr' $ GetPtrElementPtr operandRuntimeLib idx'
+      instr_ $ downcast $ name := LoadPtr NonVolatile ptr
+    -- Fields of RuntimeLib in cbits/types.h.
+    -- Order and names should match.
+    runtime =
+      [ "accelerate_buffer_alloc"
+      , "accelerate_buffer_release"
+      , "accelerate_buffer_retain"
+      , "accelerate_function_release"
+      , "accelerate_ref_release"
+      , "accelerate_ref_retain"
+      , "accelerate_ref_write_buffer"
+      , "accelerate_schedule"
+      , "accelerate_schedule_after_or"
+      , "accelerate_signal_resolve"
+      , "hs_try_putmvar"
+      ]
+
 codegenSchedule :: forall t. UniformScheduleFun NativeKernel () t -> (Int, Int, Ptr Int8 -> IO (), CodeGen Native ())
 codegenSchedule schedule
   | Exists2 schedule1 <- convertFun schedule =
@@ -129,6 +158,8 @@ codegenSchedule schedule
         _ <- prepareImports (importsType schedule1) (importsInit schedule1) ptr (2 * sizeOf (1 :: Int))
         return ()
     , do
+        loadRuntime
+
         -- Add 2 for the initial block and the destructor block
         let blocks = blockCount schedule1 + 2
 
@@ -184,6 +215,9 @@ codegenSchedule schedule
         returnNull
     )
 
+operandRuntimeLib :: Operand (Ptr (Ptr Int8))
+operandRuntimeLib = LocalReference (PrimType $ PtrPrimType primType defaultAddrSpace) "runtime_lib"
+
 operandWorkers :: Operand (Ptr Int8)
 operandWorkers = LocalReference type' "workers"
 
@@ -204,7 +238,7 @@ destructor fullState (TupRsingle tp) idx = do
     PtrPrimType NamedPrimType{} _ -> do
       ptr <- instr' $ LoadPtr NonVolatile ptrPtr
       ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
-      _ <- call'
+      _ <- callLocal
         (LLVM.lamUnnamed primType $
           LLVM.Body VoidType Nothing (Label "accelerate_function_release"))
         (LLVM.ArgumentsCons ptr' []
@@ -214,7 +248,7 @@ destructor fullState (TupRsingle tp) idx = do
     PtrPrimType _ _ -> do
       ptr <- instr' $ LoadPtr NonVolatile ptrPtr
       ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
-      _ <- call'
+      _ <- callLocal
         (LLVM.lamUnnamed primType $
           LLVM.Body VoidType Nothing (Label "accelerate_buffer_release"))
         (LLVM.ArgumentsCons ptr' []
@@ -349,7 +383,7 @@ convert (Spawn a b)
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
       (structVarsA, _, structVarsB, localVarsB) <- forkEnv structVars localVars (varsFree a1) (varsFree b1)
 
-      _ <- call (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.Body VoidType Nothing (Label "accelerate_schedule")) 
+      _ <- callLocal (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.Body VoidType Nothing (Label "accelerate_schedule")) 
         (LLVM.ArgumentsCons operandWorkers []
           $ LLVM.ArgumentsCons operandProgram []
           $ LLVM.ArgumentsCons (integral TypeWord32 $ fromIntegral $ nextBlock + blockCount b1) []
@@ -604,7 +638,7 @@ convert (Effect (SignalAwait signals) next)
         go waiter i (idx : idxs) = do
           let blockContinue = if i == 0 then blockNext else newBlockNamed $ blockName nextBlock ++ ".continue." ++ show i
           signal <- getPtr structVars idx
-          p <- call'
+          p <- callLocal
             (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
               LLVM.lamUnnamed primType $ LLVM.lamUnnamed (PtrPrimType typeSignalWaiter defaultAddrSpace) $
               LLVM.Body (type') Nothing (Label "accelerate_schedule_after_or"))
@@ -650,7 +684,7 @@ convert (Effect (SignalResolve signals) next)
             mvarPtr <- m
             mvarPtr' <- instr' $ PtrCast (PtrPrimType (primType @(Ptr Int8)) defaultAddrSpace) mvarPtr
             mvar <- instr' $ LoadPtr NonVolatile mvarPtr'
-            _ <- call
+            _ <- callLocal
               (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
                 LLVM.Body VoidType Nothing (Label "hs_try_putmvar")) 
               (LLVM.ArgumentsCons (integral TypeInt32 $ -1) []
@@ -660,7 +694,7 @@ convert (Effect (SignalResolve signals) next)
             go idxs
           Just (StructVar False _ m) -> do
             signal <- m
-            _ <- call
+            _ <- callLocal
               (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
                 LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve")) 
               (LLVM.ArgumentsCons operandWorkers []
@@ -690,7 +724,7 @@ convert (Effect (RefWrite ref value) next)
           ref'' <- instr' $ PtrCast (PtrPrimType primType defaultAddrSpace) ref'
           value'' <- instr' $ PtrCast primType value'
           -- See: [reference counting for Ref]
-          _ <- call'
+          _ <- callLocal
             (LLVM.lamUnnamed (PtrPrimType (primType @(Ptr Int8)) defaultAddrSpace) $
               LLVM.lamUnnamed (primType @(Ptr Int8)) $
               LLVM.Body VoidType Nothing (Label "accelerate_ref_write_buffer"))
@@ -709,6 +743,9 @@ convert (Effect (RefWrite ref value) next)
       BaseRrefWrite t -> t
       _ -> internalError "OutputRef impossible"
 -- Bindings
+-- No need to construct anything if the result is not used.
+-- This is required, since pushBindingSingle leaks memory when using LeftHandSideWildcard
+-- for buffers.
 convert (Alet (LeftHandSideWildcard _) _ next) = convert next
 -- Non-GroundR bindings: NewSignal and NewRef
 -- These bindings are special, in that they define two variables,
@@ -777,10 +814,6 @@ convert (Alet lhs (NewRef (GroundRbuffer tp)) next)
       LeftHandSidePair _ LeftHandSideSingle{} -> 1
       _ -> 0
 -- GroundR bindings
--- No need to construct anything if the result is not used.
--- This is required, since pushBindingSingle leaks memory when using LeftHandSideWildcard
--- for buffers.
-convert (Alet (LeftHandSideWildcard _) _ next) = convert next
 convert (Alet lhs (Alloc shr tp sz) next)
   | Refl <- scalarReprBase tp
   , Exists2 next1 <- convert next
@@ -806,7 +839,7 @@ convert (Alet lhs (Alloc shr tp sz) next)
         computeSize _ _ _ _ = internalError "Pair impossible"
 
       (localVars1, sz') <- computeSize localVars shr sz (integral TypeWord64 $ fromIntegral $ bytesElt $ TupRsingle tp)
-      ptr <- call'
+      ptr <- callLocal
         (LLVM.lamUnnamed primType $
           LLVM.Body (PrimType ptrTp) Nothing (Label "accelerate_buffer_alloc"))
         (LLVM.ArgumentsCons sz' []
@@ -850,7 +883,7 @@ convert (Alet lhs (Unit (Var tp idx)) next)
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
     maySuspend = maySuspend next1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-      ptr <- call'
+      ptr <- callLocal
         (LLVM.lamUnnamed primType $
           LLVM.Body (PrimType ptrTp) Nothing (Label "accelerate_buffer_alloc"))
         (LLVM.ArgumentsCons (integral TypeWord64 $ fromIntegral $ bytesElt $ TupRsingle tp) []
@@ -1184,7 +1217,7 @@ subEnv = \structVars localVars used -> do
     release (Just (StructVar _ (BaseRref (GroundRbuffer _)) m)) _ = do
       ptr <- m
       ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
-      _ <- call'
+      _ <- callLocal
         (LLVM.lamUnnamed primType $
           LLVM.Body VoidType Nothing (Label "accelerate_ref_release"))
         (LLVM.ArgumentsCons ptr' []
@@ -1239,7 +1272,7 @@ forkEnv = \structVars localVars usedLeft usedRight -> do
     retain (Just (StructVar _ (BaseRref (GroundRbuffer _)) m)) _ = do
       ptr <- m
       ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
-      _ <- call'
+      _ <- callLocal
         (LLVM.lamUnnamed primType $
           LLVM.Body VoidType Nothing (Label "accelerate_ref_retain"))
         (LLVM.ArgumentsCons ptr' []
@@ -1260,7 +1293,7 @@ forkEnv = \structVars localVars usedLeft usedRight -> do
 callBufferRelease :: Operand (Ptr t) -> CodeGen Native ()
 callBufferRelease ptr = do
   ptr' <- instr' $ PtrCast primType ptr
-  _ <- call'
+  _ <- callLocal
     (LLVM.lamUnnamed (primType @(Ptr Int8)) $
       LLVM.Body VoidType Nothing (Label "accelerate_buffer_release"))
     (LLVM.ArgumentsCons ptr' []
@@ -1271,7 +1304,7 @@ callBufferRelease ptr = do
 callBufferRetain :: Operand (Ptr t) -> CodeGen Native ()
 callBufferRetain ptr = do
   ptr' <- instr' $ PtrCast primType ptr
-  _ <- call'
+  _ <- callLocal
     (LLVM.lamUnnamed (primType @(Ptr Int8)) $
       LLVM.Body VoidType Nothing (Label "accelerate_buffer_retain"))
     (LLVM.ArgumentsCons ptr' []

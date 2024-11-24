@@ -11,7 +11,25 @@ struct Workers;
 struct Program;
 struct KernelLaunch;
 
-typedef struct KernelLaunch* ProgramFunction(struct Workers* workers, uint16_t thread_index, struct Program* data, uint32_t location);
+struct RuntimeLib {
+  void *accelerate_buffer_alloc;
+  void *accelerate_buffer_release;
+  void *accelerate_buffer_retain;
+
+  void *accelerate_function_release;
+
+  void *accelerate_ref_release;
+  void *accelerate_ref_retain;
+  void *accelerate_ref_write_buffer;
+
+  void *accelerate_schedule;
+  void *accelerate_schedule_after_or;
+  void *accelerate_signal_resolve;
+  void *hs_try_putmvar;
+};
+extern struct RuntimeLib accelerate_runtime_lib;
+
+typedef struct KernelLaunch* ProgramFunction(struct RuntimeLib* lib, struct Workers* workers, uint16_t thread_index, struct Program* data, uint32_t location);
 struct Program {
   _Atomic uint64_t reference_count;
   ProgramFunction *run;
@@ -84,10 +102,19 @@ struct Task accelerate_dequeue(struct Workers *workers);
 
 void accelerate_signal_resolve(struct Workers *workers, struct Signal *signal);
 
+void* accelerate_buffer_alloc(uint64_t byte_size);
 void accelerate_buffer_retain(void* interior);
 void accelerate_buffer_retain_by(void* interior, uint64_t amount);
 void accelerate_buffer_release(void* interior);
 void accelerate_buffer_release_by(void* interior, uint64_t amount);
+
+void accelerate_function_release(void *function);
+
+void accelerate_ref_write_buffer(void **ref, void *buffer);
+void accelerate_ref_release(void **ref);
+void accelerate_ref_retain(void **ref);
+
+void hs_try_putmvar(int32_t, void*);
 
 inline uintptr_t accelerate_pack(void *pointer, uint16_t tag) {
   const uintptr_t MASK = ~(1ULL << 48);

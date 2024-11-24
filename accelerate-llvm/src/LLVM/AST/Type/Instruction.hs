@@ -46,9 +46,7 @@ import qualified LLVM.AST.Operand                         as LLVM ( Operand(..),
 import qualified LLVM.AST.ParameterAttribute              as LLVM ( ParameterAttribute )
 import qualified LLVM.AST.RMWOperation                    as LLVM ( RMWOperation )
 import qualified LLVM.AST.Type                            as LLVM ( Type(..) )
-#if !MIN_VERSION_llvm_hs_pure(15,0,0)
 import qualified LLVM.AST.AddrSpace                       as LLVM
-#endif
 
 import Data.Array.Accelerate.AST                          ( PrimBool )
 import Data.Array.Accelerate.AST.Idx
@@ -249,6 +247,11 @@ data Instruction a where
                   -> [Operand i]
                   -> Instruction (Ptr a)
 
+  GetPtrElementPtr
+                  :: Operand (Ptr (Ptr a))
+                  -> Operand i
+                  -> Instruction (Ptr (Ptr a))
+
   GetStructElementPtr
                   :: PrimType t
                   -> Operand (Ptr (Struct a))
@@ -384,7 +387,7 @@ data Instruction a where
 
   -- <http://llvm.org/docs/LangRef.html#call-instruction>
   --
-  Call            :: Function (Either InlineAssembly Label) t
+  Call            :: Function Callable t
                   -> Arguments t
                   -> [Either GroupID FunctionAttribute]
                   -> Instruction (Result t)
@@ -437,6 +440,7 @@ instance Downcast (Instruction a) LLVM.Instruction where
     LoadPtr v p           -> LLVM.Load (downcast v) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment md
     LoadStruct v p        -> LLVM.Load (downcast v) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment md
     GetElementPtr t n i   -> LLVM.GetElementPtr inbounds (downcast t) (downcast n) (downcast i) md
+    GetPtrElementPtr n i  -> LLVM.GetElementPtr inbounds (downcast $ type' @(Ptr Int8)) (downcast n) [downcast i] md
     GetStructElementPtr _ n i -> case typeOf n of
       (PrimType (PtrPrimType t@(skipTypeAlias -> StructPrimType _ tp) _)) ->
                              LLVM.GetElementPtr inbounds (downcast t) (downcast n) [constant (0 :: Int), constant (fromIntegral $ tupleIdxToInt tp i :: Int32)] md
@@ -450,6 +454,7 @@ instance Downcast (Instruction a) LLVM.Instruction where
     LoadPtr v p           -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
     LoadStruct v p        -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
     GetElementPtr _ n i   -> LLVM.GetElementPtr inbounds (downcast n) (downcast i) md
+    GetPtrElementPtr n i  -> LLVM.GetElementPtr inbounds (downcast n) [downcast i] md
     GetStructElementPtr _ n i -> case typeOf n of
       PrimType (PtrPrimType (StructPrimType _ tp) _) ->
                              LLVM.GetElementPtr inbounds (downcast n) [constant (0 :: Int), constant (fromIntegral $ tupleIdxToInt tp i :: Int32)] md
@@ -619,14 +624,14 @@ instance Downcast (Instruction a) LLVM.Instruction where
       pointeeType (PrimType (PtrPrimType tp _)) = tp
       pointeeType _ = internalError "Ptr impossible"
 
-      call :: Function (Either InlineAssembly Label) t -> Arguments t -> [Either GroupID FunctionAttribute] -> LLVM.Instruction
+      call :: Function Callable t -> Arguments t -> [Either GroupID FunctionAttribute] -> LLVM.Instruction
 #if MIN_VERSION_llvm_hs_pure(15,0,0)
       call f args as = LLVM.Call tail LLVM.C [] fun_ty target (travArgs args) (downcast as) md
 #else
       call f args as = LLVM.Call tail LLVM.C []        target (travArgs args) (downcast as) md
 #endif
         where
-          trav :: Function (Either InlineAssembly Label) t
+          trav :: Function Callable t
                -> ( [LLVM.Type]                                 -- argument types
                   , Maybe LLVM.TailCallKind                     -- calling kind
                   , LLVM.Type                                   -- return type
@@ -634,11 +639,13 @@ instance Downcast (Instruction a) LLVM.Instruction where
                   )
           trav (Body u k o) =
             case o of
-              Left asm -> ([], downcast k, downcast u, Left  (downcast (LLVM.FunctionType ret argt False, asm)))
+              CallAssembly asm -> ([], downcast k, downcast u, Left  (downcast (LLVM.FunctionType ret argt False, asm)))
 #if MIN_VERSION_llvm_hs_pure(15,0,0)
-              Right n  -> ([], downcast k, downcast u, Right (LLVM.ConstantOperand (LLVM.GlobalReference (downcast n))))
+              CallGlobal n -> ([], downcast k, downcast u, Right (LLVM.ConstantOperand (LLVM.GlobalReference (downcast n))))
+              CallLocal n  -> ([], downcast k, downcast u, Right (LLVM.LocalReference ptr_fun_ty (downcast n)))
 #else
-              Right n  -> ([], downcast k, downcast u, Right (LLVM.ConstantOperand (LLVM.GlobalReference ptr_fun_ty (downcast n))))
+              CallGlobal n -> ([], downcast k, downcast u, Right (LLVM.ConstantOperand (LLVM.GlobalReference ptr_fun_ty (downcast n))))
+              CallLocal n  -> ([], downcast k, downcast u, Right (LLVM.LocalReference ptr_fun_ty (downcast n)))
 #endif
           trav (Lam t _ l)  =
             let (ts, k, r, n) = trav l
@@ -652,6 +659,8 @@ instance Downcast (Instruction a) LLVM.Instruction where
           fun_ty                          = LLVM.FunctionType ret argt False
 #if !MIN_VERSION_llvm_hs_pure(15,0,0)
           ptr_fun_ty                      = LLVM.PointerType fun_ty (LLVM.AddrSpace 0)
+#else
+          ptr_fun_ty                      = LLVM.PointerType (LLVM.AddrSpace 0)
 #endif
 
 
@@ -689,6 +698,7 @@ instance TypeOf Instruction where
       _ -> internalError "Ptr impossible"
     Store{}               -> VoidType
     GetElementPtr _ x _   -> typeOf x
+    GetPtrElementPtr x _  -> typeOf x
     GetStructElementPtr t x _ -> case typeOf x of
       PrimType (PtrPrimType _ addr) -> PrimType $ PtrPrimType t addr
       _ -> internalError "Ptr impossible"

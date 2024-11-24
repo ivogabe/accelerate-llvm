@@ -23,12 +23,18 @@ import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
+import LLVM.AST.Type.InlineAssembly
 
 import qualified LLVM.AST.Attribute                                 as LLVM
 import qualified LLVM.AST.Global                                    as LLVM
 import qualified LLVM.AST.Instruction                               as LLVM
 
 import Data.Typeable
+
+data Callable
+  = CallAssembly InlineAssembly
+  | CallGlobal Label
+  | CallLocal Label
 
 -- | Attributes for the function call instruction
 --

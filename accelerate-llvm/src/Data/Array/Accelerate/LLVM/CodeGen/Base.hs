@@ -25,7 +25,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Base (
   local, global,
 
   -- Functions & parameters
-  call, call',
+  call, call', callLocal,
   bindScalars, MarshalScalars, bindWorkRange,
 
 ) where
@@ -154,8 +154,8 @@ call f args attrs = do
   let decl      = (downcast f) { LLVM.functionAttributes = downcast attrs' }
       attrs'    = map Right attrs
       --
-      go :: GlobalFunction t -> Function (Either InlineAssembly Label) t
-      go (Body t k l) = Body t k (Right l)
+      go :: GlobalFunction t -> Function Callable t
+      go (Body t k l) = Body t k (CallGlobal l)
       go (Lam t x l)  = Lam t x (go l)
   --
   declare decl
@@ -166,11 +166,22 @@ call' f args attrs = do
   let decl      = (downcast f) { LLVM.functionAttributes = downcast attrs' }
       attrs'    = map Right attrs
       --
-      go :: GlobalFunction t -> Function (Either InlineAssembly Label) t
-      go (Body t k l) = Body t k (Right l)
+      go :: GlobalFunction t -> Function Callable t
+      go (Body t k l) = Body t k (CallGlobal l)
       go (Lam t x l)  = Lam t x (go l)
   --
   declare decl
+  instr' (Call (go f) args attrs')
+
+callLocal :: Function Label t -> Arguments t -> [FunctionAttribute] -> CodeGen arch (Operand (Result t))
+callLocal f args attrs = do
+  let
+      attrs'    = map Right attrs
+      --
+      go :: Function Label t -> Function Callable t
+      go (Body t k l) = Body t k (CallLocal l)
+      go (Lam t x l)  = Lam t x (go l)
+  --
   instr' (Call (go f) args attrs')
 
 -- | Converts a tuple of scalars to a function type

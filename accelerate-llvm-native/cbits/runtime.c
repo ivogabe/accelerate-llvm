@@ -2,6 +2,20 @@
 #include <unistd.h>
 #include <sched.h>
 
+struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
+  .accelerate_buffer_alloc = accelerate_buffer_alloc,
+  .accelerate_buffer_release = accelerate_buffer_release,
+  .accelerate_buffer_retain = accelerate_buffer_retain,
+  .accelerate_function_release = accelerate_function_release,
+  .accelerate_ref_release = accelerate_ref_release,
+  .accelerate_ref_retain = accelerate_ref_retain,
+  .accelerate_ref_write_buffer = accelerate_ref_write_buffer,
+  .accelerate_schedule = accelerate_schedule,
+  .accelerate_schedule_after_or = accelerate_schedule_after_or,
+  .accelerate_signal_resolve = accelerate_signal_resolve,
+  .hs_try_putmvar = hs_try_putmvar
+};
+
 static void accelerate_parker_maybe_park(struct ThreadParker *parker) {
   pthread_mutex_lock(&parker->lock);
   atomic_store_explicit(&parker->any_sleeping, 1, memory_order_release);
@@ -50,7 +64,7 @@ void* accelerate_worker(void *data_packed) {
       if (attempts_remaining == 0) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
-      struct KernelLaunch* kernel = task.program->run(workers, thread_idx, task.program, task.location);
+      struct KernelLaunch* kernel = task.program->run(&accelerate_runtime_lib, workers, thread_idx, task.program, task.location);
       if (kernel == NULL) {
         accelerate_program_release(task.program);
         task.program = NULL;
