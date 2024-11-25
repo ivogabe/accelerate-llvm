@@ -16,8 +16,6 @@ struct RuntimeLib {
   void *accelerate_buffer_release;
   void *accelerate_buffer_retain;
 
-  void *accelerate_function_release;
-
   void *accelerate_ref_release;
   void *accelerate_ref_retain;
   void *accelerate_ref_write_buffer;
@@ -33,6 +31,12 @@ typedef struct KernelLaunch* ProgramFunction(struct RuntimeLib* lib, struct Work
 struct Program {
   _Atomic uint64_t reference_count;
   ProgramFunction *run;
+  // MVar from Haskell, to be filled when the program is finished.
+  // After this is filled, the Haskell code can deallocate the kernels and ProgramFunction
+  // (which are dynamically loaded).
+  // Deallocating them is especially needed if the user uses meta-programming, and generates
+  // many different programs.
+  void *destructor_mvar;
   uint8_t data[0]; // Actual type will be different. Only use this field to get a pointer to the data.
 };
 
@@ -89,7 +93,7 @@ struct SignalWaiter {
 
 struct Workers* accelerate_start_workers(uint64_t thread_count);
 
-struct Program* accelerate_program_alloc(uint64_t byte_size, ProgramFunction *function);
+struct Program* accelerate_program_alloc(uint64_t byte_size, ProgramFunction *function, void *destructor_mvar);
 void accelerate_program_retain(struct Program *program);
 void accelerate_program_release(struct Program *program);
 
@@ -107,8 +111,6 @@ void accelerate_buffer_retain(void* interior);
 void accelerate_buffer_retain_by(void* interior, uint64_t amount);
 void accelerate_buffer_release(void* interior);
 void accelerate_buffer_release_by(void* interior, uint64_t amount);
-
-void accelerate_function_release(void *function);
 
 void accelerate_ref_write_buffer(void **ref, void *buffer);
 void accelerate_ref_release(void **ref);

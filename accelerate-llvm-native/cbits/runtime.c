@@ -6,7 +6,6 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .accelerate_buffer_alloc = accelerate_buffer_alloc,
   .accelerate_buffer_release = accelerate_buffer_release,
   .accelerate_buffer_retain = accelerate_buffer_retain,
-  .accelerate_function_release = accelerate_function_release,
   .accelerate_ref_release = accelerate_ref_release,
   .accelerate_ref_retain = accelerate_ref_retain,
   .accelerate_ref_write_buffer = accelerate_ref_write_buffer,

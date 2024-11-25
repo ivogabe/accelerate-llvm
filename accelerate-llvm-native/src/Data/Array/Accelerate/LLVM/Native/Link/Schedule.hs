@@ -68,7 +68,8 @@ import System.IO.Unsafe ( unsafePerformIO )
 data NativeProgram = NativeProgram
   !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Int16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
   !Int -- The size of the program structure.
-  !(Ptr Int8 -> IO ()) -- The IO action to fill the imports part of a program structure,
+  ![Exists Lifetime] -- The lifetimes to be kept alive while the program is running.
+  !(Ptr Int8 -> IO ()) -- The IO action to fill the imports part of a program structure.
   !Int -- The offset of the data in the program structure.
 
 linkSchedule :: UID -> UniformScheduleFun NativeKernel () t -> NativeProgram
@@ -76,7 +77,7 @@ linkSchedule uid schedule = unsafePerformIO $ evalLLVM defaultTarget $ linkSched
 
 linkSchedule' :: UID -> UniformScheduleFun NativeKernel () t -> LLVM Native NativeProgram
 linkSchedule' uid schedule
-  | (sz, offset, prepInput, body) <- codegenSchedule schedule
+  | (sz, offset, lifetimes, prepInput, body) <- codegenSchedule schedule
   = do
     let ptrTp = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
     let ptrPtrTp = PtrPrimType ptrTp defaultAddrSpace
@@ -86,20 +87,24 @@ linkSchedule' uid schedule
         (LLVM.Lam ptrPtrTp "runtime_lib" . LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Int16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
         body
 
+    -- Evaluate all values in the list
+    foldl (\b a -> a `seq` b) () lifetimes `seq` return ()
+
     obj <- compile uid name m
     fun <- link obj
-    return $ NativeProgram fun sz prepInput offset
+    return $ NativeProgram fun sz lifetimes prepInput offset 
 
+-- Safety: to prevent the garbage collector to destruct the Lifetime,
+-- and the function it refers to, you should call touchLifetime
+-- when all work using the Ptr is finished.
 unsafeGetPtrFromLifetimeFunPtr :: Lifetime (FunPtr f) -> Ptr f
-unsafeGetPtrFromLifetimeFunPtr lifetime = unsafePerformIO $ do
-  _ <- forkIO $ do
-    threadDelay (365 * 24 * 60 * 60 * 1000000)
-    touchLifetime lifetime
-  return $ castFunPtrToPtr $ unsafeGetValue lifetime
+unsafeGetPtrFromLifetimeFunPtr lifetime =
+  castFunPtrToPtr $ unsafeGetValue lifetime
 
-programType :: PrimType imports -> PrimType state -> PrimType (Struct (((Int64, Ptr Int8), imports), state))
+programType :: PrimType imports -> PrimType state -> PrimType (Struct ((((Int64, Ptr Int8), Ptr Int8), imports), state))
 programType importsTp stateTp = StructPrimType False $
   TupRsingle primType
+  `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle importsTp
   `TupRpair` TupRsingle stateTp
@@ -134,7 +139,6 @@ loadRuntime = mapM_ load $ Prelude.zip [0..] runtime
       [ "accelerate_buffer_alloc"
       , "accelerate_buffer_release"
       , "accelerate_buffer_retain"
-      , "accelerate_function_release"
       , "accelerate_ref_release"
       , "accelerate_ref_retain"
       , "accelerate_ref_write_buffer"
@@ -144,18 +148,19 @@ loadRuntime = mapM_ load $ Prelude.zip [0..] runtime
       , "hs_try_putmvar"
       ]
 
-codegenSchedule :: forall t. UniformScheduleFun NativeKernel () t -> (Int, Int, Ptr Int8 -> IO (), CodeGen Native ())
+codegenSchedule :: forall t. UniformScheduleFun NativeKernel () t -> (Int, Int, [Exists Lifetime], Ptr Int8 -> IO (), CodeGen Native ())
 codegenSchedule schedule
   | Exists2 schedule1 <- convertFun schedule =
     ( fst $ primSizeAlignment $ programType
       (StructPrimType False $ importsType schedule1)
       (StructPrimType False $ stateType schedule1)
     , makeAligned
-        (2 * (sizeOf (1 :: Int))
+        (3 * (sizeOf (1 :: Int))
           + fst (primSizeAlignment $ StructPrimType False $ importsType schedule1))
         (snd $ primSizeAlignment $ StructPrimType False $ stateType schedule1)
+    , importedLifetimes schedule1
     , \ptr -> do
-        _ <- prepareImports (importsType schedule1) (importsInit schedule1) ptr (2 * sizeOf (1 :: Int))
+        _ <- prepareImports (importsType schedule1) (importsInit schedule1) ptr (3 * sizeOf (1 :: Int))
         return ()
     , do
         loadRuntime
@@ -178,11 +183,10 @@ codegenSchedule schedule
         let stateTp = NamedPrimType "state_t" $ StructPrimType False $ stateType schedule1
         let ptrStateTp = PtrPrimType stateTp defaultAddrSpace
 
-        -- The program has type (i64, ptr, imports_t, state_t)
+        -- The program has type (i64, ptr, ptr, imports_t, state_t)
         let dataTp = programType importsTp stateTp
         let ptrDataTp = PtrPrimType dataTp defaultAddrSpace
 
-        -- Step over the reference count and function pointer (16 bytes)
         dataPtr <- instr' $ PtrCast ptrDataTp operandProgram
         instr_ $ downcast $ "imports" := GetStructElementPtr importsTp dataPtr (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
         instr_ $ downcast $ "state" := GetStructElementPtr stateTp dataPtr (TupleIdxRight TupleIdxSelf)
@@ -236,14 +240,9 @@ destructor fullState (TupRsingle tp) idx = do
   ptrPtr <- instr' $ GetStructElementPtr tp fullState idx
   case tp of
     PtrPrimType NamedPrimType{} _ -> do
-      ptr <- instr' $ LoadPtr NonVolatile ptrPtr
-      ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
-      _ <- callLocal
-        (LLVM.lamUnnamed primType $
-          LLVM.Body VoidType Nothing (Label "accelerate_function_release"))
-        (LLVM.ArgumentsCons ptr' []
-          LLVM.ArgumentsNil)
-        []
+      -- Kernels are deallocated by the Haskell garbage collector.
+      -- See destructorMVar in Data.Array.Accelerate.LLVM.Native.Execute
+      -- for how these are kept alive during execution.
       return ()
     PtrPrimType _ _ -> do
       ptr <- instr' $ LoadPtr NonVolatile ptrPtr
@@ -311,6 +310,13 @@ data Phase1 env imports state where
     blockCount :: Int,
     importsType :: TupR PrimType imports,
     importsInit :: TupR IO imports,
+    -- List of the lifetimes of the imported kernels.
+    -- Stored for memory management. The pointers stored in the lifetimes are
+    -- passed to the C runtime. The C runtime will inform the Haskell world
+    -- when the computation is finished, after which the Haskell code will
+    -- touch all these lifetimes. The Haskell GC can deallocate these objects
+    -- only after this touching happened.
+    importedLifetimes :: [Exists Lifetime],
     stateType :: TupR PrimType state,
     varsFree :: IdxSet env,
     varsInStruct :: IdxSet env,
@@ -341,6 +347,7 @@ convertFun (Slam (LeftHandSideSingle tp) fun)
     blockCount = blockCount fun1,
     importsType = importsType fun1,
     importsInit = importsInit fun1,
+    importedLifetimes = importedLifetimes fun1,
     stateType = TupRsingle tp' `TupRpair` stateType fun1,
     varsFree = IdxSet.drop $ varsFree fun1,
     varsInStruct = IdxSet.drop $ varsInStruct fun1,
@@ -359,6 +366,7 @@ convert Return =
     blockCount = 0,
     importsType = TupRunit,
     importsInit = TupRunit,
+    importedLifetimes = [],
     stateType = TupRunit,
     varsFree = IdxSet.empty,
     varsInStruct = IdxSet.empty,
@@ -374,6 +382,7 @@ convert (Spawn a b)
     blockCount = blockCount a1 + blockCount b1 + 1,
     importsType = importsType a1 `TupRpair` importsType b1,
     importsInit = importsInit a1 `TupRpair` importsInit b1,
+    importedLifetimes = importedLifetimes a1 ++ importedLifetimes b1,
     stateType = stateType a1 `TupRpair` stateType b1,
     varsFree = varsFree a1 `IdxSet.union` varsFree b1,
     -- All free variables of a1 must be stored in the state structure,
@@ -425,6 +434,7 @@ convert (Acond cond whenTrue whenFalse next)
     blockCount = blockCount whenTrue1 + blockCount whenFalse1 + blockCount next1,
     importsType = (importsType whenTrue1 `TupRpair` importsType whenFalse1) `TupRpair` importsType next1,
     importsInit = (importsInit whenTrue1 `TupRpair` importsInit whenFalse1) `TupRpair` importsInit next1,
+    importedLifetimes = importedLifetimes whenTrue1 ++ importedLifetimes whenFalse1 ++ importedLifetimes next1,
     stateType = (stateType whenTrue1 `TupRpair` stateType whenFalse1) `TupRpair` stateType next1,
     varsFree = IdxSet.insertVar cond $ varsFree whenTrue1 `IdxSet.union` varsFree whenFalse1 `IdxSet.union` varsFree next1,
     varsInStruct =
@@ -492,6 +502,7 @@ convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step))
     blockCount = blockCount step1 + blockCount next1,
     importsType = importsType step1 `TupRpair` importsType next1,
     importsInit = importsInit step1 `TupRpair` importsInit next1,
+    importedLifetimes = importedLifetimes step1 ++ importedLifetimes next1,
     stateType = TupRsingle ioType `TupRpair` TupRsingle (primType @PrimBool) `TupRpair` TupRsingle ioType `TupRpair` stateType step1 `TupRpair` stateType next1,
     varsFree = allVars,
     -- Note: this is too pessimistic if 'maySuspend next1' is false. However, I
@@ -556,11 +567,13 @@ convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step))
 -- Effects
 convert (Effect effect@(Exec _ kernel kargs) next)
   | Exists2 next1 <- convert next
+  , kFunPtr <- kernelFun kernel
   , (argsTp, argsTp') <- kernelArgsTp kargs =
   Exists2 $ Phase1{
     blockCount = blockCount next1 + 1,
     importsType = TupRsingle kernelTp `TupRpair` importsType next1,
-    importsInit = TupRsingle (veryUnsafeGetFunPtr kernel) `TupRpair` importsInit next1,
+    importsInit = TupRsingle (unsafeGetFunPtr kernel) `TupRpair` importsInit next1,
+    importedLifetimes = kFunPtr : importedLifetimes next1,
     stateType = TupRsingle argsTp `TupRpair` stateType next1,
     varsFree = varsFree next1 `IdxSet.union` effectFreeVars effect,
     -- Place all free variables of the kernel in the struct.
@@ -611,6 +624,7 @@ convert (Effect (SignalAwait signals) next)
     blockCount = blockCount next1 + 1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = TupRpair (TupRsingle typeSignalWaiter) $ stateType next1,
     varsFree = varsFree next1 `IdxSet.union` signalsSet,
     -- All free vars must be placed in the struct, since the function may be suspended.
@@ -671,6 +685,7 @@ convert (Effect (SignalResolve signals) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = stateType next1,
     varsFree = varsFree next1 `IdxSet.union` signalsSet,
     varsInStruct = varsInStruct next1 `IdxSet.union` signalsSet,
@@ -712,6 +727,7 @@ convert (Effect (RefWrite ref value) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = stateType next1,
     varsFree = IdxSet.insertVar ref $ IdxSet.insertVar value $ varsFree next1,
     varsInStruct = IdxSet.insertVar ref $ varsInStruct next1,
@@ -757,6 +773,7 @@ convert (Alet lhs (NewSignal _) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = TupRsingle (primType :: PrimType Word) `TupRpair` stateType next1,
     varsFree = IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
@@ -775,6 +792,7 @@ convert (Alet lhs (NewRef (GroundRscalar tp)) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = TupRsingle (ScalarPrimType tp) `TupRpair` stateType next1,
     varsFree = IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
@@ -790,6 +808,7 @@ convert (Alet lhs (NewRef (GroundRbuffer tp)) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = TupRsingle t `TupRpair` stateType next1,
     varsFree = IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
@@ -822,6 +841,7 @@ convert (Alet lhs (Alloc shr tp sz) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = bStateType bnd `TupRpair` stateType next1,
     varsFree = IdxSet.insertVars sz $ IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
@@ -859,6 +879,7 @@ convert (Alet lhs (Use tp _ buffer) next)
     blockCount = blockCount next1,
     importsType = TupRsingle ptrTp `TupRpair` importsType next1,
     importsInit = TupRsingle (castPtr <$> bufferRetainAndGetRef buffer) `TupRpair` importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = bStateType bnd `TupRpair` stateType next1,
     varsFree = IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
@@ -878,6 +899,7 @@ convert (Alet lhs (Unit (Var tp idx)) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = bStateType bnd `TupRpair` stateType next1,
     varsFree = IdxSet.insert idx $ IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
@@ -904,6 +926,7 @@ convert (Alet lhs (RefRead ref) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = stateType next1,
     varsFree = IdxSet.insertVar ref $ IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.insertVar ref $ IdxSet.drop' lhs $ varsInStruct next1,
@@ -952,6 +975,7 @@ convert (Alet lhs (Compute expr) next)
     blockCount = blockCount next1,
     importsType = importsType next1,
     importsInit = importsInit next1,
+    importedLifetimes = importedLifetimes next1,
     stateType = bStateType bnd `TupRpair` stateType next1,
     varsFree = bindingFreeVars (Compute expr) `IdxSet.union` IdxSet.drop' lhs (varsFree next1),
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
@@ -1176,11 +1200,14 @@ storeKernelArgs structVars localVars (SArgBuffer _ (Var tp idx) :>: sargs) struc
       _ -> internalError "Buffer impossible"
 storeKernelArgs _ _ ArgsNil _ _ = return ()
 
--- TODO: Make this safe? I think we should move the linker to the C world as well, to make this sound...
--- Only the C side can decide when the ObjectR needs to be deallocated
-veryUnsafeGetFunPtr :: OpenKernelFun NativeKernel env f -> IO (Ptr (Struct Int8))
-veryUnsafeGetFunPtr (KernelFunLam _ f) = veryUnsafeGetFunPtr f
-veryUnsafeGetFunPtr (KernelFunBody kernel) = return $ castPtr $ unsafeGetPtrFromLifetimeFunPtr $ kernelFunction kernel
+-- Safety: see unsafeGetPtrFromLifetimeFunPtr
+unsafeGetFunPtr :: OpenKernelFun NativeKernel env f -> IO (Ptr (Struct Int8))
+unsafeGetFunPtr (KernelFunLam _ f) = unsafeGetFunPtr f
+unsafeGetFunPtr (KernelFunBody kernel) = return $ castPtr $ unsafeGetPtrFromLifetimeFunPtr $ kernelFunction kernel
+
+kernelFun :: OpenKernelFun NativeKernel env f -> Exists Lifetime
+kernelFun (KernelFunLam _ f) = kernelFun f
+kernelFun (KernelFunBody kernel) = Exists $ kernelFunction kernel
 
 -- Releases any bindings that are not used according to 'used'
 -- Returns the environments with only variables in 'used'

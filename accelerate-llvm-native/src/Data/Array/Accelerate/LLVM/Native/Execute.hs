@@ -41,6 +41,7 @@ import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Analysis.Hash.Schedule.Uniform
 import Data.Array.Accelerate.Interpreter                ( evalExp, EvalArrayInstr(..) )
 import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.LLVM.Native.Kernel
 import Data.Array.Accelerate.LLVM.Native.Execute.Environment
 import Data.Array.Accelerate.LLVM.Native.Execute.KernelArguments
@@ -75,13 +76,21 @@ instance Execute UniformScheduleFun NativeKernel where
     NativeLinked
       (linkSchedule (hashUniformScheduleFun schedule) schedule)
       schedule
-  executeAfunSchedule _ (NativeLinked (NativeProgram fun size imports offset) schedule) =
+  executeAfunSchedule _ (NativeLinked (NativeProgram fun size lifetimes imports offset) schedule) =
     prepareProgram schedule start final
     where
       start :: IO (Ptr Int8, Int)
       start = do
+        -- Create an MVar, which the C runtime will fill when the program is finished.
+        -- The Haskell side will keep the program function and kernels alive until the
+        -- MVar is filled, by performing a touchLifetime on all lifetimes
+        -- when the MVar is filled.
+        -- This happens in 'destructWhen' from a separate thread.
+        destructorMVar <- newEmptyMVar
+        sp <- newStablePtrPrimMVar destructorMVar
+        forkIO $ destructWhen destructorMVar (Exists fun : lifetimes)
         -- Allocate space for the program imports, arguments and local state
-        program <- runtimeProgramAlloc (fromIntegral size) $ castPtr $ unsafeGetPtrFromLifetimeFunPtr fun
+        program <- runtimeProgramAlloc (fromIntegral size) (castPtr $ unsafeGetPtrFromLifetimeFunPtr fun) sp
         -- Initialize the struct with the imports
         imports program
         -- 'prepareProgram' will initialize struct with the arguments of the function
@@ -91,6 +100,11 @@ instance Execute UniformScheduleFun NativeKernel where
         -- All imports and arguments are placed in the struct, we can start the program
         runtimeSchedule defaultRuntimeWorkers program 0
         runtimeProgramRelease program
+
+destructWhen :: MVar () -> [Exists Lifetime] -> IO ()
+destructWhen mvar list = do
+  readMVar mvar
+  mapM_ (\(Exists l) -> touchLifetime l) list
 
 prepareProgram
   :: UniformScheduleFun NativeKernel env f
@@ -340,7 +354,7 @@ defaultRuntimeWorkers = unsafePerformIO $ threadCount >>= runtimeStartWorkers
 
 foreign import ccall unsafe "accelerate_start_workers" runtimeStartWorkers :: Word64 -> IO (Ptr Int8)
 foreign import ccall unsafe "accelerate_signal_resolve" runtimeSignalResolve :: Ptr Int8 -> Ptr Int8 -> IO ()
-foreign import ccall unsafe "accelerate_program_alloc" runtimeProgramAlloc :: Word64 -> Ptr Int8 -> IO (Ptr Int8)
+foreign import ccall unsafe "accelerate_program_alloc" runtimeProgramAlloc :: Word64 -> Ptr Int8 -> StablePtr PrimMVar -> IO (Ptr Int8)
 foreign import ccall unsafe "accelerate_program_retain" runtimeProgramRetain :: Ptr Int8 -> IO ()
 foreign import ccall unsafe "accelerate_program_release" runtimeProgramRelease :: Ptr Int8 -> IO ()
 foreign import ccall unsafe "accelerate_schedule" runtimeSchedule :: Ptr Int8 -> Ptr Int8 -> Word32 -> IO ()

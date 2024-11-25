@@ -1,13 +1,10 @@
 #include "types.h"
 
-// Memory management on linked functions (ProgramFunctions and KernelFunctions)
-void accelerate_function_release(void *function) {
-}
-
-struct Program* accelerate_program_alloc(uint64_t byte_size, ProgramFunction *function) {
+struct Program* accelerate_program_alloc(uint64_t byte_size, ProgramFunction *function, void *destructor_mvar) {
   struct Program* program = malloc(byte_size);
   program->reference_count = 1;
   program->run = function;
+  program->destructor_mvar = destructor_mvar;
   return program;
 }
 void accelerate_program_retain(struct Program *program) {
@@ -19,7 +16,10 @@ void accelerate_program_release(struct Program *program) {
     // Location 1 of the program is the destructor,
     // which may be invoked without a Worker* pointer and without a thread index.
     program->run(&accelerate_runtime_lib, NULL, 0, program, 1);
-    accelerate_function_release(&program->run);
+    // By filling this MVar, the Haskell runtime is informed that the run function (program->run)
+    // and any kernels from this program, are not needed by this program any more.
+    // The Haskell garbage collector may eventually deallocate them.
+    hs_try_putmvar(-1, program->destructor_mvar);
     free(program);
   }
 }
