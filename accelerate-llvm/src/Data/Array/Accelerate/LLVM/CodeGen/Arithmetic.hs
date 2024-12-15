@@ -48,7 +48,7 @@ import Data.Constraint                                              ( Dict(..) )
 import Data.Monoid
 import Data.String
 import Foreign.Storable                                             ( sizeOf )
-import Prelude                                                      ( Eq, Num, Maybe(..), ($), (==), (/), undefined, flip, fromInteger )
+import Prelude                                                      ( Eq, Num, Maybe(..), ($), (==), (/), undefined, const, fromInteger )
 import Text.Printf
 import qualified Data.Ord                                           as Ord
 import qualified Prelude                                            as P
@@ -478,13 +478,13 @@ max :: SingleType a -> Operands a -> Operands a -> CodeGen arch (Operands a)
 max ty x y
   | NumSingleType (FloatingNumType f) <- ty = mathf2 "fmax" f x y
   | otherwise                               = do c <- unbool <$> gte ty x y
-                                                 binop (flip Select c) ty x y
+                                                 binop (const $ Select c) ty x y
 
 min :: SingleType a -> Operands a -> Operands a -> CodeGen arch (Operands a)
 min ty x y
   | NumSingleType (FloatingNumType f) <- ty = mathf2 "fmin" f x y
   | otherwise                               = do c <- unbool <$> lte ty x y
-                                                 binop (flip Select c) ty x y
+                                                 binop (const $ Select c) ty x y
 
 
 -- Logical operators

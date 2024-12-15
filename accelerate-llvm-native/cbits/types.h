@@ -21,6 +21,7 @@ struct RuntimeLib {
   void *accelerate_ref_write_buffer;
 
   void *accelerate_schedule;
+  void *accelerate_schedule_after;
   void *accelerate_schedule_after_or;
   void *accelerate_signal_resolve;
   void *hs_try_putmvar;

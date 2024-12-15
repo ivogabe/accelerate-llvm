@@ -24,6 +24,7 @@
 module LLVM.AST.Type.Instruction
   where
 
+import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Constant                             ( Constant(ScalarConstant) )
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function
@@ -213,7 +214,11 @@ data Instruction a where
   -- ---------------------------------------
 
   -- <http://llvm.org/docs/LangRef.html#alloca-instruction>
-  -- Alloca
+  -- Allocates a single value.
+  -- (If we in the future need a more generic version of Alloca that allocates
+  -- a variable number of elements, we could add that as a separate constructor)
+  Alloca          :: PrimType t
+                  -> Instruction (Ptr t)
 
   -- <http://llvm.org/docs/LangRef.html#load-instruction>
   --
@@ -224,6 +229,10 @@ data Instruction a where
                   -> Volatility
                   -> Operand (Ptr a)
                   -> Instruction a
+
+  LoadBool        :: Volatility
+                  -> Operand (Ptr Bool)
+                  -> Instruction Bool
 
   LoadPtr         :: Volatility
                   -> Operand (Ptr (Ptr a))
@@ -258,9 +267,9 @@ data Instruction a where
                   -> TupleIdx a t
                   -> Instruction (Ptr t)
 
-  GetVecElementPtr
+  GetArrayElementPtr
                   :: IntegralType i
-                  -> Operand (Ptr (Vec n t))
+                  -> Operand (Ptr (SizedArray t))
                   -> Operand i
                   -> Instruction (Ptr t)
 
@@ -394,8 +403,7 @@ data Instruction a where
 
   -- <http://llvm.org/docs/LangRef.html#select-instruction>
   --
-  Select          :: SingleType a
-                  -> Operand Bool
+  Select          :: Operand Bool
                   -> Operand a
                   -> Operand a
                   -> Instruction a
@@ -435,8 +443,10 @@ instance Downcast (Instruction a) LLVM.Instruction where
     InsertElement i v x   -> LLVM.InsertElement (downcast v) (downcast x) (constant i) md
     ExtractElement i v    -> LLVM.ExtractElement (downcast v) (constant i) md
     ExtractValue _ i s    -> extractStruct i s
+    Alloca tp             -> LLVM.Alloca (downcast tp) Nothing 0 md
 #if MIN_VERSION_llvm_hs_pure(15,0,0)
     Load t v p            -> LLVM.Load (downcast v) (downcast t) (downcast p) atomicity alignment md
+    LoadBool v p          -> LLVM.Load (downcast v) (downcast $ BoolPrimType) (downcast p) atomicity alignment md
     LoadPtr v p           -> LLVM.Load (downcast v) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment md
     LoadStruct v p        -> LLVM.Load (downcast v) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment md
     GetElementPtr t n i   -> LLVM.GetElementPtr inbounds (downcast t) (downcast n) (downcast i) md
@@ -445,12 +455,13 @@ instance Downcast (Instruction a) LLVM.Instruction where
       (PrimType (PtrPrimType t@(skipTypeAlias -> StructPrimType _ tp) _)) ->
                              LLVM.GetElementPtr inbounds (downcast t) (downcast n) [constant (0 :: Int), constant (fromIntegral $ tupleIdxToInt tp i :: Int32)] md
       _ -> internalError "Struct ptr impossible"
-    GetVecElementPtr _ n i -> case typeOf n of
+    GetArrayElementPtr _ n i -> case typeOf n of
       (PrimType (PtrPrimType t _)) ->
         LLVM.GetElementPtr inbounds (downcast t) (downcast n) [constant (0 :: Int), downcast i] md
       _ -> internalError "Ptr impossible"
 #else
     Load _ v p            -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
+    LoadBool v p          -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
     LoadPtr v p           -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
     LoadStruct v p        -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
     GetElementPtr _ n i   -> LLVM.GetElementPtr inbounds (downcast n) (downcast i) md
@@ -459,7 +470,7 @@ instance Downcast (Instruction a) LLVM.Instruction where
       PrimType (PtrPrimType (StructPrimType _ tp) _) ->
                              LLVM.GetElementPtr inbounds (downcast n) [constant (0 :: Int), constant (fromIntegral $ tupleIdxToInt tp i :: Int32)] md
       _ -> internalError "Struct ptr impossible"
-    GetVecElementPtr _ n i -> LLVM.GetElementPtr inbounds (downcast n) [constant (0 :: Int), downcast i] md
+    GetArrayElementPtr _ n i -> LLVM.GetElementPtr inbounds (downcast n) [constant (0 :: Int), downcast i] md
 #endif
     Store v p x           -> LLVM.Store (downcast v) (downcast p) (downcast x) atomicity alignment md
     Fence a               -> LLVM.Fence (downcast a) md
@@ -477,7 +488,7 @@ instance Downcast (Instruction a) LLVM.Instruction where
     BitCast t x           -> LLVM.BitCast (downcast x) (downcast t) md
     PtrCast t x           -> LLVM.BitCast (downcast x) (downcast t) md
     Phi t e               -> LLVM.Phi (downcast t) (downcast e) md
-    Select _ p x y        -> LLVM.Select (downcast p) (downcast x) (downcast y) md
+    Select p x y          -> LLVM.Select (downcast p) (downcast x) (downcast y) md
     IsNaN _ x             -> isNaN (downcast x)
     Cmp t p x y           -> cmp t p (downcast x) (downcast y)
     Call f args a         -> call f args a
@@ -689,7 +700,9 @@ instance TypeOf Instruction where
     ExtractElement _ x    -> typeOfVec x
     InsertElement _ x _   -> typeOf x
     ExtractValue t _ _    -> PrimType t
+    Alloca t              -> PrimType $ PtrPrimType t defaultAddrSpace
     Load t _ _            -> scalar t
+    LoadBool _ _          -> PrimType BoolPrimType
     LoadPtr _ x           -> case typeOf x of
       PrimType (PtrPrimType t _) -> PrimType t
       _ -> internalError "Ptr impossible"
@@ -702,10 +715,10 @@ instance TypeOf Instruction where
     GetStructElementPtr t x _ -> case typeOf x of
       PrimType (PtrPrimType _ addr) -> PrimType $ PtrPrimType t addr
       _ -> internalError "Ptr impossible"
-    GetVecElementPtr _ x _ -> case typeOf x of
-      PrimType (PtrPrimType (ScalarPrimType (VectorScalarType (VectorType _ tp))) addr)
-        -> PrimType $ PtrPrimType (ScalarPrimType $ SingleScalarType tp) addr
-      _ -> internalError "Vec ptr impossible"
+    GetArrayElementPtr _ x _ -> case typeOf x of
+      PrimType (PtrPrimType (ArrayPrimType _ t) addr)
+        -> PrimType $ PtrPrimType t addr
+      _ -> internalError "Array ptr impossible"
     Fence{}               -> VoidType
     CmpXchg t _ _ _ _ _ _ -> PrimType . StructPrimType False $ ScalarPrimType (SingleScalarType (NumSingleType (IntegralNumType t))) `pair` primType
     AtomicRMW _ _ _ _ x _ -> typeOf x
@@ -723,7 +736,7 @@ instance TypeOf Instruction where
     Cmp{}                 -> type'
     IsNaN{}               -> type'
     Phi t _               -> PrimType t
-    Select _ _ x _        -> typeOf x
+    Select _ x _          -> typeOf x
     Call f _ _            -> fun f
     where
       typeOfVec :: HasCallStack => Operand (Vec n a) -> Type a

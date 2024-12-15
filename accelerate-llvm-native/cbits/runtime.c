@@ -10,6 +10,7 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .accelerate_ref_retain = accelerate_ref_retain,
   .accelerate_ref_write_buffer = accelerate_ref_write_buffer,
   .accelerate_schedule = accelerate_schedule,
+  .accelerate_schedule_after = accelerate_schedule_after,
   .accelerate_schedule_after_or = accelerate_schedule_after_or,
   .accelerate_signal_resolve = accelerate_signal_resolve,
   .hs_try_putmvar = hs_try_putmvar
@@ -213,7 +214,7 @@ struct Workers* accelerate_start_workers(uint64_t thread_count) {
     exit(1);                                                                    
   }
 
-  workers->scheduler.activities = malloc(sizeof(struct KernelLaunch) * thread_count);
+  workers->scheduler.activities = malloc(sizeof(uintptr_t) * thread_count);
 
   workers->thread_count = thread_count;
 

@@ -80,12 +80,13 @@ data Type a where
   PrimType  :: PrimType a -> Type a
 
 newtype Struct a = Struct a
+data SizedArray a
 
 data PrimType a where
   BoolPrimType    ::                            PrimType Bool
   ScalarPrimType  :: ScalarType a            -> PrimType a          -- scalar value types (things in registers)
   PtrPrimType     :: PrimType a -> AddrSpace -> PrimType (Ptr a)    -- pointers (XXX: volatility?)
-  ArrayPrimType   :: Word64 -> ScalarType a  -> PrimType a          -- static arrays
+  ArrayPrimType   :: Word64 -> PrimType a    -> PrimType (SizedArray a) -- static arrays
   StructPrimType  :: Bool -> TupR PrimType l -> PrimType (Struct l) -- aggregate structures
   NamedPrimType   :: Label -> PrimType a     -> PrimType a          -- typedef
 
@@ -139,6 +140,9 @@ instance IsType Float where
   type' = PrimType primType
 
 instance IsType Double where
+  type' = PrimType primType
+
+instance IsType (Ptr Bool) where
   type' = PrimType primType
 
 instance IsType (Ptr Int) where
@@ -226,6 +230,9 @@ instance IsPrim Float where
 instance IsPrim Double where
   primType = ScalarPrimType scalarType
 
+instance IsPrim (Ptr Bool) where
+  primType = PtrPrimType primType defaultAddrSpace
+
 instance IsPrim (Ptr Int) where
   primType = PtrPrimType primType defaultAddrSpace
 
@@ -302,7 +309,7 @@ formatPrimType = later $ \case
   BoolPrimType              -> "Bool"
   ScalarPrimType t          -> bformat formatScalarType t
   NamedPrimType (Label t) _ -> bformat string (S8.unpack t)
-  ArrayPrimType n t         -> bformat (squared (int % " x " % formatScalarType)) n t
+  ArrayPrimType n t         -> bformat (squared (int % " x " % formatPrimType)) n t
   StructPrimType _ t        -> bformat (braced (commaSpaceSep builder)) (go t)
     where
       go :: TupR PrimType t -> [Builder]
@@ -395,8 +402,10 @@ primSizeAlignment (ScalarPrimType (VectorScalarType (VectorType n tp))) = (sz * 
   where sz = bytesElt $ TupRsingle $ SingleScalarType tp
 primSizeAlignment (PtrPrimType _ _) = (sz, sz)
   where sz = sizeOf (undefined :: Ptr ())
-primSizeAlignment (ArrayPrimType n tp) = (sz * fromIntegral n, sz)
-  where sz = bytesElt (TupRsingle tp)
+primSizeAlignment (ArrayPrimType n tp) = (sz' * fromIntegral n, a)
+  where
+    (sz, a) = primSizeAlignment tp
+    sz' = makeAligned sz a
 primSizeAlignment (StructPrimType False tup) = (makeAligned sz a, a)
   where (sz, a) = primTupSizeAlignment tup
 primSizeAlignment (StructPrimType True _) = internalError "Packed structs not supported"

@@ -53,20 +53,23 @@ import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Downcast
 import qualified LLVM.AST.Type.Function as LLVM
 import LLVM.AST.Type.Instruction
+import qualified LLVM.AST.Type.Instruction.Compare as Compare
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.AddrSpace
 
-import Control.Concurrent
+import Data.Bits
+import Control.Monad
 import Data.String
+import qualified Data.List as List
 import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
 
 data NativeProgram = NativeProgram
-  !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Int16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
+  !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Word16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
   !Int -- The size of the program structure.
   ![Exists Lifetime] -- The lifetimes to be kept alive while the program is running.
   !(Ptr Int8 -> IO ()) -- The IO action to fill the imports part of a program structure.
@@ -84,7 +87,7 @@ linkSchedule' uid schedule
 
     let name = fromString $ "schedule_" ++ show uid
     m <- codeGenFunction name (PrimType ptrTp)
-        (LLVM.Lam ptrPtrTp "runtime_lib" . LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Int16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
+        (LLVM.Lam ptrPtrTp "runtime_lib" . LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Word16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
         body
 
     -- Evaluate all values in the list
@@ -143,6 +146,7 @@ loadRuntime = mapM_ load $ Prelude.zip [0..] runtime
       , "accelerate_ref_retain"
       , "accelerate_ref_write_buffer"
       , "accelerate_schedule"
+      , "accelerate_schedule_after"
       , "accelerate_schedule_after_or"
       , "accelerate_signal_resolve"
       , "hs_try_putmvar"
@@ -191,8 +195,29 @@ codegenSchedule schedule
         instr_ $ downcast $ "imports" := GetStructElementPtr importsTp dataPtr (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
         instr_ $ downcast $ "state" := GetStructElementPtr stateTp dataPtr (TupleIdxRight TupleIdxSelf)
 
+        when (blocks >= 1 `shiftL` 27)
+          $ internalError "Too many blocks, in the generated co-routine function"
+
+        -- Location contains:
+        -- block index (27 least significant bits).
+        -- boolean denoting whether this is the first iteration of the loop (bit 27).
+        --   (0 if not in an awhile loop)
+        -- Slot index of the awhile loop (4 most significant bits). This is equal to the index of the iteration modulo 4.
+        --   (0 if not in an awhile loop)
+        blockIdx <- instr' $ BAnd TypeWord32 operandLocation $ integral TypeWord32 $ (1 `shiftL` 27) - 1
+
+        instr_ $ downcast $ "awhile_is_first" := Alloca BoolPrimType
+        isFirstBits <- instr' $ BAnd TypeWord32 operandLocation $ integral TypeWord32 $ 1 `shiftL` 27
+        isFirst <- instr' $ Cmp singleType Compare.NE isFirstBits $ integral TypeWord32 0
+        _ <- instr' $ Store NonVolatile operandAwhileIsFirst isFirst
+
+        instr_ $ downcast $ "awhile_slot_idx" := Alloca (ScalarPrimType $ scalarType @Word8)
+        slot' <- instr' $ ShiftRL TypeWord32 operandLocation $ integral TypeWord32 28
+        slot <- instr' $ Trunc (IntegralBoundedType integralType) (IntegralBoundedType integralType) slot'
+        _ <- instr' $ Store NonVolatile operandAwhileSlotIdx slot
+
         _ <- switch
-          (ir scalarType operandLocation)
+          (ir scalarType blockIdx)
           (newBlockNamed $ blockName 0)
           [(fromIntegral i, newBlockNamed $ blockName i) | i <- [1 .. blocks - 1]]
 
@@ -201,7 +226,7 @@ codegenSchedule schedule
         setBlock block0
         phase2 schedule1
           (LocalReference (PrimType ptrImportsTp) "imports")
-          (LocalReference (PrimType ptrStateTp) "state")
+          (return $ LocalReference (PrimType ptrStateTp) "state")
           PEnd PEnd TupleIdxSelf TupleIdxSelf 2
 
         -- Destructor block
@@ -228,8 +253,14 @@ operandWorkers = LocalReference type' "workers"
 operandProgram :: Operand (Ptr Int8)
 operandProgram = LocalReference type' "program"
 
-operandLocation :: Operand (Int32)
+operandLocation :: Operand (Word32)
 operandLocation = LocalReference type' "location"
+
+operandAwhileIsFirst :: Operand (Ptr Bool)
+operandAwhileIsFirst = LocalReference type' "awhile_is_first"
+
+operandAwhileSlotIdx :: Operand (Ptr Word8)
+operandAwhileSlotIdx = LocalReference type' "awhile_slot_idx"
 
 destructor :: Operand (Ptr (Struct fullImports)) -> TupR PrimType imports -> TupleIdx fullImports imports -> CodeGen Native ()
 destructor fullState (TupRpair i1 i2) idx = destructor fullState i1 (tupleLeft idx) >> destructor fullState i2 (tupleRight idx)
@@ -327,7 +358,7 @@ data Phase1 env imports state where
 type Phase2 env imports state
   = forall fullImports fullState.
      Operand (Ptr (Struct fullImports))
-  -> Operand (Ptr (Struct fullState))
+  -> CodeGen Native (Operand (Ptr (Struct fullState)))
   -- The environment for the used variables
   -> StructVars env
   -> LocalVars env
@@ -353,15 +384,15 @@ convertFun (Slam (LeftHandSideSingle tp) fun)
     varsInStruct = IdxSet.drop $ varsInStruct fun1,
     maySuspend = maySuspend fun1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock ->
-      let getPtr' = instr' $ GetStructElementPtr tp' fullState (tupleLeft stateIdx)
+      let getPtr' = stateField fullState tp' (tupleLeft stateIdx)
       in phase2 fun1 imports fullState (structVars `PPush` StructVar True tp getPtr') (PNone localVars) importsIdx (tupleRight stateIdx) nextBlock
   }
   where
     tp' = toPrimType tp
-convertFun (Sbody body) = convert body
+convertFun (Sbody body) = convert False body
 
-convert :: forall env. UniformSchedule NativeKernel env -> Exists2 (Phase1 env)
-convert Return =
+convert :: forall env. Bool -> UniformSchedule NativeKernel env -> Exists2 (Phase1 env)
+convert _ Return =
   Exists2 Phase1{
     blockCount = 0,
     importsType = TupRunit,
@@ -373,10 +404,10 @@ convert Return =
     maySuspend = False,
     phase2 = \_ _ _ _ _ _ _ -> returnNull
   }
--- convert (Spawn (Effect (SignalAwait signals) a) b)
-convert (Spawn a b)
-  | Exists2 a1 <- convert a
-  , Exists2 b1 <- convert b =
+-- convert inAwhile (Spawn (Effect (SignalAwait signals) a) b)
+convert inAwhile (Spawn a b)
+  | Exists2 a1 <- convert inAwhile a
+  , Exists2 b1 <- convert inAwhile b =
   Exists2 $ Phase1{
     -- We need one block here, and any blocks that the subterms need
     blockCount = blockCount a1 + blockCount b1 + 1,
@@ -392,10 +423,12 @@ convert (Spawn a b)
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
       (structVarsA, _, structVarsB, localVarsB) <- forkEnv structVars localVars (varsFree a1) (varsFree b1)
 
+      location <- computeLocation inAwhile $ fromIntegral $ nextBlock + blockCount b1
+
       _ <- callLocal (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.Body VoidType Nothing (Label "accelerate_schedule")) 
         (LLVM.ArgumentsCons operandWorkers []
           $ LLVM.ArgumentsCons operandProgram []
-          $ LLVM.ArgumentsCons (integral TypeWord32 $ fromIntegral $ nextBlock + blockCount b1) []
+          $ LLVM.ArgumentsCons location []
           LLVM.ArgumentsNil)
         []
 
@@ -425,10 +458,10 @@ convert (Spawn a b)
         nextBlock
   }
 -- Control flow
-convert (Acond cond whenTrue whenFalse next)
-  | Exists2 whenTrue1 <- convert whenTrue
-  , Exists2 whenFalse1 <- convert whenFalse
-  , Exists2 next1 <- convert next
+convert inAwhile (Acond cond whenTrue whenFalse next)
+  | Exists2 whenTrue1 <- convert inAwhile whenTrue
+  , Exists2 whenFalse1 <- convert inAwhile whenFalse
+  , Exists2 next1 <- convert inAwhile next
   , branchMaySuspend <- maySuspend whenTrue1 || maySuspend whenFalse1 =
   Exists2 $ Phase1{
     blockCount = blockCount whenTrue1 + blockCount whenFalse1 + blockCount next1,
@@ -490,10 +523,10 @@ convert (Acond cond whenTrue whenFalse next)
         (tupleRight stateIdx)
         (nextBlock + blockCount whenTrue1 + blockCount whenFalse1)
   }
-convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step)))) initial next)
+convert inAwhile (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step)))) initial next)
   | Refl <- awhileIOMatch io
-  , Exists2 step1 <- convert step
-  , Exists2 next1 <- convert next
+  , Exists2 step1 <- convert inAwhile step
+  , Exists2 next1 <- convert inAwhile next
   , ioType' <- awhileIOType io
   , ioType <- StructPrimType False ioType'
   , stepVars <- IdxSet.drop' lhsInput $ IdxSet.drop' lhsBool $ IdxSet.drop' lhsOutput $ varsFree step1
@@ -514,8 +547,8 @@ convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step))
       let
         -- Note: we cannot simply perform GetStructElementPtr now and only
         -- remember the result, as the function may suspend in 'step'.
-        getInput = instr' $ GetStructElementPtr ioType fullState $ tupleLeft $ tupleLeft $ tupleLeft $ tupleLeft stateIdx
-        getOutput = instr' $ GetStructElementPtr ioType fullState $ tupleRight $ tupleLeft $ tupleLeft stateIdx
+        getInput = stateField fullState ioType $ tupleLeft $ tupleLeft $ tupleLeft $ tupleLeft stateIdx
+        getOutput = stateField fullState ioType $ tupleRight $ tupleLeft $ tupleLeft stateIdx
 
       -- Split environment for 'initials' and the remainder ('step' and 'next')
       (structVarsInit, localVarsInit, structVarsStart, _)
@@ -525,17 +558,18 @@ convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step))
       getOutput >>= awhilePrepareOutput io lhsInput
 
       let
-        getBool = instr' $ GetStructElementPtr primType fullState $ tupleRight $ tupleLeft $ tupleLeft $ tupleLeft stateIdx
-        structVars1 = awhileBindInput getInput io lhsInput structVarsStart
+        getBool = stateField fullState primType $ tupleRight $ tupleLeft $ tupleLeft $ tupleLeft stateIdx
+        structVars0 = IdxSet.partialEnvFilterSet stepVars structVarsStart
+        structVars1 = awhileSeqBindInput getInput io lhsInput structVars0
         structVars2 = case lhsBool of
           LeftHandSideSingle _ -> PPush structVars1
-            $ StructVar True (BaseRrefWrite $ GroundRscalar scalarType) getBool
+            $ StructVar False (BaseRrefWrite $ GroundRscalar scalarType) getBool
           LeftHandSideWildcard _ -> structVars1
         structVars3 = awhileBindOutput getOutput io lhsOutput structVars2
 
-      blockBody <- newBlock "awhile.body"
-      blockNext <- newBlock "awhile.next"
-      blockExit <- newBlock "awhile.exit"
+      blockBody <- newBlock "awhile.seq.body"
+      blockContinue <- newBlock "awhile.seq.continue"
+      blockExit <- newBlock "awhile.seq.exit"
 
       _ <- br blockBody
       setBlock blockBody
@@ -551,22 +585,231 @@ convert (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step))
       conditionalPtr <- getBool
       conditional <- instr' $ Load scalarType NonVolatile conditionalPtr
       conditional' <- instr $ IntToBool TypeWord8 conditional
-      _ <- cbr conditional' blockNext blockExit
+      _ <- cbr conditional' blockContinue blockExit
 
-      setBlock blockNext
+      setBlock blockContinue
       input1 <- getInput
       output1 <- getOutput
-      awhilePrepareNext io output1 input1
+      awhileSeqPrepareNext io output1 input1
       awhilePrepareOutput io lhsInput output1
       _ <- br blockBody
 
       setBlock blockExit
       phase2Sub next1 imports fullState structVarsStart PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + blockCount step1)
   }
--- TODO: Awhile
+convert True Awhile{} = internalError "Awhile cannot be nested. Outer Awhile should have been converted to an AwhileSeq"
+convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step)))) initial next)
+  | Refl <- awhileIOMatch io
+  , Exists2 step1 <- convert True step
+  , Exists2 next1 <- convert False next
+  , ioType' <- awhileIOType io
+  , ioType <- StructPrimType False ioType'
+  -- The state of an iteration of the loop
+  , iterStateType <- StructPrimType False $
+    TupRsingle ioType
+      -- Signal corresponding with the condition
+      `TupRpair` TupRsingle (primType @Word)
+      -- The condition (a boolean denoting whether the loop should continue)
+      `TupRpair` TupRsingle (primType @PrimBool)
+      -- Local storage for waiting on a signal
+      `TupRpair` TupRsingle typeSignalWaiter
+      `TupRpair` stateType step1
+  , stepVars <- IdxSet.drop' lhsInput $ IdxSet.drop' lhsBool $ IdxSet.drop' lhsOutput $ varsFree step1
+  , allVars <- IdxSet.fromVars initial `IdxSet.union` stepVars `IdxSet.union` varsFree next1 =
+  Exists2 $ Phase1{
+    -- The first block is used for the start of an iteration of the loop.
+    -- The others are for the recursively generated code of 'step' and 'next'.
+    blockCount = 1 + blockCount step1 + blockCount next1,
+    importsType = importsType step1 `TupRpair` importsType next1,
+    importsInit = importsInit step1 `TupRpair` importsInit next1,
+    importedLifetimes = importedLifetimes step1 ++ importedLifetimes next1,
+    stateType = TupRsingle (ArrayPrimType awhileConcurrentStates iterStateType) `TupRpair` stateType next1,
+    varsFree = allVars,
+    -- Note: this is too pessimistic if 'maySuspend next1' is false. However, I
+    -- think it's to be expected that the body of the loop at least executes a
+    -- kernel, and will thus have 'maySusped next1 = True'.
+    varsInStruct = allVars,
+    maySuspend = True,
+    phase2 = \imports fullState structVars _ importsIdx stateIdx nextBlock -> do
+      let
+        getIterStateAt idx = do
+          awhileState <- stateField
+            fullState
+            (ArrayPrimType awhileConcurrentStates iterStateType)
+            $ tupleLeft stateIdx
+          instr' $ GetArrayElementPtr TypeWord8 awhileState idx
+
+        -- Note: we cannot simply perform GetStructElementPtr now and only
+        -- remember the result, as the function may suspend in 'step'.
+        getCurrentIterState = do
+          idx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+          getIterStateAt idx
+
+        getInput = do
+          state <- getCurrentIterState
+          instr' $ GetStructElementPtr ioType state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf
+
+        -- 0: Condition is false
+        -- 1: Condition is true
+        -- 2: A previous iteration ended the loop
+        getInputCondition = do
+          state <- getCurrentIterState
+          instr' $ GetStructElementPtr (primType @Word8) state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+
+        getOutput = do
+          idx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+          idx1 <- instr' $ Add numType idx $ integral TypeWord8 1
+          idx2 <- instr' $ BAnd TypeWord8 idx1 $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
+          state <- getIterStateAt idx2
+          instr' $ GetStructElementPtr ioType state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf
+
+        getOutputSignalResolver = do
+          idx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+          idx1 <- instr' $ Add numType idx $ integral TypeWord8 1
+          idx2 <- instr' $ BAnd TypeWord8 idx1 $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
+          state <- getIterStateAt idx2
+          instr' $ GetStructElementPtr (primType @Word) state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+
+        getOutputCondition = do
+          idx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+          idx1 <- instr' $ Add numType idx $ integral TypeWord8 1
+          idx2 <- instr' $ BAnd TypeWord8 idx1 $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
+          state <- getIterStateAt idx2
+          instr' $ GetStructElementPtr (primType @Word8) state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+
+      _ <- instr' $ Store NonVolatile operandAwhileIsFirst $ boolean True
+      _ <- instr' $ Store NonVolatile operandAwhileSlotIdx $ integral TypeWord8 0
+
+      -- Set all Signals of the conditions to 0 (unresolved)
+      forM_ [0 .. fromIntegral awhileConcurrentStates - 1] $ \idx -> do
+        state <- getIterStateAt $ integral TypeWord8 idx
+        signalPtr <- instr' $ GetStructElementPtr (primType @Word) state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+        _ <- instr' $ Store NonVolatile signalPtr $ integral TypeWord 0
+        if idx == 0 || idx == fromIntegral awhileConcurrentStates - 1 then
+          return ()
+        else do
+          location <- computeAwhileLocation (integral TypeWord8 idx) (boolean False) $ fromIntegral nextBlock
+          waiter <- instr' $ GetStructElementPtr typeSignalWaiter state $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+          -- Start next iteration as soon as its signal becomes available
+          _ <- callLocal
+            (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
+              LLVM.lamUnnamed primType $ LLVM.lamUnnamed (PtrPrimType typeSignalWaiter defaultAddrSpace) $
+              LLVM.Body VoidType Nothing (Label "accelerate_schedule_after"))
+            (LLVM.ArgumentsCons operandWorkers []
+              $ LLVM.ArgumentsCons operandProgram []
+              $ LLVM.ArgumentsCons location []
+              $ LLVM.ArgumentsCons signalPtr []
+              $ LLVM.ArgumentsCons waiter []
+              LLVM.ArgumentsNil)
+            []
+          return ()
+
+      structVarsStart <- awhileParRetainInput structVars initial $ stepVars `IdxSet.union` varsFree next1
+
+      let blockCheck = newBlockNamed $ blockName nextBlock -- Checks the condition of the previous iteration
+      blockCleanUp <- newBlock "awhile.cleanup"
+      blockBody <- newBlock "awhile.body"
+      blockExit <- newBlock "awhile.exit"
+
+      _ <- br blockBody
+
+      setBlock blockCheck
+      -- Reset the current signal to zero, for a later iteration
+      currentState <- getCurrentIterState
+      currentSignal <- instr' $ GetStructElementPtr (primType @Word) currentState $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+      _ <- instr' $ Store NonVolatile currentSignal $ integral TypeWord 0
+
+      -- Branch based on the condition of the previous iteration.
+      -- 0 is exit, 1 is continue, and 2 means that a prior iteration has stopped the loop.
+      condPtr <- getInputCondition
+      cond <- instr' $ Load scalarType NonVolatile condPtr
+      _ <- switch 
+        (ir scalarType cond)
+        blockCleanUp
+        [(0, blockExit), (1, blockBody)]
+
+      setBlock blockCleanUp
+      do
+        cond <- getOutputCondition
+        _ <- instr' $ Store NonVolatile cond $ integral TypeWord8 2
+        signal <- getOutputSignalResolver
+        _ <- callLocal
+          (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
+            LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve")) 
+          (LLVM.ArgumentsCons operandWorkers []
+            $ LLVM.ArgumentsCons signal []
+            LLVM.ArgumentsNil)
+          []
+        returnNull
+
+      setBlock blockBody
+      -- Do the actual work for this iteration
+      getOutput >>= awhilePrepareOutput io lhsInput
+
+      let
+        structVars0 = IdxSet.partialEnvFilterSet stepVars structVarsStart
+        structVars1 = awhileParBindInput getInput structVars io initial lhsInput structVars0
+        structVars2 = case lhsBool of
+          LeftHandSideWildcard _ -> structVars1
+          LeftHandSideSingle _ -> internalError "LeftHandSideSingle impossible"
+          LeftHandSidePair (LeftHandSideWildcard _) (LeftHandSideWildcard _) -> structVars1
+          LeftHandSidePair (LeftHandSideSingle t1) (LeftHandSideSingle t2) ->
+            structVars1 `PPush` StructVar False t1 getOutputSignalResolver `PPush` StructVar False t2 getOutputCondition
+          LeftHandSidePair (LeftHandSideSingle t1) (LeftHandSideWildcard _) ->
+            structVars1 `PPush` StructVar False t1 getOutputSignalResolver
+          LeftHandSidePair (LeftHandSideWildcard _) (LeftHandSideSingle t2) ->
+            structVars1 `PPush` StructVar False t2 getOutputCondition
+        structVars3 = awhileBindOutput getOutput io lhsOutput structVars2
+
+      _ <- forkEnv structVarsStart PEnd stepVars stepVars
+      -- phase2*Sub* since the LeftHandSides may declare variables that are not used.
+      phase2Sub step1 imports getCurrentIterState structVars3 PEnd (tupleLeft importsIdx) (TupleIdxRight TupleIdxSelf) (nextBlock + 1)
+
+      -- Start working on a next iteration
+      do
+        currentIdx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+
+        nextIdx <- instr' $ Add numType currentIdx $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
+        nextIdx' <- instr' $ BAnd TypeWord8 nextIdx $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
+        _ <- instr' $ Store NonVolatile operandAwhileSlotIdx nextIdx'
+        _ <- instr' $ Store NonVolatile operandAwhileIsFirst $ boolean False
+        nextState <- getIterStateAt nextIdx'
+        nextSignal <- instr' $ GetStructElementPtr (primType @Word) nextState $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+        location <- computeAwhileLocation nextIdx' (boolean False) $ fromIntegral nextBlock
+        waiter <- instr' $ GetStructElementPtr typeSignalWaiter nextState $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+
+        p <- callLocal
+          (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
+            LLVM.lamUnnamed primType $ LLVM.lamUnnamed (PtrPrimType typeSignalWaiter defaultAddrSpace) $
+            LLVM.Body type' Nothing (Label "accelerate_schedule_after_or"))
+          (LLVM.ArgumentsCons operandWorkers []
+            $ LLVM.ArgumentsCons operandProgram []
+            $ LLVM.ArgumentsCons location []
+            $ LLVM.ArgumentsCons nextSignal []
+            $ LLVM.ArgumentsCons waiter []
+            LLVM.ArgumentsNil)
+          []
+        p' <- instr $ IntToBool TypeWord8 p
+        _ <- cbr p' (newBlockNamed "return") blockCheck
+        return ()
+
+      setBlock blockExit
+      cond <- getOutputCondition
+      _ <- instr' $ Store NonVolatile cond $ integral TypeWord8 2
+      signal <- getOutputSignalResolver
+      _ <- callLocal
+        (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
+          LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve")) 
+        (LLVM.ArgumentsCons operandWorkers []
+          $ LLVM.ArgumentsCons signal []
+          LLVM.ArgumentsNil)
+        []
+      phase2Sub next1 imports fullState structVarsStart PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + 1 + blockCount step1)
+  }
+
 -- Effects
-convert (Effect effect@(Exec _ kernel kargs) next)
-  | Exists2 next1 <- convert next
+convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
+  | Exists2 next1 <- convert inAwhile next
   , kFunPtr <- kernelFun kernel
   , (argsTp, argsTp') <- kernelArgsTp kargs =
   Exists2 $ Phase1{
@@ -585,7 +828,7 @@ convert (Effect effect@(Exec _ kernel kargs) next)
     maySuspend = True,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
       let blockNext = newBlockNamed $ blockName nextBlock
-      args <- instr' $ GetStructElementPtr argsTp fullState (tupleLeft stateIdx)
+      args <- stateField fullState argsTp $ tupleLeft stateIdx
 
       -- Fill arguments struct
       -- Header
@@ -595,8 +838,9 @@ convert (Effect effect@(Exec _ kernel kargs) next)
       _ <- instr' $ Store NonVolatile workFnPtr workFn
       programPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile programPtr operandProgram
+      location <- computeLocation inAwhile $ fromIntegral nextBlock
       locationPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile locationPtr (integral TypeWord32 $ fromIntegral nextBlock)
+      _ <- instr' $ Store NonVolatile locationPtr location
       threadsPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) -- active_threads
       workIdxPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
@@ -616,9 +860,9 @@ convert (Effect effect@(Exec _ kernel kargs) next)
       phase2Sub next1 imports fullState structVars PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + 1)
   }
 
-convert (Effect (SignalAwait []) next) = convert next
-convert (Effect (SignalAwait signals) next)
-  | Exists2 next1 <- convert next
+convert inAwhile (Effect (SignalAwait []) next) = convert inAwhile next
+convert inAwhile (Effect (SignalAwait signals) next)
+  | Exists2 next1 <- convert inAwhile next
   , signalsSet <- IdxSet.fromList' signals =
   Exists2 $ Phase1{
     blockCount = blockCount next1 + 1,
@@ -633,7 +877,7 @@ convert (Effect (SignalAwait signals) next)
     phase2 = \imports fullState structVars _ importsIdx stateIdx nextBlock -> do
       let blockNext = newBlockNamed $ blockName nextBlock
       let blockAwait = newBlockNamed "return"
-      initWaiter <- instr' $ GetStructElementPtr typeSignalWaiter fullState (tupleLeft stateIdx)
+      initWaiter <- stateField fullState typeSignalWaiter $ tupleLeft stateIdx
       -- For await [a, b, c, d], we generate the following code:
       -- if accelerate_schedule_after_or(workers, program, nextBlock, a, waiter) return;
       -- nextBlock:
@@ -652,13 +896,14 @@ convert (Effect (SignalAwait signals) next)
         go waiter i (idx : idxs) = do
           let blockContinue = if i == 0 then blockNext else newBlockNamed $ blockName nextBlock ++ ".continue." ++ show i
           signal <- getPtr structVars idx
+          location <- computeLocation inAwhile $ fromIntegral nextBlock
           p <- callLocal
             (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
               LLVM.lamUnnamed primType $ LLVM.lamUnnamed (PtrPrimType typeSignalWaiter defaultAddrSpace) $
-              LLVM.Body (type') Nothing (Label "accelerate_schedule_after_or"))
+              LLVM.Body type' Nothing (Label "accelerate_schedule_after_or"))
             (LLVM.ArgumentsCons operandWorkers []
               $ LLVM.ArgumentsCons operandProgram []
-              $ LLVM.ArgumentsCons (integral TypeWord32 $ fromIntegral nextBlock) []
+              $ LLVM.ArgumentsCons location []
               $ LLVM.ArgumentsCons signal []
               $ LLVM.ArgumentsCons waiter []
               LLVM.ArgumentsNil)
@@ -669,7 +914,7 @@ convert (Effect (SignalAwait signals) next)
           -- Since function may suspend and return here if i == 0, we must again get a pointer to the waiter here.
           waiter' <-
             if i == 0 && not (null idxs) then
-              instr' $ GetStructElementPtr typeSignalWaiter fullState (tupleLeft stateIdx)
+              stateField fullState typeSignalWaiter $ tupleLeft stateIdx
             else
               return waiter
           go waiter' (i + 1) idxs
@@ -678,8 +923,8 @@ convert (Effect (SignalAwait signals) next)
 
       phase2 next1 imports fullState structVars PEnd importsIdx (tupleRight stateIdx) (nextBlock + 1)
   }
-convert (Effect (SignalResolve signals) next)
-  | Exists2 next1 <- convert next
+convert inAwhile (Effect (SignalResolve signals) next)
+  | Exists2 next1 <- convert inAwhile next
   , signalsSet <- IdxSet.fromList' signals =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
@@ -721,8 +966,8 @@ convert (Effect (SignalResolve signals) next)
       go signals
       phase2 next1 imports fullState structVars localVars importsIdx stateIdx nextBlock
   }
-convert (Effect (RefWrite ref value) next)
-  | Exists2 next1 <- convert next =
+convert inAwhile (Effect (RefWrite ref value) next)
+  | Exists2 next1 <- convert inAwhile next =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
     importsType = importsType next1,
@@ -762,13 +1007,13 @@ convert (Effect (RefWrite ref value) next)
 -- No need to construct anything if the result is not used.
 -- This is required, since pushBindingSingle leaks memory when using LeftHandSideWildcard
 -- for buffers.
-convert (Alet (LeftHandSideWildcard _) _ next) = convert next
+convert inAwhile (Alet (LeftHandSideWildcard _) _ next) = convert inAwhile next
 -- Non-GroundR bindings: NewSignal and NewRef
 -- These bindings are special, in that they define two variables,
 -- which are at runtime the same variable.
 -- The read-end and write-end both point to the same thing.
-convert (Alet lhs (NewSignal _) next)
-  | Exists2 next1 <- convert next =
+convert inAwhile (Alet lhs (NewSignal _) next)
+  | Exists2 next1 <- convert inAwhile next =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
     importsType = importsType next1,
@@ -779,15 +1024,15 @@ convert (Alet lhs (NewSignal _) next)
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
     maySuspend = maySuspend next1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-      let getPtr' = instr' $ GetStructElementPtr primType fullState $ tupleLeft stateIdx
+      let getPtr' = stateField fullState primType $ tupleLeft stateIdx
       ptr <- getPtr'
       _ <- instr' $ Store NonVolatile ptr $ integral TypeWord 0
       let (structVars', localVars') = pushTwoSame lhs structVars localVars getPtr'
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }
-convert (Alet lhs (NewRef (GroundRscalar tp)) next)
+convert inAwhile (Alet lhs (NewRef (GroundRscalar tp)) next)
   | Refl <- scalarReprBase tp
-  , Exists2 next1 <- convert next =
+  , Exists2 next1 <- convert inAwhile next =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
     importsType = importsType next1,
@@ -798,12 +1043,12 @@ convert (Alet lhs (NewRef (GroundRscalar tp)) next)
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
     maySuspend = maySuspend next1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-      let getPtr' = instr' $ GetStructElementPtr (ScalarPrimType tp) fullState $ tupleLeft stateIdx
+      let getPtr' = stateField fullState (ScalarPrimType tp) $ tupleLeft stateIdx
       let (structVars', localVars') = pushTwoSame lhs structVars localVars getPtr'
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }
-convert (Alet lhs (NewRef (GroundRbuffer tp)) next)
-  | Exists2 next1 <- convert next =
+convert inAwhile (Alet lhs (NewRef (GroundRbuffer tp)) next)
+  | Exists2 next1 <- convert inAwhile next =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
     importsType = importsType next1,
@@ -814,7 +1059,7 @@ convert (Alet lhs (NewRef (GroundRbuffer tp)) next)
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
     maySuspend = maySuspend next1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-      let getPtr' = instr' $ GetStructElementPtr t fullState $ tupleLeft stateIdx
+      let getPtr' = stateField fullState t $ tupleLeft stateIdx
       let (structVars', localVars') = pushTwoSame lhs structVars localVars getPtr'
 
       ptr <- getPtr'
@@ -833,9 +1078,9 @@ convert (Alet lhs (NewRef (GroundRbuffer tp)) next)
       LeftHandSidePair _ LeftHandSideSingle{} -> 1
       _ -> 0
 -- GroundR bindings
-convert (Alet lhs (Alloc shr tp sz) next)
+convert inAwhile (Alet lhs (Alloc shr tp sz) next)
   | Refl <- scalarReprBase tp
-  , Exists2 next1 <- convert next
+  , Exists2 next1 <- convert inAwhile next
   , Exists bnd <- pushBindingSingle lhs $ varsInStruct next1 =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
@@ -870,9 +1115,9 @@ convert (Alet lhs (Alloc shr tp sz) next)
   }
   where
     ptrTp = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
-convert (Alet lhs (Use tp _ buffer) next)
+convert inAwhile (Alet lhs (Use tp _ buffer) next)
   | Refl <- scalarReprBase tp
-  , Exists2 next1 <- convert next
+  , Exists2 next1 <- convert inAwhile next
   , Exists bnd <- pushBindingSingle lhs $ varsInStruct next1
   , ptrTp <- PtrPrimType (ScalarPrimType tp) defaultAddrSpace =
   Exists2 $ Phase1{
@@ -891,9 +1136,9 @@ convert (Alet lhs (Use tp _ buffer) next)
       (structVars', localVars') <- bPhase2 bnd structVars localVars fullState (tupleLeft stateIdx) ptr
       phase2Sub next1 imports fullState structVars' localVars' (tupleRight importsIdx) (tupleRight stateIdx) nextBlock
   }
-convert (Alet lhs (Unit (Var tp idx)) next)
+convert inAwhile (Alet lhs (Unit (Var tp idx)) next)
   | Refl <- scalarReprBase tp
-  , Exists2 next1 <- convert next
+  , Exists2 next1 <- convert inAwhile next
   , Exists bnd <- pushBindingSingle lhs $ varsInStruct next1 =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
@@ -918,9 +1163,8 @@ convert (Alet lhs (Unit (Var tp idx)) next)
   }
   where
     ptrTp = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
--- TODO: Could we use the same entry in stateType? The Ref will already be in there, so we could reuse that here perhaps?
-convert (Alet lhs (RefRead ref) next)
-  | Exists2 next1 <- convert next
+convert inAwhile (Alet lhs (RefRead ref) next)
+  | Exists2 next1 <- convert inAwhile next
   , LeftHandSideSingle _ <- lhs =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
@@ -968,8 +1212,8 @@ convert (Alet lhs (RefRead ref) next)
     tp = case varType ref of
       BaseRref t -> t
       _ -> internalError "OutputRef impossible"
-convert (Alet lhs (Compute expr) next)
-  | Exists2 next1 <- convert next
+convert inAwhile (Alet lhs (Compute expr) next)
+  | Exists2 next1 <- convert inAwhile next
   , Exists bnd <- pushBindings (expType expr) lhs (varsInStruct next1) =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
@@ -992,6 +1236,32 @@ phase2Sub :: Phase1 env imports state -> Phase2 env imports state
 phase2Sub phase1 imports fullState structVars localVars importsIdx stateIdx nextBlock = do
   (structVars', localVars') <- subEnv structVars localVars (varsFree phase1)
   phase2 phase1 imports fullState structVars' localVars' importsIdx stateIdx nextBlock
+
+stateField :: CodeGen Native (Operand (Ptr (Struct fullState))) -> PrimType field -> TupleIdx fullState field -> CodeGen Native (Operand (Ptr field))
+stateField fullState fieldTp fieldIdx = fullState >>= \s -> instr' $ GetStructElementPtr fieldTp s fieldIdx
+
+computeLocation :: Bool -> Word32 -> CodeGen Native (Operand Word32)
+-- Not in an awhile: we can ignore the awhile state
+computeLocation False blockIdx = return $ integral TypeWord32 blockIdx
+-- Bit pack the blockIdx, awhileIsFirst and awhileSlotIdx
+computeLocation True blockIdx = do
+  isFirst <- instr' $ LoadBool NonVolatile operandAwhileIsFirst
+  slot <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+  computeAwhileLocation slot isFirst blockIdx
+
+computeAwhileLocation :: Operand Word8 -> Operand Bool -> Word32 -> CodeGen Native (Operand Word32)
+computeAwhileLocation awhileSlot isFirst blockIdx = do
+  slot' <- instr' $ Ext (IntegralBoundedType TypeWord8) (IntegralBoundedType TypeWord32) awhileSlot
+  slotShifted <- instr' $ ShiftL TypeWord32 slot' $ integral TypeWord32 28
+
+  isFirst' <- instr' $ BoolToInt TypeWord32 isFirst
+  isFirstShifted <- instr' $ ShiftL TypeWord32 isFirst' $ integral TypeWord32 27
+  or <- instr' $ BOr TypeWord32 (integral TypeWord32 blockIdx) isFirstShifted
+  instr' $ BOr TypeWord32 or slotShifted
+
+-- Should be a power of two and at least 2
+awhileConcurrentStates :: Word64
+awhileConcurrentStates = 4
 
 convertArrayInstr
   :: StructVars env
@@ -1071,7 +1341,7 @@ type Push2 op env env' t state
   = forall fullState.
      StructVars env
   -> LocalVars env
-  -> Operand (Ptr (Struct fullState))
+  -> CodeGen Native (Operand (Ptr (Struct fullState)))
   -> TupleIdx fullState state
   -> op t
   -> CodeGen Native (StructVars env', LocalVars env')
@@ -1083,7 +1353,7 @@ pushBindingSingle (LeftHandSideWildcard _) _ = Exists $ Push1 TupRunit $
 pushBindingSingle (LeftHandSideSingle tp) inStruct
   | ZeroIdx `IdxSet.member` inStruct = Exists $ Push1 (TupRsingle tp') $
     \structVars localVars fullState tupleIdx value -> do
-      let getPtr' = instr' $ GetStructElementPtr tp' fullState tupleIdx
+      let getPtr' = stateField fullState tp' tupleIdx
       ptr <- getPtr'
       _ <- instr' $ Store NonVolatile ptr value
       return (structVars `PPush` StructVar False tp getPtr', localVars `PPush` LocalVar value)
@@ -1298,14 +1568,7 @@ forkEnv = \structVars localVars usedLeft usedRight -> do
     -- Retain a Ref containing a buffer, by calling accelerate_ref_retain
     retain (Just (StructVar _ (BaseRref (GroundRbuffer _)) m)) _ = do
       ptr <- m
-      ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
-      _ <- callLocal
-        (LLVM.lamUnnamed primType $
-          LLVM.Body VoidType Nothing (Label "accelerate_ref_retain"))
-        (LLVM.ArgumentsCons ptr' []
-          LLVM.ArgumentsNil)
-        []
-      return ()
+      callRefRetain ptr
     -- Retain a Buffer present in LocalVars
     retain _ (Just (LocalVar ptr))
       | PrimType (PtrPrimType _ _) <- typeOf ptr = callBufferRetain ptr
@@ -1339,6 +1602,17 @@ callBufferRetain ptr = do
     []
   return ()
 
+callRefRetain :: Operand (Ptr t) -> CodeGen Native ()
+callRefRetain ptr = do
+  ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
+  _ <- callLocal
+    (LLVM.lamUnnamed primType $
+      LLVM.Body VoidType Nothing (Label "accelerate_ref_retain"))
+    (LLVM.ArgumentsCons ptr' []
+      LLVM.ArgumentsNil)
+    []
+  return ()
+
 returnNull :: CodeGen arch ()
 returnNull = retval_ $ ConstantOperand $ NullPtrConstant $ type' @(Ptr Int8)
 
@@ -1360,8 +1634,8 @@ awhileIOMatch InputOutputRsignal = Refl
 awhileIOMatch InputOutputRunit = Refl
 
 -- Copies the result of the current iteration to the input of the next iteration
-awhilePrepareNext :: InputOutputR input output -> Operand (Ptr (Struct (ReprBasesR output))) -> Operand (Ptr (Struct (ReprBasesR input))) -> CodeGen Native ()
-awhilePrepareNext io current next
+awhileSeqPrepareNext :: InputOutputR input output -> Operand (Ptr (Struct (ReprBasesR output))) -> Operand (Ptr (Struct (ReprBasesR input))) -> CodeGen Native ()
+awhileSeqPrepareNext io current next
   | Refl <- awhileIOMatch io = do
     value <- instr' $ LoadStruct NonVolatile current
     _ <- instr' $ Store NonVolatile next value
@@ -1432,14 +1706,14 @@ awhilePrepareOutput inputOutput lhs output = go inputOutput lhs TupleIdxSelf
     go InputOutputRunit _ _ = return ()
     go _ _ _ = internalError "Tuple mismatch"
 
-awhileBindInput
+awhileSeqBindInput
   :: forall input output env env'.
      CodeGen Native (Operand (Ptr (Struct (ReprBasesR input))))
   -> InputOutputR input output
   -> BLeftHandSide input env env'
   -> StructVars env
   -> StructVars env'
-awhileBindInput getStruct = go TupleIdxSelf
+awhileSeqBindInput getStruct = go TupleIdxSelf
   where
     go :: TupleIdx (ReprBasesR input) (ReprBasesR i) -> InputOutputR i o -> BLeftHandSide i env1 env2 -> StructVars env1 -> StructVars env2
     go _ _ (LeftHandSideWildcard _) env = env
@@ -1452,13 +1726,97 @@ awhileBindInput getStruct = go TupleIdxSelf
       StructVar False (BaseRref tp) $ do
         struct <- getStruct
         instr' $ GetStructElementPtr (ScalarPrimType tp') struct idx
-    go idx InputOutputRsignal (LeftHandSideSingle _) env = PPush env $
-      StructVar False BaseRsignal $ do
-        struct <- getStruct
-        instr' $ GetStructElementPtr primType struct idx
     go idx (InputOutputRpair io1 io2) (LeftHandSidePair lhs1 lhs2) env =
       go (tupleRight idx) io2 lhs2 $ go (tupleLeft idx) io1 lhs1 env
     go _ _ _ _ = internalError "Tuple mismatch"
+
+-- Retains buffer references that are used in the input, if needed.
+-- Concretely, if a buffer ref is used multiple times in the input,
+-- and/or if it is used in the remainder of the computation,
+-- its reference count should be incremented (retained).
+-- The code generated by this function does that.
+-- Furthermore, it returns the StructVars for the remainder of the computation.
+awhileParRetainInput
+  :: forall env input.
+     StructVars env
+  -> BaseVars env input -- The input of the while loop
+  -> IdxSet env -- Free variables of the remainder of the computation (step & next)
+  -> CodeGen Native (StructVars env)
+awhileParRetainInput structVars input remainder = do
+  let buffers = List.groupBy (\a b -> getIdx a == getIdx b) $ List.sortOn getIdx $ filter isBufferRef $ flattenTupR input
+  forM_ buffers handleGroup
+  return $ IdxSet.partialEnvFilterSet remainder structVars
+  where
+    isBufferRef :: Exists (BaseVar env) -> Bool
+    isBufferRef (Exists (Var (BaseRref (GroundRbuffer _)) _)) = True
+    isBufferRef _ = False
+
+    getIdx :: Exists (BaseVar env) -> Int
+    getIdx (Exists (Var _ idx)) = idxToInt idx
+
+    handleGroup :: [Exists (BaseVar env)] -> CodeGen Native ()
+    handleGroup vars@(Exists (Var (BaseRref (GroundRbuffer _)) idx) : _) = do
+      let
+        retainCount
+          | idx `IdxSet.member` remainder = length vars
+          | otherwise = length vars - 1
+      
+      if retainCount == 0 then
+        return ()
+      else do
+        ptrPtr <- getPtr structVars idx
+        ptr <- instr' $ LoadPtr NonVolatile ptrPtr 
+        -- Note: we call buffer_retain multiple times (instead of retaining the buffer
+        -- with multiple increments at once). 'retainCount' will generally be very small,
+        -- usually 1, so no point in optimizing for this. It is bounded by the size of the input,
+        replicateM_ retainCount $ callRefRetain ptr
+
+    handleGroup _ = internalError "Expected non-empty list containing variables of buffer references"
+
+awhileParBindInput
+  :: forall input output env0 env env'.
+     CodeGen Native (Operand (Ptr (Struct (ReprBasesR input))))
+  -> StructVars env0
+  -> InputOutputR input output
+  -> BaseVars env0 input
+  -> BLeftHandSide input env env'
+  -> StructVars env
+  -> StructVars env'
+awhileParBindInput getStruct env0 = go TupleIdxSelf
+  where
+    go
+      :: TupleIdx (ReprBasesR input) (ReprBasesR i)
+      -> InputOutputR i o
+      -> BaseVars env0 i
+      -> BLeftHandSide i env1 env2
+      -> StructVars env1
+      -> StructVars env2
+    go _ _ _ (LeftHandSideWildcard _) env = env
+    go idx (InputOutputRref tp@(GroundRbuffer tp')) (TupRsingle initial) (LeftHandSideSingle _) env = PPush env $
+      StructVar False (BaseRref tp) $ do
+        initialPtr <- getPtr env0 $ varIdx initial
+        first <- instr' $ LoadBool NonVolatile operandAwhileIsFirst
+        struct <- getStruct
+        ptr <- instr' $ GetStructElementPtr (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct idx
+        instr' $ Select first initialPtr ptr
+    go idx (InputOutputRref tp@(GroundRscalar tp')) (TupRsingle initial) (LeftHandSideSingle _) env
+      | Refl <- scalarReprBase tp' = PPush env $
+      StructVar False (BaseRref tp) $ do
+        initialPtr <- getPtr env0 $ varIdx initial
+        first <- instr' $ LoadBool NonVolatile operandAwhileIsFirst
+        struct <- getStruct
+        ptr <- instr' $ GetStructElementPtr (ScalarPrimType tp') struct idx
+        instr' $ Select first initialPtr ptr
+    go idx InputOutputRsignal (TupRsingle initial) (LeftHandSideSingle _) env = PPush env $
+      StructVar False BaseRsignal $ do
+        initialPtr <- getPtr env0 $ varIdx initial
+        first <- instr' $ LoadBool NonVolatile operandAwhileIsFirst
+        struct <- getStruct
+        ptr <- instr' $ GetStructElementPtr primType struct idx
+        instr' $ Select first initialPtr ptr
+    go idx (InputOutputRpair io1 io2) (TupRpair initial1 initial2) (LeftHandSidePair lhs1 lhs2) env =
+      go (tupleRight idx) io2 initial2 lhs2 $ go (tupleLeft idx) io1 initial1 lhs1 env
+    go _ _ _ _ _ = internalError "Tuple mismatch"
 
 awhileBindOutput
   :: forall input output env env'.

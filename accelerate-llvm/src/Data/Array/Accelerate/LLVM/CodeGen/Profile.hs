@@ -93,13 +93,13 @@ source_location_data nm fun src line colour = do
   let i8ptr_t = LLVM.ptr LLVM.i8
 #endif
   _       <- typedef "___tracy_source_location_data" . Just $ LLVM.StructureType False [ i8ptr_t, i8ptr_t, i8ptr_t, LLVM.i32, LLVM.i32 ]
-  (s, sl) <- global_string src
-  (f, fl) <- global_string fun
-  (n, nl) <- global_string nm
+  (s, _) <- global_string src
+  (f, _) <- global_string fun
+  (n, _) <- global_string nm
   let
-      st         = PtrPrimType (ArrayPrimType sl scalarType) defaultAddrSpace
-      ft         = PtrPrimType (ArrayPrimType fl scalarType) defaultAddrSpace
-      nt         = PtrPrimType (ArrayPrimType nl scalarType) defaultAddrSpace
+      st         = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
+      ft         = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
+      nt         = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
       source     = if null src then NullPtrConstant type' else ConstantGetElementPtr scalarType (GlobalReference (PrimType st) s) [ScalarConstant scalarType 0, ScalarConstant scalarType 0 :: Constant Int32]
       function   = if null fun then NullPtrConstant type' else ConstantGetElementPtr scalarType (GlobalReference (PrimType ft) f) [ScalarConstant scalarType 0, ScalarConstant scalarType 0 :: Constant Int32]
       name       = if null nm  then NullPtrConstant type' else ConstantGetElementPtr scalarType (GlobalReference (PrimType nt) n) [ScalarConstant scalarType 0, ScalarConstant scalarType 0 :: Constant Int32]
@@ -145,9 +145,9 @@ alloc_srcloc_name l src fun nm
 #else
           gep_ix     = [ScalarConstant scalarType 0, ScalarConstant scalarType 0 :: Constant Int32]
 #endif
-          st         = PtrPrimType (ArrayPrimType sl scalarType) defaultAddrSpace
-          ft         = PtrPrimType (ArrayPrimType fl scalarType) defaultAddrSpace
-          nt         = PtrPrimType (ArrayPrimType nl scalarType) defaultAddrSpace
+          st         = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
+          ft         = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
+          nt         = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
           line       = ConstantOperand $ ScalarConstant scalarType (fromIntegral l :: Word32)
           source     = ConstantOperand $ if null src then NullPtrConstant type' else ConstantGetElementPtr scalarType (GlobalReference (PrimType st) s) gep_ix
           function   = ConstantOperand $ if null fun then NullPtrConstant type' else ConstantGetElementPtr scalarType (GlobalReference (PrimType ft) f) gep_ix
