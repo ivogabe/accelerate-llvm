@@ -710,6 +710,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
       blockCleanUp <- newBlock "awhile.cleanup"
       blockBody <- newBlock "awhile.body"
       blockExit <- newBlock "awhile.exit"
+      blockFinal <- newBlock "awhile.cleanup.final"
 
       _ <- br blockBody
 
@@ -722,16 +723,17 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
       -- Branch based on the condition of the previous iteration.
       -- 0 is exit, 1 is continue, and 2 means that a prior iteration has stopped the loop.
       condPtr <- getInputCondition
-      cond <- instr' $ Load scalarType NonVolatile condPtr
+      condValue <- instr' $ Load scalarType NonVolatile condPtr
       _ <- switch 
-        (ir scalarType cond)
+        (ir scalarType condValue)
         blockCleanUp
-        [(0, blockExit), (1, blockBody)]
+        [(0, blockExit), (1, blockBody), (2, blockFinal)]
 
       setBlock blockCleanUp
       do
+        condValueSub <- instr' $ Sub numType condValue $ integral TypeWord8 1
         cond <- getOutputCondition
-        _ <- instr' $ Store NonVolatile cond $ integral TypeWord8 2
+        _ <- instr' $ Store NonVolatile cond condValueSub
         signal <- getOutputSignalResolver
         _ <- callLocal
           (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
@@ -795,7 +797,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
 
       setBlock blockExit
       cond <- getOutputCondition
-      _ <- instr' $ Store NonVolatile cond $ integral TypeWord8 2
+      _ <- instr' $ Store NonVolatile cond $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
       signal <- getOutputSignalResolver
       _ <- callLocal
         (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
@@ -804,6 +806,9 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
           $ LLVM.ArgumentsCons signal []
           LLVM.ArgumentsNil)
         []
+      returnNull
+
+      setBlock blockFinal
       phase2Sub next1 imports fullState structVarsStart PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + 1 + blockCount step1)
   }
 
@@ -1259,7 +1264,7 @@ computeAwhileLocation awhileSlot isFirst blockIdx = do
   or <- instr' $ BOr TypeWord32 (integral TypeWord32 blockIdx) isFirstShifted
   instr' $ BOr TypeWord32 or slotShifted
 
--- Should be a power of two and at least 2
+-- Should be a power of two and at least 4, max 16
 awhileConcurrentStates :: Word64
 awhileConcurrentStates = 4
 
