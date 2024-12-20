@@ -462,7 +462,7 @@ deriving instance (ShrinkArg (BackendClusterArg op)) => ShrinkArg (BackendCluste
 
 toOnlyAcc :: Cluster op args -> Cluster (JustAccumulator op) args
 toOnlyAcc (Fused f l r) = Fused f (toOnlyAcc l) (toOnlyAcc r)
-toOnlyAcc (Op (SLV (SOp (SOAOp op soa) sort) subargs) l) = Op (SLV (SOp (SOAOp (JA op) soa) sort) subargs) l
+toOnlyAcc (SingleOp (Single op soa sort subargs) l) = SingleOp (Single (JA op) soa sort subargs) l
 
 pattern CJ :: f a -> Compose Maybe f a
 pattern CJ x = Compose (Just x)
