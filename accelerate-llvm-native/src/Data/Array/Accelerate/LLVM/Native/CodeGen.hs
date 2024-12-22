@@ -195,25 +195,28 @@ instance EvalOp NativeOp where
   subtup SubTupRkeep (CJ x) = CJ x
   subtup (SubTupRpair a b) (CJ (OP_Pair x y)) = CJ $ OP_Pair ((\(CJ z)->z) $ subtup @NativeOp a $ CJ x) ((\(CJ z)->z) $ subtup @NativeOp b $ CJ y)
 
-  -- the scalartypes guarantee that there is always only one buffer, and that the unsafeCoerce from (Buffers e) to (Buffer e) is safe
   writeOutput tp sh (TupRsingle buf) gamma (d,i,_) = \case
     CN -> pure ()
-    CJ x -> lift $ Prelude.when (sh `isAtDepth` d) $ writeBuffer tp TypeInt (aprjBuffer (unsafeCoerce buf) gamma) (op TypeInt i) (op tp x)
+    CJ x
+      | Refl <- reprIsSingle @ScalarType @_ @Buffer tp
+      -> lift $ Prelude.when (sh `isAtDepth` d) $ writeBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) (op tp x)
   writeOutput _ _ _ _ _ = error "not single"
+
   readInput :: forall e env sh. ScalarType e -> GroundVars env sh -> GroundVars env (Buffers e) -> Gamma env -> BackendClusterArg2 NativeOp env (In sh e) -> (Int, Operands Int, [Operands Int]) -> StateT Accumulated (CodeGen Native) (Compose Maybe Operands e)
   readInput _ _ _ _ _ (d,_,is) | d /= length is = error "fail"
   readInput tp _ (TupRsingle buf) gamma (BCAN2 Nothing d') (d,i, _)
     | d /= d' = pure CN
-    | otherwise = lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer (unsafeCoerce buf) gamma) (op TypeInt i)
+    | Refl <- reprIsSingle @ScalarType @e @Buffer tp
+    = lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i)
   readInput tp sh (TupRsingle buf) gamma (BCAN2 (Just (BP shr1 (shr2 :: ShapeR sh2) f _ls)) _) (d,_,ix)
     | Just Refl <- varsContainsThisShape sh shr2
     , shr1 `isAtDepth'` d
+    , Refl <- reprIsSingle @ScalarType @e @Buffer tp
     = lift $ CJ . ir tp <$> do
       sh2 <- app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) $ multidim shr1 ix
-      -- let sh' = unsafeCoerce @(GroundVars env sh) @(GroundVars env sh2) sh -- "trust me", the shapeR in the BP should match the shape of the buffer
       let sh' = aprjParameters (groundToExpVar (shapeType shr2) sh) gamma
       i <- intOfIndex shr2 sh' sh2
-      readBuffer tp TypeInt (aprjBuffer (unsafeCoerce buf) gamma) (op TypeInt i)
+      readBuffer tp TypeInt (aprjBuffer (buf) gamma) (op TypeInt i)
     | otherwise = pure CN
   readInput _ _ (TupRsingle _) _ _ (_,_,_) = error "here"
   -- assuming no bp, and I'll just make a read at every depth?
