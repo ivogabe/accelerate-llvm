@@ -105,7 +105,7 @@ instance DesugarAcc NativeOp where
   mkMap         a b c   = Exec NMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec NBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec NGenerate    (a :>: b :>:             ArgsNil)
-  mkScan LeftToRight f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
+  {- mkScan LeftToRight f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
     -- If multidimensional, simply NScanl1.
     -- TODO: just always doing nscanl1 now
     -- | ShapeRsnoc (ShapeRsnoc _) <- shr
@@ -115,7 +115,7 @@ instance DesugarAcc NativeOp where
     -- = error "todo"
   -- right to left is conceptually easy once we already have order variables for backpermute. 
   -- Exclusive scans (changing array size) are weirder, require an extra 'cons' primitive
-  mkScan _ _ _ _ _ = error "todo" 
+  mkScan _ _ _ _ _ = error "todo" -}
   mkPermute     a b@(ArgArray _ (ArrayR shr _) sh _) c d
     | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord8
     = aletUnique lhs 
@@ -342,7 +342,7 @@ instance StaticClusterAnalysis NativeOp where
   varToValue   = bcan2id
   varToSh      = bcan2id
   shToVar      = bcan2id
-  shrinkOrGrow _ (ArgArray _ (ArrayR _ TupRunit) _ _) _ = IsUnit
+  shrinkOrGrow _ (ArrayR _ TupRunit) _ = IsUnit
   shrinkOrGrow _ a IsUnit = error "can't grow from unit"
   shrinkOrGrow _ _ x = bcan2id x
   addTup       = bcan2id
@@ -362,8 +362,8 @@ instance StaticClusterAnalysis NativeOp where
   onOp NFold1  (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: fold1bp bp :>: bp :>: ArgsNil
   onOp NScanl1 (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: bcan2id bp :>: bp :>: ArgsNil
   pairinfo _ IsUnit IsUnit = error "can't yet"
-  pairinfo a@(ArgArray m (ArrayR shr (TupRpair l r)) sh (TupRpair bufl bufr)) IsUnit x = shrinkOrGrow (ArgArray m (ArrayR shr r) sh bufr) a x
-  pairinfo a@(ArgArray m (ArrayR shr (TupRpair l r)) sh (TupRpair bufl bufr)) x IsUnit = shrinkOrGrow (ArgArray m (ArrayR shr l) sh bufl) a x
+  pairinfo a@(ArrayR shr (TupRpair l r)) IsUnit x = shrinkOrGrow (ArrayR shr r) a x
+  pairinfo a@(ArrayR shr (TupRpair l r)) x IsUnit = shrinkOrGrow (ArrayR shr l) a x
   pairinfo _ x y = if bcan2id x == y then bcan2id x else 
     case (x,y) of
       -- these two cases test whether the function is id, but it's still possible that one of the arguments got backpermuted to be smaller.
