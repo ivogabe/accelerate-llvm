@@ -28,6 +28,8 @@ module Data.Array.Accelerate.LLVM.Native.Operation
 
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Operation
+import Data.Array.Accelerate.AST.Partitioned
+import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.Analysis.Hash.Exp
 import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
@@ -186,6 +188,38 @@ instance EncodeOperation NativeOp where
   encodeOperation NScanl1      = intHost $(hashQ ("Scanl1" :: String))
   encodeOperation NFold1       = intHost $(hashQ ("Fold-1" :: String))
   encodeOperation NFold2       = intHost $(hashQ ("Fold-2" :: String))
+
+instance SetOpIndices NativeOp where
+  setOpIndices _ NGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
+  setOpIndices _ NMap _ (_ :>: _ :>: IdxArgIdx i :>: ArgsNil)
+    = Just $ Right $ IdxArgNone :>: IdxArgIdx i :>: IdxArgIdx i :>: ArgsNil
+  setOpIndices _ NMap _ _ = error "Missing indices for NMap"
+  setOpIndices _ NBackpermute _ _ = Just $ Left IsBackpermute
+  setOpIndices _ NScanl1 _ (_ :>: _ :>: IdxArgIdx i :>: ArgsNil)
+    = Just $ Right $ IdxArgNone :>: IdxArgIdx i :>: IdxArgIdx i :>: ArgsNil
+  setOpIndices _ NScanl1 _ _ = error "Missing indices for NScanl1"
+  setOpIndices _ NFold1 _ (_ :>: _ :>: IdxArgIdx i :>: ArgsNil)
+    = Just $ Right $ IdxArgNone :>: IdxArgIdx i :>: IdxArgIdx i :>: ArgsNil
+  setOpIndices _ NFold1 _ _ = error "Missing indices for NFold1"
+  setOpIndices next NFold2 _ (_ :>: _ :>: IdxArgIdx i :>: ArgsNil)
+    | Just i' <- next i
+    = Just $ Right $
+      IdxArgNone :>: IdxArgIdx (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx i :>: ArgsNil
+    | otherwise
+    = Nothing
+  setOpIndices _ NFold2 _ _ = error "Missing indices for NFold2"
+  setOpIndices next NPermute (_ :>: _ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+    | Just i <- findIndex shr
+    = Just $ Right $
+      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx i :>: ArgsNil
+    where
+      findIndex :: ShapeR sh -> Maybe (ExpVars idxEnv sh)
+      findIndex ShapeRz = Just TupRunit
+      findIndex (ShapeRsnoc shr')
+        | Just a <- findIndex shr'
+        , Just b <- next a
+        = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
+        | otherwise = Nothing
 
                 -- vvvv old vvv
                   -- 0 means maximal parallelism; each thread only gets 1 element, e.g. output of the first stage of 1-dimensional fold
