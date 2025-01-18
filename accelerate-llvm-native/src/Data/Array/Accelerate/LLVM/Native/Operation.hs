@@ -170,9 +170,9 @@ instance DesugarAcc NativeOp where
   mkFold a Nothing b c = Exec NFold2 (a :>: b :>: c :>: ArgsNil)
 
 instance SimplifyOperation NativeOp where
-  detectCopy _          NMap         = detectMapCopies
-  detectCopy matchVars' NBackpermute = detectBackpermuteCopies matchVars'
-  detectCopy _ _                     = const []
+  detectCopy NMap         = detectMapCopies
+  detectCopy NBackpermute = detectBackpermuteCopies
+  detectCopy _            = const []
 
 instance SLVOperation NativeOp where
   slvOperation NGenerate    = defaultSlvGenerate    NGenerate
@@ -212,6 +212,8 @@ instance SetOpIndices NativeOp where
     | Just i <- findIndex shr
     = Just $ Right $
       IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx i :>: ArgsNil
+    | otherwise
+    = Nothing
     where
       findIndex :: ShapeR sh -> Maybe (ExpVars idxEnv sh)
       findIndex ShapeRz = Just TupRunit
