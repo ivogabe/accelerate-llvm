@@ -191,27 +191,27 @@ instance EncodeOperation NativeOp where
 
 instance SetOpIndices NativeOp where
   setOpIndices _ NGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
-  setOpIndices _ NMap _ (_ :>: _ :>: IdxArgIdx i :>: ArgsNil)
-    = Just $ Right $ IdxArgNone :>: IdxArgIdx i :>: IdxArgIdx i :>: ArgsNil
+  setOpIndices _ NMap _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+    = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
   setOpIndices _ NMap _ _ = error "Missing indices for NMap"
   setOpIndices _ NBackpermute _ _ = Just $ Left IsBackpermute
-  setOpIndices _ NScanl1 _ (_ :>: _ :>: IdxArgIdx i :>: ArgsNil)
-    = Just $ Right $ IdxArgNone :>: IdxArgIdx i :>: IdxArgIdx i :>: ArgsNil
+  setOpIndices _ NScanl1 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+    = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
   setOpIndices _ NScanl1 _ _ = error "Missing indices for NScanl1"
-  setOpIndices _ NFold1 _ (_ :>: _ :>: IdxArgIdx i :>: ArgsNil)
-    = Just $ Right $ IdxArgNone :>: IdxArgIdx i :>: IdxArgIdx i :>: ArgsNil
+  setOpIndices _ NFold1 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+    = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
   setOpIndices _ NFold1 _ _ = error "Missing indices for NFold1"
-  setOpIndices next NFold2 _ (_ :>: _ :>: IdxArgIdx i :>: ArgsNil)
-    | Just i' <- next i
+  setOpIndices indexVar NFold2 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+    | Just i' <- indexVar d
     = Just $ Right $
-      IdxArgNone :>: IdxArgIdx (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx i :>: ArgsNil
+      IdxArgNone :>: IdxArgIdx (d + 1) (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx d i :>: ArgsNil
     | otherwise
     = Nothing
   setOpIndices _ NFold2 _ _ = error "Missing indices for NFold2"
-  setOpIndices next NPermute (_ :>: _ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+  setOpIndices indexVar NPermute (_ :>: _ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
-      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx i :>: ArgsNil
+      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
     | otherwise
     = Nothing
     where
@@ -219,7 +219,7 @@ instance SetOpIndices NativeOp where
       findIndex ShapeRz = Just TupRunit
       findIndex (ShapeRsnoc shr')
         | Just a <- findIndex shr'
-        , Just b <- next a
+        , Just b <- indexVar (rank shr')
         = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
         | otherwise = Nothing
 
