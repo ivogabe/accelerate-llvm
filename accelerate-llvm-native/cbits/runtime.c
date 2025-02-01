@@ -70,49 +70,61 @@ void* accelerate_worker(void *data_packed) {
         task.program = NULL;
         task.location = 0;
       } else {
+        // Initialize kernel memory and check if the kernel should be executed in parallel.
+        unsigned char parallel =
+          kernel->work_function(kernel, 0xFFFFFFFF, NULL);
+        
+
         // start_task from the Work Assisting paper
-        atomic_store_explicit(&workers->scheduler.activities[thread_idx], accelerate_pack(kernel, 0), memory_order_release);
-        accelerate_parker_wake_all(&workers->scheduler.parker);
+        if (parallel == 1) {
+          atomic_store_explicit(&workers->scheduler.activities[thread_idx], accelerate_pack(kernel, 0), memory_order_release);
+          accelerate_parker_wake_all(&workers->scheduler.parker);
+        }
         kernel->work_function(kernel, 0, (uintptr_t*) &workers->scheduler.activities[thread_idx]);
-        // signal_task_empty from the Work Assisting paper,
-        // and end_task
-        // Note that in the paper, the work function calls this function.
-        // In this implementation, this happens here.
-        // This simplifies the code generation for work function (which are compiled via LLVM),
-        // and allows us to combine the decrement of active_threads from end_task.
-        uintptr_t old = atomic_exchange_explicit(
-          &workers->scheduler.activities[thread_idx],
-          accelerate_pack(NULL, 0),
-          memory_order_relaxed
-        );
         // Keep track of whether this was the last thread working on the kernel
         bool is_last;
-        if (accelerate_unpack_ptr(old) == kernel) {
-          // Move the reference count from the pointer to the task object,
-          // and decrement the reference count by one.
-          // This combines the atomic_fetch_add in signal_task_empty with the one in end_task
-          uint16_t count = accelerate_unpack_tag(old);
-          if (count == 0) {
-            // No other thread has assisted. No need to update the reference count.
-            // Since there is no other thread, we know this is also th last thread.
-            is_last = true;
+        if (parallel == 1) {
+          // signal_task_empty from the Work Assisting paper,
+          // and end_task
+          // Note that in the paper, the work function calls this function.
+          // In this implementation, this happens here.
+          // This simplifies the code generation for work function (which are compiled via LLVM),
+          // and allows us to combine the decrement of active_threads from end_task.
+          uintptr_t old = atomic_exchange_explicit(
+            &workers->scheduler.activities[thread_idx],
+            accelerate_pack(NULL, 0),
+            memory_order_relaxed
+          );
+          if (accelerate_unpack_ptr(old) == kernel) {
+            // Move the reference count from the pointer to the task object,
+            // and decrement the reference count by one.
+            // This combines the atomic_fetch_add in signal_task_empty with the one in end_task
+            uint16_t count = accelerate_unpack_tag(old);
+            if (count == 0) {
+              // No other thread has assisted. No need to update the reference count.
+              // Since there is no other thread, we know this is also th last thread.
+              is_last = true;
+            } else {
+              int32_t remaining_threads = atomic_fetch_add_explicit(
+                &kernel->active_threads,
+                // The + 1 from signal_task_empty cancels out with the -1 in end_task
+                count,
+                memory_order_acq_rel
+              );
+              is_last = -remaining_threads == count;
+            }
           } else {
+            // Decrement active_threads (end_task in the Work Assisting paper)
             int32_t remaining_threads = atomic_fetch_add_explicit(
               &kernel->active_threads,
-              // The + 1 from signal_task_empty cancels out with the -1 in end_task
-              count,
+              -1,
               memory_order_acq_rel
             );
-            is_last = -remaining_threads == count;
+            is_last = remaining_threads == 1;
           }
         } else {
-          // Decrement active_threads (end_task in the Work Assisting paper)
-          int32_t remaining_threads = atomic_fetch_add_explicit(
-            &kernel->active_threads,
-            -1,
-            memory_order_acq_rel
-          );
-          is_last = remaining_threads == 1;
+          // This kernel was executed by a single thread, so this is definitely the last thread.
+          is_last = true;
         }
 
         if (is_last) {

@@ -52,6 +52,8 @@ import Data.Typeable
 
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
+import LLVM.AST.Type.Instruction
+import qualified LLVM.AST.Type.Instruction.Compare as Compare
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -76,6 +78,7 @@ import qualified Control.Monad as Prelude
 import Data.Bifunctor (Bifunctor(..))
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
+import Data.Array.Accelerate.LLVM.CodeGen.Constant
 
 traceIfDebugging :: String -> a -> a
 traceIfDebugging _ a = a --Debug.Trace.trace str a
@@ -84,10 +87,27 @@ codegen :: ShortByteString
         -> Env AccessGroundR env
         -> Clustered NativeOp args
         -> Args env args
-        -> LLVM Native (Module (KernelType env))
+        -> LLVM Native
+           ( Int -- The size of the kernel data, shared by all threads working on this kernel.
+           , Module (KernelType env))
 codegen name env (Clustered c b) args =
-  codeGenFunction name (PrimType BoolPrimType) (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
+  codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
     extractEnv
+
+    -- Before the parallel work of a kernel is started, we first run the function once.
+    -- This first call will initialize kernel memory (SEE: Kernel Memory)
+    -- and decide whether the runtime may try to let multiple threads work on this kernel.
+    init <- instr $ Cmp singleType Compare.EQ workassistFirstIndex (scalar scalarType 0xFFFFFFFF)
+    initBlock <- newBlock "init"
+    workBlock <- newBlock "work"
+    cbr init initBlock workBlock
+
+    setBlock initBlock
+    -- TODO: Initialize kernel memory and decide whether loopsize is large enough
+    retval_ $ scalar (scalarType @Word8) 1
+
+    setBlock workBlock
+
     let b' = mapArgs BCAJA b
     (acc, loopsize) <- execStateT (evalCluster (toOnlyAcc c) b' args gamma ()) (mempty, LS ShapeRz OP_Unit)
     _acc' <- operandsMapToPairs acc $ \(accTypeR, toOp, fromOp) -> fmap fromOp $ flip execStateT (toOp acc) $ case loopsize of
@@ -96,7 +116,7 @@ codegen name env (Clustered c b) args =
           (body loopshr toOp fromOp, -- the LoopWork
           StateT $ \op -> second toOp <$> runStateT (foo (liftInt 0) []) (fromOp op)) -- the action to run after the outer loop
     -- acc'' <- flip execStateT acc' $ foo (liftInt 0) []
-    pure ()
+    pure 0
     where
       ba = makeBackendArg @NativeOp args gamma c b
       (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, gamma) = bindHeaderEnv env

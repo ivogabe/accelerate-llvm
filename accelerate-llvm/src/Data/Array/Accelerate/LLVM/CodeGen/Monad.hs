@@ -119,21 +119,22 @@ liftCodeGen :: LLVM arch a -> CodeGen arch a
 liftCodeGen = CodeGen . lift
 
 codeGenFunction
-  :: forall arch f t. (HasCallStack, Target arch, Intrinsic arch, Result f ~ t, Result t ~ t)
+  :: forall arch f t a. (HasCallStack, Target arch, Intrinsic arch, Result f ~ t, Result t ~ t)
   => ShortByteString
   -> Type t
   -> (GlobalFunctionDefinition t -> GlobalFunctionDefinition f)
-  -> CodeGen arch ()
-  -> LLVM arch (Module f)
+  -> CodeGen arch a
+  -> LLVM arch (a, Module f)
 codeGenFunction name returnTp bind body = do
   -- Execute the CodeGen monad and retrieve the code of the function and final state.
-  (code, st) <- runStateT
+  ((a, code), st) <- runStateT
     ( runCodeGen $ do
       -- For tracy, we should emit this:
       -- zone <- zone_begin_alloc 0 [] (S8.unpack sbs) [] 0
-      body
+      a <- body
       -- _    <- zone_end zone
-      createBlocks
+      blocks <- createBlocks
+      pure (a, blocks)
     )
     $ CodeGenState
         { blockChain        = initBlockChain
@@ -151,14 +152,17 @@ codeGenFunction name returnTp bind body = do
     symbols = map LLVM.GlobalDefinition $ HashMap.elems $ symbolTable st
     metadata = createMetadata $ metadataTable st
 
-  return $ Module
-    { moduleName             = name
-    , moduleSourceFileName   = B.empty
-    , moduleDataLayout       = targetDataLayout @arch
-    , moduleTargetTriple     = targetTriple @arch
-    , moduleMain             = bind $ Body returnTp Nothing (GlobalFunctionBody (Label name) code)
-    , moduleOtherDefinitions = typeDefs ++ symbols ++ metadata
-    }
+  return 
+    ( a
+    , Module
+      { moduleName             = name
+      , moduleSourceFileName   = B.empty
+      , moduleDataLayout       = targetDataLayout @arch
+      , moduleTargetTriple     = targetTriple @arch
+      , moduleMain             = bind $ Body returnTp Nothing (GlobalFunctionBody (Label name) code)
+      , moduleOtherDefinitions = typeDefs ++ symbols ++ metadata
+      }
+    )
 
 -- Basic Blocks
 -- ============

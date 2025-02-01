@@ -264,7 +264,7 @@ workassistLoop counter firstIndex activitiesSlot size doWork = do
 
   lift $ setBlock finished
   -- Work was already finished -}
-  lift $ retval_ $ boolean False
+  lift $ retval_ $ scalar (scalarType @Word8) 0
 
   -- lift $ setBlock dummy -- without this, the previous block always returns True for some reason
   

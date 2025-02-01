@@ -616,6 +616,10 @@ liftInt = lift $ TupRsingle scalarTypeInt
 liftInt32 :: Int32 -> Operands Int32
 liftInt32 = lift $ TupRsingle scalarTypeInt32
 
+{-# INLINE liftWord8 #-}
+liftWord8 :: Word8 -> Operands Word8
+liftWord8 = lift $ TupRsingle scalarType
+
 {-# INLINE liftWord32 #-}
 liftWord32 :: Word32 -> Operands Word32
 liftWord32 = lift $ TupRsingle scalarTypeWord32

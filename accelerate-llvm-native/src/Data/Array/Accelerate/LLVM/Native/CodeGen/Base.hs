@@ -63,11 +63,11 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
 
-type KernelType env = Ptr (Struct (Header, Struct (MarshalEnv env))) -> Word32 -> Ptr Word64 -> Bool
+type KernelType env = Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)) -> Word32 -> Ptr Word64 -> Word8
 
 bindHeaderEnv
   :: forall env. Env AccessGroundR env
-  -> ( PrimType (Ptr (Struct (Header, Struct (MarshalEnv env))))
+  -> ( PrimType (Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)))
      , CodeGen Native ()
      , Operand (Ptr Word32)
      , Operand (Word32)
@@ -77,8 +77,8 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameIndex := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ "env" := GetStructElementPtr envTp arg (TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameIndex := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ "env" := GetStructElementPtr envTp arg (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
   , LocalReference type' nameFirstIndex
@@ -86,7 +86,10 @@ bindHeaderEnv env =
   , gamma
   )
   where
-    argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp)) defaultAddrSpace
+    -- The Word array at the end is kernel memory. SEE: [Kernel Memory]
+    -- Note that the array here has size 0, but it may be larger.
+    -- LLVM allows this, since we only use pointer casts here and the allocation does not happen here.
+    argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp `TupRpair` TupRsingle (ArrayPrimType 0 primType))) defaultAddrSpace
     (envTp, extractEnv, gamma) = bindEnv env
 
     nameIndex = "workassist.index"

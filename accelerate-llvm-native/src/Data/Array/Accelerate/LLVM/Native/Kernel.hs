@@ -67,13 +67,21 @@ data NativeKernel env where
     :: { kernelFunction   :: !(Lifetime (FunPtr (KernelType env)))
        , kernelId         :: {-# UNPACK #-} !ShortByteString
        , kernelUID        :: {-# UNPACK #-} !UID
+       -- Note: [Kernel Memory]
+       -- Each kernel call gets a memory that is shared between all the threads
+       -- working on this kernel.
+       -- The storage can for instance be used to synchronise the threads in
+       -- case of a parallel scan.
+       -- This additional memory is word aligned (e.g. 64-bit on a 64-bit system).
+       -- This field contains the size of the kernel memory for this kernel.
+       , kernelMemorySize :: {-# UNPACK #-} !Int
        , kernelDescDetail :: String
        , kernelDescBrief  :: String
        }
     -> NativeKernel env
 
 instance NFData' NativeKernel where
-  rnf' (NativeKernel fn !_ !_ s l) = unsafeGetValue fn `seq` rnf s `seq` rnf l
+  rnf' (NativeKernel fn !_ !_ !_ s l) = unsafeGetValue fn `seq` rnf s `seq` rnf l
 
 newtype NativeKernelMetadata f =
   NativeKernelMetadata { kernelArgsSize :: Int }
@@ -87,10 +95,10 @@ instance IsKernel NativeKernel where
   type KernelMetadata  NativeKernel = NativeKernelMetadata
 
   compileKernel env cluster args = unsafePerformIO $ evalLLVM defaultTarget $ do
-    module' <- codegen fullName env cluster args
+    (sz, module') <- codegen fullName env cluster args
     obj <- compile uid fullName module'
     funPtr <- link obj
-    return $ NativeKernel funPtr fullName uid detail brief
+    return $ NativeKernel funPtr fullName uid sz detail brief
     where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = fromString $ name ++ "-" ++ show uid
@@ -105,9 +113,9 @@ instance PrettyKernel NativeKernel where
     where
       go :: OpenKernelFun NativeKernel env t -> Adoc
       go (KernelFunLam _ f) = go f
-      go (KernelFunBody (NativeKernel _ name _ "" _))
+      go (KernelFunBody (NativeKernel _ name _ _ "" _))
         = fromString $ take 32 $ toString name
-      go (KernelFunBody (NativeKernel _ name _ detail brief))
+      go (KernelFunBody (NativeKernel _ name _ _ detail brief))
         = fromString (take 32 $ toString name)
         <+> flatAlt (group $ line' <> "-- " <> desc)
           ("{- " <> desc <> "-}")

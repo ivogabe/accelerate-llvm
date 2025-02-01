@@ -86,7 +86,7 @@ linkSchedule' uid schedule
     let ptrPtrTp = PtrPrimType ptrTp defaultAddrSpace
 
     let name = fromString $ "schedule_" ++ show uid
-    m <- codeGenFunction name (PrimType ptrTp)
+    (_, m) <- codeGenFunction name (PrimType ptrTp)
         (LLVM.Lam ptrPtrTp "runtime_lib" . LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Word16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
         body
 
@@ -815,8 +815,8 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
 -- Effects
 convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
   | Exists2 next1 <- convert inAwhile next
-  , kFunPtr <- kernelFun kernel
-  , (argsTp, argsTp') <- kernelArgsTp kargs =
+  , (kFunPtr, kMemorySize) <- kernelFun kernel
+  , (argsTp, argsTp') <- kernelArgsTp kargs kMemorySize =
   Exists2 $ Phase1{
     blockCount = blockCount next1 + 1,
     importsType = TupRsingle kernelTp `TupRpair` importsType next1,
@@ -839,19 +839,19 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       -- Header
       workFnPtr' <- instr' $ GetStructElementPtr kernelTp imports (tupleLeft importsIdx)
       workFn <- instr' $ LoadPtr NonVolatile workFnPtr'
-      workFnPtr <- instr' $ GetStructElementPtr kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
+      workFnPtr <- instr' $ GetStructElementPtr kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
       _ <- instr' $ Store NonVolatile workFnPtr workFn
-      programPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      programPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile programPtr operandProgram
       location <- computeLocation inAwhile $ fromIntegral nextBlock
-      locationPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      locationPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile locationPtr location
-      threadsPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      threadsPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) -- active_threads
-      workIdxPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      workIdxPtr <- instr' $ GetStructElementPtr primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord32 1) -- work_index
       -- Arguments
-      args' <- instr' $ GetStructElementPtr argsTp' args $ TupleIdxRight TupleIdxSelf
+      args' <- instr' $ GetStructElementPtr argsTp' args $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
       storeKernelArgs structVars localVars kargs args' TupleIdxSelf
 
       args'' <- instr' $ PtrCast (primType @(Ptr Int8)) args
@@ -1447,11 +1447,11 @@ kernelArgsTp' (SArgBuffer _ (Var tp _) :>: args) = case tp of
   _ -> internalError "Buffer impossible"
 kernelArgsTp' ArgsNil = TupRunit
 
-kernelArgsTp :: SArgs env f -> (PrimType (Struct (Header, Struct (KernelArgs f))), PrimType (Struct (KernelArgs f)))
-kernelArgsTp args =
+kernelArgsTp :: SArgs env f -> Int -> (PrimType (Struct ((Header, Struct (KernelArgs f)), SizedArray Word)), PrimType (Struct (KernelArgs f)))
+kernelArgsTp args size =
   ( StructPrimType False
-    $ TupRpair headerType
-    $ TupRsingle $ tp
+    $ TupRpair (TupRpair headerType $ TupRsingle $ tp)
+    $ TupRsingle $ ArrayPrimType (fromIntegral size) primType
   , tp
   )
   where
@@ -1480,9 +1480,9 @@ unsafeGetFunPtr :: OpenKernelFun NativeKernel env f -> IO (Ptr (Struct Int8))
 unsafeGetFunPtr (KernelFunLam _ f) = unsafeGetFunPtr f
 unsafeGetFunPtr (KernelFunBody kernel) = return $ castPtr $ unsafeGetPtrFromLifetimeFunPtr $ kernelFunction kernel
 
-kernelFun :: OpenKernelFun NativeKernel env f -> Exists Lifetime
+kernelFun :: OpenKernelFun NativeKernel env f -> (Exists Lifetime, Int)
 kernelFun (KernelFunLam _ f) = kernelFun f
-kernelFun (KernelFunBody kernel) = Exists $ kernelFunction kernel
+kernelFun (KernelFunBody kernel) = (Exists $ kernelFunction kernel, kernelMemorySize kernel)
 
 -- Releases any bindings that are not used according to 'used'
 -- Returns the environments with only variables in 'used'
