@@ -36,6 +36,7 @@ import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
 import Data.Array.Accelerate.Eval
+import Data.Array.Accelerate.Error
 
 
 import qualified Data.Set as Set
@@ -47,7 +48,7 @@ import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken, LHS (..), mkLHS)
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
-import Data.Array.Accelerate.Type (scalarType, Word8, scalarTypeWord8, scalarTypeInt)
+import Data.Array.Accelerate.Type (scalarType, Word8, scalarTypeWord8, scalarTypeInt, singleType)
 import Data.Array.Accelerate.Analysis.Match
 import Data.Maybe (isJust)
 import Data.Array.Accelerate.Interpreter (InOut (..))
@@ -139,19 +140,27 @@ instance DesugarAcc NativeOp where
   -- -- Will need to figure out how to solve that before we ship it, as long as we keep the conditional out of the loop. 
   -- -- Potentially generating multiple versions, as we do currently? With the new fusion, that might result in an exponential amount of variations in the number of folds per cluster...
   -- -- TODO
-  mkFold a@(ArgFun f) (Just (ArgExp seed)) b@(ArgArray In (ArrayR _ tp) _ _) c@(ArgArray _ arr' sh' _)
-    | DeclareVars lhsTemp wTemp kTemp <- declareVars $ buffersR tp =
+  mkFold a@(ArgFun f) (Just (ArgExp seed)) b@(ArgArray In (ArrayR _ tp) sh _) c@(ArgArray _ arr' sh' _)
+    | DeclareVars lhsTemp kTemp valueTemp <- declareVars $ buffersR tp =
       aletUnique lhsTemp (desugarAlloc arr' $ fromGrounds sh') $
         alet LeftHandSideUnit
-          (mkFold (weaken wTemp a) Nothing (weaken wTemp b) (ArgArray Out arr' (weakenVars wTemp sh') (kTemp weakenId))) $
+          (mkFold (weaken kTemp a) Nothing (weaken kTemp b) (ArgArray Out arr' (weakenVars kTemp sh') (valueTemp weakenId))) $
           case mkLHS tp of
             LHS lhs vars ->
               mkMap
                 (ArgFun $ 
-                  Lam lhs $ Body $ (\f' -> apply2 tp f' (weakenThroughReindex wTemp reindexExp $ 
-                    weakenE weakenEmpty seed) (expVars vars)) $ weakenThroughReindex wTemp reindexExp f)
-                (ArgArray In arr' (weakenVars wTemp sh') (kTemp weakenId))
-                (weaken wTemp c)
+                  Lam lhs $ Body $ mapArrayInstr (weaken kTemp)
+                  $ Cond
+                    (mkBinary (PrimEq singleType) (paramIn scalarTypeInt innerSize) $ Const scalarTypeInt 0)
+                    (weakenE weakenEmpty seed)
+                    (apply2 tp f (weakenE weakenEmpty seed) $ expVars vars)
+                )
+                (ArgArray In arr' (weakenVars kTemp sh') (valueTemp weakenId))
+                (weaken kTemp c)
+    where
+      innerSize = case sh of
+        _ `TupRpair` TupRsingle var -> var
+        _ -> internalError "Tuple mismatch"
   -- mkFold (a :: Arg env (Fun' (e -> e -> e))) Nothing b@(ArgArray In arr@(ArrayR shr tp) _ _) c
   --   | DeclareVars lhsSize (wSize :: env :> env') kSize <- declareVars . typeRtoGroundsR $ TupRsingle scalarTypeInt
   --   , DeclareVars lhsTemp (wTemp :: env' :> env'') kTemp <- declareVars $ buffersR tp =
@@ -222,6 +231,12 @@ instance SetOpIndices NativeOp where
         , Just b <- indexVar (rank shr')
         = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
         | otherwise = Nothing
+
+  getOpLoopDirections NScanl1 _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
+    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopAscending)]
+  getOpLoopDirections NFold2 _ (_ :>: IdxArgIdx _ i :>: _)
+    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
+  getOpLoopDirections _ _ _ = []
 
                 -- vvvv old vvv
                   -- 0 means maximal parallelism; each thread only gets 1 element, e.g. output of the first stage of 1-dimensional fold
