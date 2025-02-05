@@ -136,12 +136,9 @@ genSequential envs sizes ops = do
         -- iteration of the loop.
         _  <- beginBlock "while.first.iteration"
         let idx = firstIdx
-        a <- mul numType (envsLinearIndex envs depth) sz
-        linearIdx <- add numType a idx
         let envs2 = envs1{
             envsLoopDepth = depth + 1,
             envsIdx = partialUpdate (op scalarTypeInt idx) idxIdx $ envsIdx envs1,
-            envsLinearIndices = envsLinearIndices envs ++ [linearIdx],
             envsIsFirst = OP_Bool $ boolean True,
             envsDescending = isDescending dir
           }
@@ -150,12 +147,9 @@ genSequential envs sizes ops = do
       (if desc then imapReverseFromStepTo (liftInt 0) (liftInt 1) firstIdx
                else imapFromStepTo (liftInt 1) (liftInt 1) sz)
         $ \idx -> do
-          a <- mul numType (envsLinearIndex envs depth) sz
-          linearIdx <- add numType a idx
           let envs2 = envs1{
               envsLoopDepth = depth + 1,
               envsIdx = partialUpdate (op scalarTypeInt idx) idxIdx $ envsIdx envs1,
-              envsLinearIndices = envsLinearIndices envs ++ [linearIdx],
               envsIsFirst = OP_Bool $ boolean False,
               envsDescending = isDescending dir
             }
@@ -165,18 +159,15 @@ genSequential envs sizes ops = do
       (if isDescending dir then imapReverseFromStepTo else imapFromStepTo)
         (liftInt 0) (liftInt 1) sz
         $ \idx -> do
-          a <- mul numType (envsLinearIndex envs depth) sz
           isFirst <-
             if isDescending dir then do
               sz' <- sub numType sz (liftInt 1)
               eq singleType idx sz'
             else
               eq singleType idx (liftInt 0)
-          linearIdx <- add numType a idx
           let envs2 = envs1{
               envsLoopDepth = depth + 1,
               envsIdx = partialUpdate (op scalarTypeInt idx) idxIdx $ envsIdx envs1,
-              envsLinearIndices = envsLinearIndices envs ++ [linearIdx],
               envsIsFirst = isFirst,
               envsDescending = isDescending dir
             }

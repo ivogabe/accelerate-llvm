@@ -36,7 +36,7 @@ module Data.Array.Accelerate.LLVM.Native.CodeGen
 -- accelerate
 import Data.Array.Accelerate.Trafo.Operation.LiveVars
 import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Shape (shapeType, ShapeR(..), rank)
+import Data.Array.Accelerate.Representation.Shape (shapeRFromRank, shapeType, ShapeR(..), rank)
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Partitioned as P hiding (combine)
@@ -44,6 +44,7 @@ import Data.Array.Accelerate.Eval
 import Data.Array.Accelerate.Type
 import qualified Data.Array.Accelerate.AST.Environment as Env
 import Data.Array.Accelerate.LLVM.State
+import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
 import Data.Array.Accelerate.LLVM.Native.Operation
@@ -63,6 +64,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.Trafo.Desugar (ArrayDescriptor(..))
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic ( when, ifThenElse, ifThenElse', eq, fromJust, isJust, liftInt )
+import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.Analysis.Match (matchShapeR)
 import Data.Array.Accelerate.Trafo.Exp.Substitution (compose)
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically)
@@ -89,7 +91,7 @@ traceIfDebugging _ a = a --Debug.Trace.trace str a
 -- evaluate them easily and then decide which code generator we want to keep.
 -- At that point, we can remove the code of the other code generator.
 newCodeGen :: Bool
-newCodeGen = False
+newCodeGen = True
 
 codegen :: ShortByteString
         -> Env AccessGroundR env
@@ -99,7 +101,10 @@ codegen :: ShortByteString
            ( Int -- The size of the kernel data, shared by all threads working on this kernel.
            , Module (KernelType env))
 codegen name env cluster args
- | newCodeGen =
+ | newCodeGen
+ , flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
+ , parallelDepth <- flatClusterIndependentLoopDepth flat
+ , Exists parallelShr <- shapeRFromRank parallelDepth =
   codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
     extractEnv
 
@@ -111,21 +116,58 @@ codegen name env cluster args
     workBlock <- newBlock "work"
     cbr init initBlock workBlock
 
-    setBlock initBlock
-    -- TODO: Initialize kernel memory and decide whether loopsize is large enough
-    retval_ $ scalar (scalarType @Word8) 0
+    if parallelDepth == 0 then do
+      -- TODO: Parallelise over first dimension using parallel folds or scans
 
-    setBlock workBlock
+      setBlock initBlock
+      -- TODO: Initialize kernel memory and decide whether loopsize is large enough
+      retval_ $ scalar (scalarType @Word8) 0
 
-    -- Case instead of let, as this introduces existential type arguments
-    case toFlatClustered cluster args of
-      flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) -> do
-        let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+      setBlock workBlock
 
-        genSequential envs loops $ opCodeGens opCodeGen flatOps
+      -- Case instead of let, as this introduces existential type arguments
+      let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
 
-        retval_ $ scalar (scalarType @Word8) 0
-        pure 0
+      genSequential envs loops $ opCodeGens opCodeGen flatOps
+
+      retval_ $ scalar (scalarType @Word8) 0
+      pure 0
+    else do
+      -- Parallelise over all independent dimensions
+      let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+
+      -- If we parallelize over all dimensions, choose a large tile size.
+      -- The work per iteration is probably very small.
+      -- If we do not parallelize over all dimensions, choose a tile size of 1.
+      -- The work per iteration is probably large enough.
+      let tileSize = if parallelDepth == rank shr then chunkSize parallelShr else chunkSizeOne parallelShr
+      let parSizes = parallelIterSize parallelShr loops
+      tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
+
+      setBlock initBlock
+      tileCount' <- shapeSize parallelShr tileCount
+      -- We are not using kernel memory, so no need to initialize it.
+
+      -- TODO: Rewrite using a Select
+      ifThenElse (TupRunit, A.lt singleType tileCount' $ liftInt 3)
+        (OP_Unit <$ retval_ (scalar (scalarType @Word8) 0))
+        (return OP_Unit)
+      retval_ (scalar (scalarType @Word8) 1)
+
+      setBlock workBlock
+      workassistChunked parallelShr workassistIndex workassistFirstIndex workassistActivitiesSlot tileSize parSizes $ \idx -> do
+        let envs' = envs{
+            envsLoopDepth = parallelDepth,
+            envsIdx =
+              foldr (\(o, i) -> Env.partialUpdate o i) (envsIdx envs)
+              $ zip (shapeOperandsToList parallelShr idx) (map (\(i, _, _) -> i) loops),
+            -- Independent operations should not depend on envsIsFirst.
+            envsIsFirst = OP_Bool $ boolean False,
+            envsDescending = False
+          }
+        genSequential envs' (drop parallelDepth loops) $ opCodeGens opCodeGen flatOps
+
+      pure 0
   where
     (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, gamma) = bindHeaderEnv env
 
@@ -143,7 +185,7 @@ codegen name env (Clustered c b) args =
 
     setBlock initBlock
     -- TODO: Initialize kernel memory and decide whether loopsize is large enough
-    retval_ $ scalar (scalarType @Word8) 0 -- 1
+    retval_ $ scalar (scalarType @Word8) 1
 
     setBlock workBlock
 
@@ -151,7 +193,7 @@ codegen name env (Clustered c b) args =
     (acc, loopsize) <- execStateT (evalCluster (toOnlyAcc c) b' args gamma ()) (mempty, LS ShapeRz OP_Unit)
     _acc' <- operandsMapToPairs acc $ \(accTypeR, toOp, fromOp) -> fmap fromOp $ flip execStateT (toOp acc) $ case loopsize of
       LS loopshr loopsh -> 
-        workassistChunked loopshr workassistIndex workassistFirstIndex workassistActivitiesSlot (flipShape loopshr loopsh) accTypeR
+        workassistChunked' loopshr workassistIndex workassistFirstIndex workassistActivitiesSlot (flipShape loopshr loopsh) accTypeR
           (body loopshr toOp fromOp, -- the LoopWork
           StateT $ \op -> second toOp <$> runStateT (foo (liftInt 0) []) (fromOp op)) -- the action to run after the outer loop
     -- acc'' <- flip execStateT acc' $ foo (liftInt 0) []

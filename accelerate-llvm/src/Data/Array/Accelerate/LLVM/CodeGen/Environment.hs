@@ -29,8 +29,9 @@ module Data.Array.Accelerate.LLVM.CodeGen.Environment
   -- , scalarParameter, ptrParameter
   , bindParameters, bindEnv, envType
   , Envs(..), initEnv, bindLocals
-  , envsGamma, envsLinearIndex, envsPrjBuffer, envsPrjParameter
+  , envsGamma, envsPrjBuffer, envsPrjParameter
   , envsPrjParameters, envsPrjSh, envsPrjIndex, envsPrjIndices
+  , parallelIterSize
   )
   where
 
@@ -84,10 +85,6 @@ data Envs env idxEnv = Envs
   -- This is a partial environment as some indices are only available in
   -- deeper loop depths.
   , envsIdx :: PartialEnv Operand idxEnv
-  -- At index d, contains the linear index at loop depth d.
-  -- By definition, 'envsLinearIndices envs !! 0' is thus 0,
-  -- since that is outside of any loop.
-  , envsLinearIndices :: [Operands Int]
   -- Whether the iteration at the current loop depth is the first iteration of the loop
   , envsIsFirst :: Operands Bool
   -- Whether the loop at the current loop depth is descending
@@ -121,7 +118,6 @@ initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
       , envsGround = partialEnvSkipLHS localLHS $ envToPartial gamma
       , envsLocal = partialEnvToList $ partialEnvPushLHS localLHS localsR PEnd
       , envsIdx = PEnd
-      , envsLinearIndices = [constant (TupRsingle scalarTypeInt) 0]
       -- , envsLocalIndex = []
       , envsIsFirst = OP_Bool $ boolean True
       , envsDescending = False
@@ -154,9 +150,6 @@ bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
 
 envsGamma :: HasCallStack => Envs env idxEnv -> Gamma env
 envsGamma = envFromPartialLazy "Value missing in environment at this loop depth. Are the loop depths incorrect?" . envsGround
-
-envsLinearIndex :: Envs env idxEnv -> LoopDepth -> Operands Int
-envsLinearIndex envs depth = envsLinearIndices envs Prelude.!! depth
 
 envsPrjParameter :: HasCallStack => ExpVar env t -> Envs env idxEnv -> Operand t
 envsPrjParameter (Var tp idx) env =
@@ -199,6 +192,13 @@ envsPrjBuffer (Var (GroundRbuffer _) idx) env =
     Nothing -> internalError "Buffer missing in environment at this loop depth. Are the loop depths incorrect?"
 envsPrjBuffer (Var (GroundRscalar tp) _) _ = bufferImpossible tp
 
+-- Returns the iteration size of the dimensions we parallelize over
+parallelIterSize :: ShapeR sh -> [(Idx idxEnv Int, LoopDirection Int, Operands Int)] -> Operands sh
+parallelIterSize shr loops = go shr $ reverse $ take (rank shr) loops
+  where
+    go :: ShapeR sh -> [(Idx idxEnv Int, LoopDirection Int, Operands Int)] -> Operands sh
+    go ShapeRz [] = OP_Unit
+    go (ShapeRsnoc shr') ((_, _, sz) : loops') = go shr' loops' `OP_Pair` sz
 
 -- Scalar environment
 -- ==================

@@ -28,6 +28,8 @@ module Data.Array.Accelerate.LLVM.CodeGen.Base (
   call, call', callLocal,
   bindScalars, MarshalScalars, bindWorkRange,
 
+  shapeOperandsToList,
+
 ) where
 
 import LLVM.AST.Type.AddrSpace
@@ -123,6 +125,17 @@ travTypeToOperands tp f = snd $ go tp 0
                                 (i2, r2) = go t2 i1
                             in
                             (i2, OP_Pair r2 r1)
+
+
+shapeOperandsToList :: ShapeR sh -> Operands sh -> [Operand Int]
+shapeOperandsToList = \shr ops -> reverse $ go shr ops
+  where
+    -- Returns the individual operands in reverse order
+    go :: ShapeR sh -> Operands sh -> [Operand Int]
+    go ShapeRz _ = []
+    go (ShapeRsnoc shr) (OP_Pair sh sz) =
+      op TypeInt sz : go shr sh
+
 
 -- travTypeToOperandsPtr
 --     :: forall t. Elt t
