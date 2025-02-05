@@ -28,23 +28,30 @@ module Data.Array.Accelerate.LLVM.CodeGen.Environment
   , marshalScalarArg
   -- , scalarParameter, ptrParameter
   , bindParameters, bindEnv, envType
+  , Envs(..), initEnv, bindLocals
+  , envsGamma, envsLinearIndex, envsPrjBuffer, envsPrjParameter
+  , envsPrjParameters, envsPrjSh, envsPrjIndex, envsPrjIndices
   )
   where
 
 import Data.String
 
-import Data.Array.Accelerate.AST.Environment                    ( Env(..), prj' )
-import Data.Array.Accelerate.AST.Operation                      hiding (Parameter)
+import Data.Array.Accelerate.AST.Environment                    hiding ( Val, prj )
+import Data.Array.Accelerate.AST.Operation
+import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.AST.Idx                            ( Idx )
 import Data.Array.Accelerate.Error                              ( internalError )
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Array
+import Data.Array.Accelerate.Representation.Shape
+import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Type
 
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
+import Data.Array.Accelerate.LLVM.CodeGen.Constant
 
 import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Downcast
@@ -58,6 +65,139 @@ import LLVM.AST.Type.Representation
 
 import GHC.Stack
 import Data.Typeable
+import Data.Foldable
+
+data Envs env idxEnv = Envs
+  -- The current loop depth
+  { envsLoopDepth :: LoopDepth
+  -- The number of nested loops
+  , envsLoopCount :: LoopDepth
+  -- The valuation of the ground environment.
+  -- This is a partial environment as some local (fused away) buffers are only
+  -- available in deeper loop depths.
+  , envsGround :: PartialEnv GroundOperand env
+  -- A list of the local buffers (fused away or dead buffers).
+  -- These buffers are not allocated outside the kernel, but inside the kernel
+  -- via alloca. (LLVM's mem2reg will move these from the stack to registers.)
+  , envsLocal :: [EnvBinding LocalBufferR env]
+  -- The valuation of the index environment.
+  -- This is a partial environment as some indices are only available in
+  -- deeper loop depths.
+  , envsIdx :: PartialEnv Operand idxEnv
+  -- At index d, contains the linear index at loop depth d.
+  -- By definition, 'envsLinearIndices envs !! 0' is thus 0,
+  -- since that is outside of any loop.
+  , envsLinearIndices :: [Operands Int]
+  -- Whether the iteration at the current loop depth is the first iteration of the loop
+  , envsIsFirst :: Operands Bool
+  -- Whether the loop at the current loop depth is descending
+  -- (iterating from high indices to low indices)
+  , envsDescending :: Bool
+  }
+
+initEnv
+  :: forall target env env' idxEnv sh local.
+     Gamma env
+  -- Fields from FlatCluster
+  -- Info on the index environment
+  -> ShapeR sh
+  -> ELeftHandSide sh () idxEnv
+  -> GroundVars env sh
+  -> TupR LoopDirection sh
+  -- Info on local (fused away or dead) buffers
+  -> TupR LocalBufferR local
+  -> GLeftHandSide local env env'
+  ->
+    ( Envs env' idxEnv
+    -- At index d, contains the index variable, iteration direction and size of
+    -- the loop introduced at loop depth d.
+    , [(Idx idxEnv Int, LoopDirection Int, Operands Int)]
+    )
+initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
+  | Just idxVars <- lhsFullVars idxLHS =
+    ( Envs
+      { envsLoopDepth = 0
+      , envsLoopCount = rank shr
+      , envsGround = partialEnvSkipLHS localLHS $ envToPartial gamma
+      , envsLocal = partialEnvToList $ partialEnvPushLHS localLHS localsR PEnd
+      , envsIdx = PEnd
+      , envsLinearIndices = [constant (TupRsingle scalarTypeInt) 0]
+      -- , envsLocalIndex = []
+      , envsIsFirst = OP_Bool $ boolean True
+      , envsDescending = False
+      }
+    , reverse $ loops shr idxVars iterSize iterDir
+    )
+  | otherwise =
+    internalError "Index LeftHandSide should bind all variables"
+  where
+    -- Gets the loop sizes and directions (in reverse order since ShapeR is a snoc list)
+    loops :: ShapeR sh' -> ExpVars idxEnv sh' -> GroundVars env sh' -> TupR LoopDirection sh' -> [(Idx idxEnv Int, LoopDirection Int, Operands Int)]
+    loops ShapeRz _ _ _ = []
+    loops (ShapeRsnoc shr') (ixs `TupRpair` TupRsingle ix) (sh' `TupRpair` TupRsingle sz) (dirs' `TupRpair` TupRsingle dir) =
+      (varIdx ix, dir, szOperand) : loops shr' ixs sh' dirs'
+      where
+        szOperand = OP_Int $ aprjParameter (Var scalarTypeInt $ varIdx sz) gamma
+
+bindLocals :: LoopDepth -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
+bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
+  where
+    go :: Envs env idxEnv -> EnvBinding LocalBufferR env -> CodeGen target (Envs env idxEnv)
+    go envs (EnvBinding idx (LocalBufferR tp depth'))
+      | depth /= depth' = return envs
+      | otherwise = do
+        -- Introduce a new mutable variable on the stack
+        ptr <- instr' $ Alloca $ ScalarPrimType tp
+        ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
+        let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle
+        return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
+
+envsGamma :: HasCallStack => Envs env idxEnv -> Gamma env
+envsGamma = envFromPartialLazy "Value missing in environment at this loop depth. Are the loop depths incorrect?" . envsGround
+
+envsLinearIndex :: Envs env idxEnv -> LoopDepth -> Operands Int
+envsLinearIndex envs depth = envsLinearIndices envs Prelude.!! depth
+
+envsPrjParameter :: HasCallStack => ExpVar env t -> Envs env idxEnv -> Operand t
+envsPrjParameter (Var tp idx) env =
+  case prjPartial idx $ envsGround env of
+    Just (GroundOperandParam x)  -> x
+    Just (GroundOperandBuffer _) -> bufferImpossible tp
+    Nothing -> internalError "Value missing in environment"
+
+envsPrjParameters :: HasCallStack => ExpVars env t -> Envs env idxEnv -> Operands t
+envsPrjParameters (TupRsingle var) env = ir (varType var) $ envsPrjParameter var env
+envsPrjParameters (TupRpair v1 v2) env = OP_Pair (envsPrjParameters v1 env) (envsPrjParameters v2 env)
+envsPrjParameters TupRunit         _   = OP_Unit
+
+envsPrjSh :: HasCallStack => ShapeR sh -> Vars s env sh -> Envs env idxEnv -> Operands sh
+envsPrjSh ShapeRz _ _ = OP_Unit
+envsPrjSh (ShapeRsnoc shr) (sh `TupRpair` TupRsingle sz) env = case prjPartial (varIdx sz) (envsGround env) of
+  Nothing -> internalError "Value missing in environment"
+  Just (GroundOperandParam sz') ->
+    envsPrjSh shr sh env `OP_Pair` OP_Int sz'
+
+envsPrjIndex :: HasCallStack => Var s idxEnv t -> Envs env idxEnv -> Operand t
+envsPrjIndex (Var _ idx) env = case prjPartial idx $ envsIdx env of
+  Just operand -> operand
+  Nothing -> internalError "Index missing in index environment at this loop depth. Are the loop depths incorrect?"
+
+envsPrjIndices :: HasCallStack => ExpVars idxEnv t -> Envs env idxEnv -> Operands t
+envsPrjIndices (TupRsingle var) env = ir (varType var) $ envsPrjIndex var env
+envsPrjIndices (TupRpair v1 v2) env = OP_Pair (envsPrjIndices v1 env) (envsPrjIndices v2 env)
+envsPrjIndices TupRunit         _   = OP_Unit
+
+-- Projection of a buffer from the ground environment using a de Bruijn index.
+-- This returns the operand of pointer to the buffer and its address space and
+-- volatility.
+--
+envsPrjBuffer :: HasCallStack => GroundVar env (Buffer t) -> Envs env idxEnv -> IRBuffer t
+envsPrjBuffer (Var (GroundRbuffer _) idx) env =
+  case prjPartial idx $ envsGround env of
+    Just (GroundOperandBuffer buffer) -> buffer
+    Just (GroundOperandParam _)       -> internalError "Scalar impossible"
+    Nothing -> internalError "Buffer missing in environment at this loop depth. Are the loop depths incorrect?"
+envsPrjBuffer (Var (GroundRscalar tp) _) _ = bufferImpossible tp
 
 
 -- Scalar environment
@@ -204,7 +344,7 @@ bindEnv environment =
         name = fromString $ prefix ++ show freshBuffer
         namePtr = fromString $ prefix ++ show freshBuffer ++ ".ptr"
         irbuffer :: IRBuffer t
-        irbuffer = IRBuffer (Just (operand, defaultAddrSpace, NonVolatile)) Nothing
+        irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray
         ptrType :: PrimType (MarshalArg (Buffer t))
         ptrType = case tp of
           SingleScalarType t
@@ -260,7 +400,7 @@ bindParameters' (Push env (AccessGroundRbuffer m tp))
       Out -> "out."
       Mut -> "mut."
     name = fromString $ prefix ++ show nextBuffer
-    irbuffer = IRBuffer (Just (operand, defaultAddrSpace, NonVolatile)) Nothing
+    irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray
     ptrType = case tp of
       SingleScalarType t
         | SingleArrayDict <- singleArrayDict t -> PtrPrimType (ScalarPrimType tp) defaultAddrSpace

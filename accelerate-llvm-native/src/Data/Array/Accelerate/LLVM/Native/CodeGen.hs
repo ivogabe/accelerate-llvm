@@ -45,6 +45,7 @@ import Data.Array.Accelerate.Type
 import qualified Data.Array.Accelerate.AST.Environment as Env
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
+import Data.Array.Accelerate.LLVM.CodeGen.Cluster
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -59,9 +60,9 @@ import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Unsafe.Coerce (unsafeCoerce)
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
-import Data.Array.Accelerate.LLVM.CodeGen.Exp (llvmOfFun1, intOfIndex, llvmOfFun2, compileArrayInstrGamma)
+import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.Trafo.Desugar (ArrayDescriptor(..))
-import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic ( when, ifThenElse, eq, fromJust, isJust, liftInt )
+import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic ( when, ifThenElse, ifThenElse', eq, fromJust, isJust, liftInt )
 import Data.Array.Accelerate.Analysis.Match (matchShapeR)
 import Data.Array.Accelerate.Trafo.Exp.Substitution (compose)
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically)
@@ -83,6 +84,13 @@ import Data.Array.Accelerate.LLVM.CodeGen.Constant
 traceIfDebugging :: String -> a -> a
 traceIfDebugging _ a = a --Debug.Trace.trace str a
 
+-- Temporary flag to enable the new (currently sequential) code generator.
+-- I'm keeping both code generators functional for now, such that we can
+-- evaluate them easily and then decide which code generator we want to keep.
+-- At that point, we can remove the code of the other code generator.
+newCodeGen :: Bool
+newCodegen = False
+
 codegen :: ShortByteString
         -> Env AccessGroundR env
         -> Clustered NativeOp args
@@ -90,6 +98,37 @@ codegen :: ShortByteString
         -> LLVM Native
            ( Int -- The size of the kernel data, shared by all threads working on this kernel.
            , Module (KernelType env))
+codegen name env cluster args
+ | newCodegen =
+  codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
+    extractEnv
+
+    -- Before the parallel work of a kernel is started, we first run the function once.
+    -- This first call will initialize kernel memory (SEE: Kernel Memory)
+    -- and decide whether the runtime may try to let multiple threads work on this kernel.
+    init <- instr $ Cmp singleType Compare.EQ workassistFirstIndex (scalar scalarType 0xFFFFFFFF)
+    initBlock <- newBlock "init"
+    workBlock <- newBlock "work"
+    cbr init initBlock workBlock
+
+    setBlock initBlock
+    -- TODO: Initialize kernel memory and decide whether loopsize is large enough
+    retval_ $ scalar (scalarType @Word8) 0
+
+    setBlock workBlock
+
+    -- Case instead of let, as this introduces existential type arguments
+    case toFlatClustered cluster args of
+      flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) -> do
+        let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+
+        genSequential envs loops $ opCodeGens opCodeGen flatOps
+
+        retval_ $ scalar (scalarType @Word8) 0
+        pure 0
+  where
+    (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, gamma) = bindHeaderEnv env
+
 codegen name env (Clustered c b) args =
   codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
     extractEnv
@@ -104,7 +143,7 @@ codegen name env (Clustered c b) args =
 
     setBlock initBlock
     -- TODO: Initialize kernel memory and decide whether loopsize is large enough
-    retval_ $ scalar (scalarType @Word8) 1
+    retval_ $ scalar (scalarType @Word8) 0 -- 1
 
     setBlock workBlock
 
@@ -131,7 +170,114 @@ codegen name env (Clustered c b) args =
         outputs <- evalOps @NativeOp i c newInputs args gamma
         writeOutputs @_ @_ @NativeOp i args outputs gamma
 
+opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native env idxEnv)
+opCodeGen (FlatOp NGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
+  ( depth
+  , OpCodeGenSingle $ \envs -> do
+    let idxs' = envsPrjIndices idxs envs
+    r <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) idxs'
+    writeArray' envs array idxs r
+  )
+opCodeGen (FlatOp NMap (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
+  ( depth
+  , OpCodeGenSingle $ \envs -> do
+    x <- readArray' envs input idxs
+    r <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) x
+    writeArray' envs output idxs r
+  )
+opCodeGen (FlatOp NBackpermute (_ :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
+  ( depth
+  , OpCodeGenSingle $ \envs -> do
+    -- Note that the index transformation (the function in the first argument)
+    -- is already executed and part of the idxEnv. The index transformation is
+    -- thus now given by 'inputIdx' and 'outputIdx'.
+    x <- readArray' envs input inputIdx
+    writeArray' envs output outputIdx x
+  )
+opCodeGen (FlatOp NPermute
+    (ArgFun combine :>: output :>: locks :>: ArgFun idxTransform :>: source :>: _)
+    (_ :>: _ :>: _ :>: _ :>: IdxArgIdx depth sourceIdx :>: _)) =
+  ( depth
+  , OpCodeGenSingle $ \envs -> do
+    let sourceIdx' = envsPrjIndices sourceIdx envs
+    idx' <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) idxTransform) sourceIdx'
+    -- project element onto the destination array and (atomically) update
+    when (isJust idx') $ do
+      x <- readArray' envs source sourceIdx
+      let idx = fromJust idx'
+      let sh' = envsPrjParameters (shapeExpVars shr sh) envs
+      j <- intOfIndex shr sh' idx
+      -- TODO: Rewrite the function below to take Envs as argument instead of Gamma,
+      -- and then get rid of envsGamma
+      let gamma = envsGamma envs
+      atomically gamma locks j $ do
+        y <- readArray TypeInt gamma output j
+        r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combine) x y
+        writeArray TypeInt gamma output j r
+  )
+  where
+    ArgArray _ (ArrayR shr tp) sh _ = output
+opCodeGen (FlatOp NFold2 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
+  ( depth
+  , OpCodeGenLoop
+    False
+    (\_ -> tupleAlloca tp)
+    (\var envs -> do
+      x <- readArray' envs input inputIdx
+      -- Note: if the loop peeling is applied (separating the first iteration
+      -- of the loop), then this code will be executed twice. envsIsFirst envs
+      -- will then either be a constant True, or a constant False.
+      -- ifThenElse' (opposed to the version with a prime) will then generate
+      -- code for only one branch, and thus also without conditional jumps.
+      new <- ifThenElse' (tp, envsIsFirst envs)
+        ( do
+          return x
+        )
+        ( do
+          accum <- tupleLoad tp var
+          if envsDescending envs then
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+          else
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+        )
+      _ <- tupleStore tp var new
+      return ()
+    )
+    (\var envs -> do
+      value <- tupleLoad tp var
+      writeArray' envs output outputIdx value
+    )
+  )
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+opCodeGen (FlatOp NScanl1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
+  ( depth - 1
+  , OpCodeGenLoop
+    True
+    (\_ -> tupleAlloca tp)
+    (\var envs -> do
+      x <- readArray' envs input inputIdx
+      new <- ifThenElse' (tp, envsIsFirst envs)
+        ( do
+          return x
+        )
+        ( do
+          accum <- tupleLoad tp var
+          if envsDescending envs then
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+          else
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+        )
+      _ <- tupleStore tp var new
+      writeArray' envs output outputIdx new
+    )
+    (\_ _ -> return ())
+  )
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
 
+
+-- Old, EvalOp based implementation
 
 -- We use some unsafe coerces in the context of the accumulators. 
 -- Some, in this function, are very local. Others, like in evalOp, 

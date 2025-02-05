@@ -16,11 +16,14 @@
 
 module Data.Array.Accelerate.LLVM.CodeGen.Array (
 
-  readArray,
-  writeArray,
-  writeArrayFused,
+  readArray, readArray',
+  writeArray, writeArray',
   readBuffer,
-  writeBuffer
+  writeBuffer,
+
+  tupleAlloca, tupleStore, tupleLoad,
+
+  intOfIndex
 
 ) where
 
@@ -41,6 +44,7 @@ import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.Array.Buffer                           ( ScalarArrayDataR, SingleArrayDict(..), singleArrayDict )
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Error
 
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
@@ -48,7 +52,33 @@ import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
+import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 
+
+-- | Read a value from an array at the given index
+--
+{-# INLINEABLE readArray' #-}
+readArray'
+    :: forall int genv idxEnv m sh e arch.
+       Envs genv idxEnv
+    -> Arg genv (m sh e) -- m is In or Mut
+    -> ExpVars idxEnv sh
+    -> CodeGen arch (Operands e)
+readArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx = do
+  let sh' = envsPrjSh shr sh env
+  let idx' = envsPrjIndices idx env
+  linearIdx <- intOfIndex shr sh' idx'
+  let linearIdx' = op TypeInt linearIdx
+  let
+    read :: forall t. TypeR t -> GroundVars genv (Buffers t) -> CodeGen arch (Operands t)
+    read TupRunit         _                = return OP_Unit
+    read (TupRpair t1 t2) (TupRpair b1 b2) = OP_Pair <$> read t1 b1 <*> read t2 b2
+    read (TupRsingle t)   (TupRsingle buffer)
+      | Refl <- reprIsSingle @ScalarType @t @Buffer t
+      , irbuffer <- envsPrjBuffer buffer env
+      = ir t <$> readBuffer t TypeInt irbuffer linearIdx'
+    read _ _ = internalError "Tuple mismatch"
+  read tp buffers
 
 -- | Read a value from an array at the given index
 --
@@ -77,12 +107,41 @@ readBuffer
     -> IRBuffer e
     -> Operand int
     -> CodeGen arch (Operand e)
-readBuffer _ _ (IRBuffer _ (Just value))          _  = return value
-readBuffer e i (IRBuffer (Just (buffer, a, v)) _) ix = do
+readBuffer e i (IRBuffer buffer a v IRBufferScopeArray) ix = do
   p <- getElementPtr a e i buffer ix
+  load a e v p
+readBuffer e i (IRBuffer buffer a v IRBufferScopeSingle) _ = do
+  p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
   x <- load a e v p
   return x
-readBuffer _ _ _ _ = internalError "Illegal cluster. Attempting to read from a fused away buffer, which hasn't been written to."
+readBuffer _ _ _ _ = internalError "Cannot read from buffer in Tile scope"
+
+
+-- | Write a value into an array at the given index
+--
+{-# INLINEABLE writeArray' #-}
+writeArray'
+    :: forall int genv idxEnv m sh e arch.
+       Envs genv idxEnv
+    -> Arg genv (m sh e) -- m is Out or Mut
+    -> ExpVars idxEnv sh
+    -> Operands e
+    -> CodeGen arch ()
+writeArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx val = do
+  let sh' = envsPrjSh shr sh env
+  let idx' = envsPrjIndices idx env
+  linearIdx <- intOfIndex shr sh' idx'
+  let linearIdx' = op TypeInt linearIdx
+  let
+    write :: forall t. TypeR t -> GroundVars genv (Buffers t) -> Operands t -> CodeGen arch ()
+    write TupRunit _ _ = return ()
+    write (TupRpair t1 t2) (TupRpair b1 b2)    (OP_Pair v1 v2) = write t1 b1 v1 >> write t2 b2 v2
+    write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
+      | Refl <- reprIsSingle @ScalarType @t @Buffer t
+      , irbuffer <- envsPrjBuffer buffer env
+      = writeBuffer t TypeInt irbuffer linearIdx' value
+    write _ _ _ = internalError "Tuple mismatch"
+  write tp buffers val
 
 
 -- | Write a value into an array at the given index
@@ -107,35 +166,6 @@ writeArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) val = wri
       = writeBuffer t int irbuffer ix value
     write _ _ _ = internalError "Tuple mismatch"
 
--- | Variant of 'writeArray' which handles *possibly* fused writes. Those are
--- handled by storing the local variable containing their value in the
--- environment. This function returns a new environment containing those
--- variables.
---
-writeArrayFused
-    :: forall int genv m sh e arch.
-       IntegralType int
-    -> Gamma genv
-    -> Arg genv (m sh e) -- m is Out or Mut
-    -> Operands int
-    -> Operands e
-    -> CodeGen arch (Gamma genv)
-writeArrayFused int environment (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) val = write environment tp buffers val
-  where
-    write :: forall t. Gamma genv -> TypeR t -> GroundVars genv (Buffers t) -> Operands t -> CodeGen arch (Gamma genv)
-    write env TupRunit _ _ = return env
-    write env (TupRpair t1 t2) (TupRpair b1 b2)    (OP_Pair v1 v2) = do
-      env1 <- write env t1 b1 v1
-      write env1 t2 b2 v2
-    write env (TupRsingle t)   (TupRsingle buffer) (op t -> value)
-      | Refl <- reprIsSingle @ScalarType @t @Buffer t
-      , (env', irbuffer) <- prjUpdate' (updateBuffer value) (varIdx buffer) env
-      = env' <$ writeBuffer t int irbuffer ix value
-    write _ _ _ _ = internalError "Tuple mismatch"
-
-    updateBuffer :: Operand t -> GroundOperand (Buffer t) -> (GroundOperand (Buffer t), IRBuffer t)
-    updateBuffer value (GroundOperandBuffer b@(IRBuffer manifest _)) = (GroundOperandBuffer $ IRBuffer manifest (Just value), b)
-    updateBuffer _     (GroundOperandParam _) = internalError "Scalar impossible"
 
 writeBuffer
     :: ScalarType e
@@ -144,8 +174,12 @@ writeBuffer
     -> Operand int
     -> Operand e
     -> CodeGen arch ()
-writeBuffer e i (IRBuffer (Just (buffer, a, v)) _) ix x = do
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeArray) ix x = do
   p <- getElementPtr a e i buffer ix
+  _ <- store a v e p x
+  return ()
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeSingle) ix x = do
+  p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
   _ <- store a v e p x
   return ()
 writeBuffer _ _ _ _ _ = return () -- Buffer is fused away
@@ -299,3 +333,43 @@ store addrspace volatility e p v
     VectorType (fromIntegral -> size) base = vec
 --}
 
+tupleAlloca :: forall e arch. TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr e))
+tupleAlloca TupRunit = return TupRunit
+tupleAlloca (TupRpair t1 t2) = TupRpair <$> tupleAlloca t1 <*> tupleAlloca t2
+tupleAlloca (TupRsingle tp)
+  | Refl <- reprIsSingle @ScalarType @e @Ptr tp
+  = TupRsingle <$> instr' (Alloca $ ScalarPrimType tp)
+
+tupleStore :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> Operands e -> CodeGen arch ()
+tupleStore TupRunit _ _ = return ()
+tupleStore (TupRpair t1 t2) (TupRpair p1 p2) (OP_Pair v1 v2) =
+  tupleStore t1 p1 v1 >> tupleStore t2 p2 v2
+tupleStore (TupRsingle tp) (TupRsingle ptr) value 
+  | Refl <- reprIsSingle @ScalarType @e @Ptr tp = do
+    instr' $ Store NonVolatile ptr $ op tp value
+    return ()
+tupleStore _ _ _ = internalError "Tuple mismatch"
+
+tupleLoad :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> CodeGen arch (Operands e)
+tupleLoad TupRunit _ = return OP_Unit
+tupleLoad (TupRpair t1 t2) (TupRpair p1 p2) = OP_Pair <$> tupleLoad t1 p1 <*> tupleLoad t2 p2
+tupleLoad (TupRsingle tp) (TupRsingle ptr)
+  | Refl <- reprIsSingle @ScalarType @e @Ptr tp
+  = instr $ Load tp NonVolatile ptr
+tupleLoad _ _ = internalError "Tuple mismatch"
+
+-- | Convert a multidimensional array index into a linear index
+--
+intOfIndex :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen arch (Operands Int)
+intOfIndex ShapeRz OP_Unit OP_Unit
+  = return $ A.liftInt 0
+intOfIndex (ShapeRsnoc shr) (OP_Pair sh sz) (OP_Pair ix i)
+  -- If we short-circuit the last dimension, we can avoid inserting
+  -- a multiply by zero and add of the result.
+  = case shr of
+      ShapeRz -> return i
+      _       -> do
+        a <- intOfIndex shr sh ix
+        b <- A.mul numType a sz
+        c <- A.add numType b i
+        return c

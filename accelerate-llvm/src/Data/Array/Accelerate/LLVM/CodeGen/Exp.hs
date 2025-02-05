@@ -20,6 +20,7 @@
 --
 
 module Data.Array.Accelerate.LLVM.CodeGen.Exp
+  ( module Data.Array.Accelerate.LLVM.CodeGen.Exp, intOfIndex )
   where
 
 import Data.Array.Accelerate.AST.Operation
@@ -97,6 +98,20 @@ compileArrayInstrGamma genv arr arg = case arr of
 
 compileNoArrayInstr :: CompileArrayInstr arch NoArrayInstr
 compileNoArrayInstr arr _ = case arr of {}
+
+compileArrayInstrEnvs :: forall arch genv idxEnv. Envs genv idxEnv -> CompileArrayInstr arch (ArrayInstr genv)
+compileArrayInstrEnvs envs arr arg = case arr of
+  Parameter var -> param var
+  Index var -> linearIndex var arg
+  where
+    linearIndex :: GroundVar genv (Buffer e) -> Operands Int -> IROpenExp arch env e
+    linearIndex var@(Var (GroundRbuffer tp) _) idx = fmap (ir tp) <$> readBuffer tp integralType irbuffer $ op scalarTypeInt idx
+      where
+        irbuffer = envsPrjBuffer var envs
+    linearIndex (Var (GroundRscalar tp) _) _ = bufferImpossible tp
+
+    param :: ExpVar genv e -> IROpenExp arch env e
+    param var@(Var tp _) = return $ ir tp $ envsPrjParameter var envs
 
 -- | Convert an open scalar expression into a sequence of LLVM Operands instructions.
 -- Code is generated in depth first order, and uses a monad to collect the
@@ -344,22 +359,6 @@ shapeSize (ShapeRsnoc shr) (OP_Pair sh sz)
         a <- shapeSize shr sh
         b <- A.mul numType a sz
         return b
-
--- | Convert a multidimensional array index into a linear index
---
-intOfIndex :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen arch (Operands Int)
-intOfIndex ShapeRz OP_Unit OP_Unit
-  = return $ A.liftInt 0
-intOfIndex (ShapeRsnoc shr) (OP_Pair sh sz) (OP_Pair ix i)
-  -- If we short-circuit the last dimension, we can avoid inserting
-  -- a multiply by zero and add of the result.
-  = case shr of
-      ShapeRz -> return i
-      _       -> do
-        a <- intOfIndex shr sh ix
-        b <- A.mul numType a sz
-        c <- A.add numType b i
-        return c
 
 
 -- | Convert a linear index into into a multidimensional index

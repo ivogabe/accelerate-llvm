@@ -1,3 +1,6 @@
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
 {-# OPTIONS_HADDOCK hide #-}
@@ -54,6 +57,25 @@ imapFromStepTo start step end body =
   for (TupRsingle $ SingleScalarType $ NumSingleType num) start
       (\i -> lt (NumSingleType num) i end)
       (\i -> add num i step)
+      body
+  where num = numType @i
+
+
+-- | Execute the given function at each index in the range.
+-- The indices are traversed in descending order.
+--
+imapReverseFromStepTo
+    :: forall i arch. IsNum i
+    => Operands i                                     -- ^ starting index (inclusive)
+    -> Operands i                                     -- ^ step size
+    -> Operands i                                     -- ^ final index (exclusive)
+    -> (Operands i -> CodeGen arch ())                -- ^ loop body
+    -> CodeGen arch ()
+imapReverseFromStepTo start step end body = do
+  end' <- sub num start step
+  for (TupRsingle $ SingleScalarType $ NumSingleType num) end'
+      (\i -> gte (NumSingleType num) i start)
+      (\i -> sub num i step)
       body
   where num = numType @i
 

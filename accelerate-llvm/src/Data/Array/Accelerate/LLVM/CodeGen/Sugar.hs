@@ -18,7 +18,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Sugar (
   IRExp, MIRExp, IRFun1, IRFun2,
   IROpenExp, IROpenFun1(..), IROpenFun2(..),
 
-  IRBuffer(..),
+  IRBuffer(..), IRBufferScope(..)
 
 ) where
 
@@ -57,20 +57,31 @@ data IROpenFun2 arch env t where
 -- Arrays
 -- ------
 
--- DVB: cute, but completely irrelevant the way I have Native set up currently
 data IRBuffer e
   = IRBuffer
-      -- If the buffer is not fused away, then a pointer to the buffer, its
-      -- address space and volatility are stored.
-      --
-      (Maybe (Operand (Ptr (ScalarArrayDataR e)), AddrSpace, Volatility))
-      -- If the buffer is fused away, then it is replaced by a local variable.
-      -- In case of diagonal fusion, the buffer does exist but later reads to
-      -- the buffer are replaced by a local variable. That variable is stored
-      -- here. Note that we here assume that reads and writes to this buffer
-      -- are all to the same index. Fusion should assure that this property
-      -- holds.
-      --
-      (Maybe (Operand e))
+      -- The pointer to the value or values of the buffer
+      (Operand (Ptr (ScalarArrayDataR e)))
+      AddrSpace
+      Volatility
+      -- The scope of this pointer: whether it refers to a single value (of a
+      -- fused-away buffer), a tile (a block of a fused-away buffer in a kernel
+      -- containing a chained scan) or a regular manifest array.
+      IRBufferScope
 
-
+data IRBufferScope
+  -- The pointer of the buffer refers to a single value.
+  -- This is used for an buffer that is fused away.
+  -- The pointer should not be incremented, before reading or writing to this
+  -- buffer.
+  = IRBufferScopeSingle
+  -- The pointer of the buffer refers to a fixed size chunk of memory,
+  -- corresponding to a tile loop. This is used to store data between different
+  -- tile loops, when generating the code for a kernel containing scans.
+  -- The pointer should be incremented by the iteration variable of the tile
+  -- loop.
+  | IRBufferScopeTile
+  -- The pointer of the buffer refers to the start of the array.
+  -- This is used for manifest arrays (that are not fused away).
+  -- The pointer should be incremented by the (absolute) linear index of the
+  -- element.
+  | IRBufferScopeArray

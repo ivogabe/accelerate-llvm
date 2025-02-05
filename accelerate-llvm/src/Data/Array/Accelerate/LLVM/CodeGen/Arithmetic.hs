@@ -655,6 +655,34 @@ ifThenElse (tp, test) yes no = do
   setBlock ifExit
   phi tp [(tv, tb), (fv, fb)]
 
+-- | Variant of 'ifThenElse', where the condition is not in the CodeGen monad.
+-- If the condition is known in advance, it only generates code for one of the
+-- branches.
+ifThenElse'
+    :: (TypeR a, Operands Bool)
+    -> CodeGen arch (Operands a)
+    -> CodeGen arch (Operands a)
+    -> CodeGen arch (Operands a)
+ifThenElse' (_, OP_Bool (ConstantOperand (BooleanConstant bool))) yes no
+  | bool = yes
+  | otherwise = no
+ifThenElse' (tp, test) yes no = do
+  ifThen <- newBlock "if.then"
+  ifElse <- newBlock "if.else"
+  ifExit <- newBlock "if.exit"
+
+  _  <- cbr test ifThen ifElse
+
+  setBlock ifThen
+  tv <- yes
+  tb <- br ifExit
+
+  setBlock ifElse
+  fv <- no
+  fb <- br ifExit
+
+  setBlock ifExit
+  phi tp [(tv, tb), (fv, fb)]
 
 caseof
     :: TypeR a

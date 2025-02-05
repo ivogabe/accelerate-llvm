@@ -316,8 +316,7 @@ atomically
 atomically gamma (ArgArray Mut (ArrayR shr _) sh (TupRsingle (Var _ bufidx))) i action = 
   case prj' bufidx gamma of
     GroundOperandParam _ -> error "impossible"
-    GroundOperandBuffer (IRBuffer Nothing _) -> error "fused away the mutable lock array?"
-    GroundOperandBuffer (IRBuffer (Just (bufptr, _ , _)) _) -> do
+    GroundOperandBuffer (IRBuffer bufptr _ _ IRBufferScopeArray) -> do
       let
           lock      = integral integralType 1
           unlock    = integral integralType 0
@@ -349,6 +348,4 @@ atomically gamma (ArgArray Mut (ArrayR shr _) sh (TupRsingle (Var _ bufidx))) i 
 
       setBlock exit
       return r
-    
-
-
+    GroundOperandBuffer (IRBuffer _ _ _ _) -> error "Expected IRBufferScopeArray"
