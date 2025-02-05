@@ -220,7 +220,7 @@ opCodeGen (FlatOp NPermute
 opCodeGen (FlatOp NFold2 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
   ( depth
   , OpCodeGenLoop
-    False
+    True
     (\_ -> tupleAlloca tp)
     (\var envs -> do
       x <- readArray' envs input inputIdx
