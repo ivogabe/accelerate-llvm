@@ -89,7 +89,7 @@ traceIfDebugging _ a = a --Debug.Trace.trace str a
 -- evaluate them easily and then decide which code generator we want to keep.
 -- At that point, we can remove the code of the other code generator.
 newCodeGen :: Bool
-newCodegen = False
+newCodeGen = False
 
 codegen :: ShortByteString
         -> Env AccessGroundR env
@@ -99,7 +99,7 @@ codegen :: ShortByteString
            ( Int -- The size of the kernel data, shared by all threads working on this kernel.
            , Module (KernelType env))
 codegen name env cluster args
- | newCodegen =
+ | newCodeGen =
   codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
     extractEnv
 
