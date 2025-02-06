@@ -113,6 +113,14 @@ compileArrayInstrEnvs envs arr arg = case arr of
     param :: ExpVar genv e -> IROpenExp arch env e
     param var@(Var tp _) = return $ ir tp $ envsPrjParameter var envs
 
+{-# INLINEABLE llvmOfExp #-}
+llvmOfExp
+    :: forall arr arch t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    => CompileArrayInstr arch arr
+    -> PreOpenExp arr () t
+    -> IROpenExp arch () t
+llvmOfExp arrayInstr expr = llvmOfOpenExp arrayInstr expr Empty
+
 -- | Convert an open scalar expression into a sequence of LLVM Operands instructions.
 -- Code is generated in depth first order, and uses a monad to collect the
 -- sequence of instructions used to construct basic blocks.

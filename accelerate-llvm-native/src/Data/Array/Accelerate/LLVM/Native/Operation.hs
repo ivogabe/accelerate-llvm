@@ -71,23 +71,35 @@ data NativeOp t where
   NBackpermute :: NativeOp (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
   NGenerate    :: NativeOp (Fun' (sh -> t)              -> Out sh  t -> ())
   NPermute     :: NativeOp (Fun' (e -> e -> e)
-                            -> Mut sh' e
-                            -> Mut sh' Word8
-                            -> Fun' (sh -> PrimMaybe sh')
-                            -> In sh e
-                            -> ())
-  -- this one covers ScanDim, ScanP1 and ScanP2. Only ScanP1's second output argument will be used for the partial reductions,
-  -- the others will simply get SLV'd away.
-  NScanl1      :: NativeOp (Fun' (e -> e -> e) 
-                         -> In (sh, Int) e 
-                         -> Out (sh, Int) e -- the local scan result
-                        --  -> Out (sh, Int) e -- the local fold result
-                         -> ()) -- TODO: huh? Where would we make the two outputs differ? at evalOp they are the same, and i'm not sure writeOutput has a say in the matter
-  NFold1       :: NativeOp (Fun' (e -> e -> e) -- segmented, TODO: how to represent the output being 'one per thread on each row'?
-                         -> In  ((), Int) e
-                         -> Out ((), Int) e
+                         -> Mut sh' e
+                         -> Mut sh' Word8
+                         -> Fun' (sh -> PrimMaybe sh')
+                         -> In sh e
                          -> ())
-  NFold2       :: NativeOp (Fun' (e -> e -> e) -- sequential
+  NScan        :: Direction
+               -> NativeOp (Fun' (e -> e -> e)
+                         -> Exp' e
+                         -> In (sh, Int) e
+                         -> Out (sh, Int) e
+                         -> ())
+  NScan1       :: Direction
+               -> NativeOp (Fun' (e -> e -> e)
+                         -> In (sh, Int) e
+                         -> Out (sh, Int) e
+                         -> ())
+  NScan'       :: Direction
+               -> NativeOp (Fun' (e -> e -> e)
+                         -> Exp' e
+                         -> In (sh, Int) e
+                         -> Out (sh, Int) e
+                         -> Out sh e
+                         -> ())
+  NFold        :: NativeOp (Fun' (e -> e -> e)
+                         -> Exp' e
+                         -> In (sh, Int) e
+                         -> Out sh e
+                         -> ())
+  NFold1       :: NativeOp (Fun' (e -> e -> e)
                          -> In (sh, Int) e
                          -> Out sh e
                          -> ())
@@ -97,9 +109,17 @@ instance PrettyOp NativeOp where
   prettyOp NBackpermute = "backpermute"
   prettyOp NGenerate    = "generate"
   prettyOp NPermute     = "permute"
-  prettyOp NScanl1      = "scanl1"
-  prettyOp NFold1       = "fold-1"
-  prettyOp NFold2       = "fold-2"
+  prettyOp (NScan dir) = case dir of
+    LeftToRight -> "scanl"
+    RightToLeft -> "scanr"
+  prettyOp (NScan1 dir) = case dir of
+    LeftToRight -> "scanl1"
+    RightToLeft -> "scanr1"
+  prettyOp (NScan' dir) = case dir of
+    LeftToRight -> "scanl'"
+    RightToLeft -> "scanr'"
+  prettyOp NFold        = "fold"
+  prettyOp NFold1       = "fold1"
 
 instance NFData' NativeOp where
   rnf' !_ = ()
@@ -108,17 +128,12 @@ instance DesugarAcc NativeOp where
   mkMap         a b c   = Exec NMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec NBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec NGenerate    (a :>: b :>:             ArgsNil)
-  {- mkScan LeftToRight f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
-    -- If multidimensional, simply NScanl1.
-    -- TODO: just always doing nscanl1 now
-    -- | ShapeRsnoc (ShapeRsnoc _) <- shr
-    = Exec NScanl1 (f :>: i :>: o :>: ArgsNil)
-    -- | otherwise -- Otherwise, NScanl1 followed by NScanl1 on the reductions, followed by a replicate on that result and then zipWith the first result.
-    -- just using nscanl1 for one dimensional for now
-    -- = error "todo"
-  -- right to left is conceptually easy once we already have order variables for backpermute. 
-  -- Exclusive scans (changing array size) are weirder, require an extra 'cons' primitive
-  mkScan _ _ _ _ _ = error "todo" -}
+  mkScan dir f (Just seed) i@(ArgArray In (ArrayR shr ty) sh buf) o
+    = Exec (NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
+  mkScan dir f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
+    = Exec (NScan1 dir) (f :>: i :>: o :>: ArgsNil)
+  mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
+    = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
   mkPermute     a b@(ArgArray _ (ArrayR shr _) sh _) c d
     | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord8
     = aletUnique lhs 
@@ -135,48 +150,8 @@ instance DesugarAcc NativeOp where
             :>: weaken w c 
             :>: weaken w d 
             :>: ArgsNil))
-  -- -- we desugar a Fold with seed element into a Fold1 followed by a map which prepends the seed
-  -- -- copied verbatim from Interpreter; this should probably be in the shared implementation except for the part where it doesn't work on 0-size arrays
-  -- -- Will need to figure out how to solve that before we ship it, as long as we keep the conditional out of the loop. 
-  -- -- Potentially generating multiple versions, as we do currently? With the new fusion, that might result in an exponential amount of variations in the number of folds per cluster...
-  -- -- TODO
-  mkFold a@(ArgFun f) (Just (ArgExp seed)) b@(ArgArray In (ArrayR _ tp) sh _) c@(ArgArray _ arr' sh' _)
-    | DeclareVars lhsTemp kTemp valueTemp <- declareVars $ buffersR tp =
-      aletUnique lhsTemp (desugarAlloc arr' $ fromGrounds sh') $
-        alet LeftHandSideUnit
-          (mkFold (weaken kTemp a) Nothing (weaken kTemp b) (ArgArray Out arr' (weakenVars kTemp sh') (valueTemp weakenId))) $
-          case mkLHS tp of
-            LHS lhs vars ->
-              mkMap
-                (ArgFun $ 
-                  Lam lhs $ Body $ mapArrayInstr (weaken kTemp)
-                  $ Cond
-                    (mkBinary (PrimEq singleType) (paramIn scalarTypeInt innerSize) $ Const scalarTypeInt 0)
-                    (weakenE weakenEmpty seed)
-                    (apply2 tp f (weakenE weakenEmpty seed) $ expVars vars)
-                )
-                (ArgArray In arr' (weakenVars kTemp sh') (valueTemp weakenId))
-                (weaken kTemp c)
-    where
-      innerSize = case sh of
-        _ `TupRpair` TupRsingle var -> var
-        _ -> internalError "Tuple mismatch"
-  -- mkFold (a :: Arg env (Fun' (e -> e -> e))) Nothing b@(ArgArray In arr@(ArrayR shr tp) _ _) c
-  --   | DeclareVars lhsSize (wSize :: env :> env') kSize <- declareVars . typeRtoGroundsR $ TupRsingle scalarTypeInt
-  --   , DeclareVars lhsTemp (wTemp :: env' :> env'') kTemp <- declareVars $ buffersR tp =
-  --     let w = wTemp .> wSize in
-  --     case shr of
-  --       ShapeRsnoc ShapeRz -> aletUnique lhsSize (Compute $ Const scalarTypeInt 2) $ -- magic constant 2; TODO change into `size/workassistsize` rounded up
-  --         let sh = TupRpair TupRunit (kSize weakenId) in
-  --         aletUnique lhsTemp (desugarAlloc (ArrayR shr tp) $ fromGrounds sh) $ 
-  --           let tmpArrArg :: Modifier m -> Arg env'' (m ((),Int) e)
-  --               tmpArrArg m = ArgArray m arr (weakenVars wTemp sh) (kTemp weakenId)
-  --           in alet LeftHandSideUnit
-  --             (Exec NFold1 $ weaken w a :>: weaken w b :>: tmpArrArg Out :>: ArgsNil)
-  --             (Exec NFold2 $ weaken w a :>: tmpArrArg In :>: weaken w c :>: ArgsNil)
-  --       _ -> -- single-kernel multidim reduction
-  --         Exec NFold2 $ a :>: b :>: c :>: ArgsNil
-  mkFold a Nothing b c = Exec NFold2 (a :>: b :>: c :>: ArgsNil)
+  mkFold a (Just seed) b c = Exec NFold (a :>: seed :>: b :>: c :>: ArgsNil)
+  mkFold a Nothing b c = Exec NFold1 (a :>: b :>: c :>: ArgsNil)
 
 instance SimplifyOperation NativeOp where
   detectCopy NMap         = detectMapCopies
@@ -194,9 +169,14 @@ instance EncodeOperation NativeOp where
   encodeOperation NBackpermute = intHost $(hashQ ("Backpermute" :: String))
   encodeOperation NGenerate    = intHost $(hashQ ("Generate" :: String))
   encodeOperation NPermute     = intHost $(hashQ ("Permute" :: String))
-  encodeOperation NScanl1      = intHost $(hashQ ("Scanl1" :: String))
-  encodeOperation NFold1       = intHost $(hashQ ("Fold-1" :: String))
-  encodeOperation NFold2       = intHost $(hashQ ("Fold-2" :: String))
+  encodeOperation (NScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
+  encodeOperation (NScan RightToLeft)  = intHost $(hashQ ("Scanr" :: String))
+  encodeOperation (NScan1 LeftToRight) = intHost $(hashQ ("Scanl1" :: String))
+  encodeOperation (NScan1 RightToLeft) = intHost $(hashQ ("Scanr1" :: String))
+  encodeOperation (NScan' LeftToRight) = intHost $(hashQ ("Scanl'" :: String))
+  encodeOperation (NScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
+  encodeOperation NFold        = intHost $(hashQ ("Fold" :: String))
+  encodeOperation NFold1       = intHost $(hashQ ("Fold1" :: String))
 
 instance SetOpIndices NativeOp where
   setOpIndices _ NGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
@@ -204,19 +184,33 @@ instance SetOpIndices NativeOp where
     = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
   setOpIndices _ NMap _ _ = error "Missing indices for NMap"
   setOpIndices _ NBackpermute _ _ = Just $ Left IsBackpermute
-  setOpIndices _ NScanl1 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  setOpIndices _ (NScan _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+    -- Annotate the input with an index.
+    -- Don't annotate the output. We don't fuse over the output of a normal scan,
+    -- as the output of a scan is one longer than the input.
+    -- We do fuse the other scans (scan' and scan1).
+    = Just $ Right $ IdxArgNone :>: IdxArgNone :>: IdxArgIdx d i :>: IdxArgNone :>: ArgsNil
+  setOpIndices _ (NScan _) _ _ = error "Missing indices for NScan"
+  setOpIndices _ (NScan1 _) _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
-  setOpIndices _ NScanl1 _ _ = error "Missing indices for NScanl1"
-  setOpIndices _ NFold1 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
-    = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
-  setOpIndices _ NFold1 _ _ = error "Missing indices for NFold1"
-  setOpIndices indexVar NFold2 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  setOpIndices _ (NScan1 _) _ _ = error "Missing indices for NScan1"
+  setOpIndices _ (NScan' _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: o :>: ArgsNil)
+    = Just $ Right $ IdxArgNone :>: IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: o :>: ArgsNil
+  setOpIndices _ (NScan' _) _ _ = error "Missing indices for NScan'"
+  setOpIndices indexVar NFold _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+    | Just i' <- indexVar d
+    = Just $ Right $
+      IdxArgNone :>: IdxArgNone :>: IdxArgIdx (d + 1) (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx d i :>: ArgsNil
+    | otherwise
+    = Nothing
+  setOpIndices _ NFold _ _ = error "Missing indices for NFold"
+  setOpIndices indexVar NFold1 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     | Just i' <- indexVar d
     = Just $ Right $
       IdxArgNone :>: IdxArgIdx (d + 1) (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx d i :>: ArgsNil
     | otherwise
     = Nothing
-  setOpIndices _ NFold2 _ _ = error "Missing indices for NFold2"
+  setOpIndices _ NFold1 _ _ = error "Missing indices for NFold1"
   setOpIndices indexVar NPermute (_ :>: _ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
@@ -232,9 +226,27 @@ instance SetOpIndices NativeOp where
         = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
         | otherwise = Nothing
 
-  getOpLoopDirections NScanl1 _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopAscending)]
-  getOpLoopDirections NFold2 _ (_ :>: IdxArgIdx _ i :>: _)
+  getOpLoopDirections (NScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
+    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    where
+      dir' = case dir of
+        LeftToRight -> LoopAscending
+        RightToLeft -> LoopDescending
+  getOpLoopDirections (NScan1 dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
+    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    where
+      dir' = case dir of
+        LeftToRight -> LoopAscending
+        RightToLeft -> LoopDescending
+  getOpLoopDirections (NScan' dir) _ (_ :>: _ :>: _ :>: IdxArgIdx _ i :>: _)
+    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    where
+      dir' = case dir of
+        LeftToRight -> LoopAscending
+        RightToLeft -> LoopDescending
+  getOpLoopDirections NFold _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
+    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
+  getOpLoopDirections NFold1 _ (_ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
   getOpLoopDirections _ _ _ = []
 
@@ -300,25 +312,59 @@ instance MakesILP NativeOp where
         <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
       ( lower (-2) (InDir l)
       <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). 
-  mkGraph NScanl1 (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
+  mkGraph (NScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
     Graph.Info
-      mempty
+      -- Scan cannot fuse with its consumer, as the output is one larger than the input
+      -- TODO: Mark outgoing edges of scan as infusible
+      ( mempty {- & infusibleEdges .~ Set.map (l -?>) lOut -} )
       (    inputConstraints l lIns
-        <> ILP.c (InDir  l) .==. int (-2)
-        <> ILP.c (OutDir l) .==. int (-2)
+        <> ILP.c (InDir  l) .==. int dir'
+        <> ILP.c (OutDir l) .==. int dir'
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
         <> ILP.c (InDims l) .==. int (rank shr))
       (defaultBounds l)
-  mkGraph NFold1 (_ :>: L _ (_, lIns) :>: _ :>: ArgsNil) l =
+    where
+      dir' = case dir of
+        LeftToRight -> -2
+        RightToLeft -> -1
+  mkGraph (NScan1 dir) (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
     Graph.Info
       mempty
       (    inputConstraints l lIns
-        <> ILP.c (InDir   l) .==. ILP.c (OutDir l)
-        -- <> ILP.c (InDims  l) .==. int 1 -- TODO redesign fold1
-        -- <> ILP.c (OutDims l) .==. int 0
-        )
+        <> ILP.c (InDir  l) .==. int dir'
+        <> ILP.c (OutDir l) .==. int dir'
+        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
+        <> ILP.c (InDims l) .==. int (rank shr))
       (defaultBounds l)
-  mkGraph NFold2 (_ :>: L (ArgArray In (ArrayR (ShapeRsnoc shr) _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
+    where
+      dir' = case dir of
+        LeftToRight -> -2
+        RightToLeft -> -1
+  mkGraph (NScan' dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: _ :>: ArgsNil) l =
+    Graph.Info
+      mempty
+      (    inputConstraints l lIns
+        <> ILP.c (InDir  l) .==. int dir'
+        -- TODO: Does this give a problem for the second output of scan' (the reduced values)?
+        -- That array is one dimension lower.
+        <> ILP.c (OutDir l) .==. int dir'
+        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
+        <> ILP.c (InDims l) .==. int (rank shr))
+      (defaultBounds l)
+    where
+      dir' = case dir of
+        LeftToRight -> -2
+        RightToLeft -> -1
+  mkGraph NFold (_ :>: _ :>: L (ArgArray In (ArrayR (ShapeRsnoc shr) _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
+    Graph.Info
+      mempty
+      (    inputConstraints l lIns
+        <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
+        <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
+        -- <> foldMap (\lin -> fused lin l .==. int 1) lIns
+        <> inrankifmanifest (ShapeRsnoc shr) l)
+      (defaultBounds l)
+  mkGraph NFold1 (_ :>: L (ArgArray In (ArrayR (ShapeRsnoc shr) _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
     Graph.Info
       mempty
       (    inputConstraints l lIns
@@ -409,9 +455,9 @@ instance StaticClusterAnalysis NativeOp where
     bcan2id bp :>: bp :>: ArgsNil -- store the bp in the function, because there is no input array
   onOp NPermute ArgsNil (_:>:_:>:_:>:_:>:ArgArray In (ArrayR shR _) _ _ :>:ArgsNil) _ = 
     BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing (rank shR) :>: ArgsNil
-  onOp NFold2  (bp :>: ArgsNil) (_ :>: ArgArray In _ fs _ :>: _ :>: ArgsNil) _ = BCAN2 Nothing 999 :>: fold2bp bp (case fs of TupRpair _ x -> x) :>: bp :>: ArgsNil
-  onOp NFold1  (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: fold1bp bp :>: bp :>: ArgsNil
-  onOp NScanl1 (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: bcan2id bp :>: bp :>: ArgsNil
+  -- onOp NFold  (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: fold1bp bp :>: bp :>: ArgsNil
+  onOp NFold1  (bp :>: ArgsNil) (_ :>: ArgArray In _ fs _ :>: _ :>: ArgsNil) _ = BCAN2 Nothing 999 :>: fold2bp bp (case fs of TupRpair _ x -> x) :>: bp :>: ArgsNil
+  onOp (NScan1 _) (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: bcan2id bp :>: bp :>: ArgsNil
   pairinfo _ IsUnit IsUnit = error "can't yet"
   pairinfo a@(ArrayR shr (TupRpair l r)) IsUnit x = shrinkOrGrow (ArrayR shr r) a x
   pairinfo a@(ArrayR shr (TupRpair l r)) x IsUnit = shrinkOrGrow (ArrayR shr l) a x

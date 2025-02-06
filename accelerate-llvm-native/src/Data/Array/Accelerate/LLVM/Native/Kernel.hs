@@ -130,6 +130,17 @@ operationName = \case
   NBackpermute -> (1, "backpermute", "backpermutes")
   NGenerate    -> (2, "generate", "generates")
   NPermute     -> (5, "permute", "permutes")
-  NScanl1      -> (4, "scan", "scans")
+  NScan LeftToRight
+               -> (4, "scanl", "scanls")
+  NScan RightToLeft
+               -> (4, "scanr", "scanrs")
+  NScan1 LeftToRight
+               -> (4, "scanl", "scanls")
+  NScan1 RightToLeft
+               -> (4, "scanr", "scanrs")
+  NScan' LeftToRight
+               -> (4, "scanl", "scanls")
+  NScan' RightToLeft
+               -> (4, "scanr", "scanrs")
+  NFold        -> (3, "fold", "folds")
   NFold1       -> (3, "fold", "folds")
-  NFold2       -> (3, "fold", "folds")

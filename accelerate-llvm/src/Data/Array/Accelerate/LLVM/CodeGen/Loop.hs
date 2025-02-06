@@ -72,7 +72,7 @@ imapReverseFromStepTo
     -> (Operands i -> CodeGen arch ())                -- ^ loop body
     -> CodeGen arch ()
 imapReverseFromStepTo start step end body = do
-  end' <- sub num start step
+  end' <- sub num end step
   for (TupRsingle $ SingleScalarType $ NumSingleType num) end'
       (\i -> gte (NumSingleType num) i start)
       (\i -> sub num i step)

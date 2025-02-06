@@ -42,6 +42,7 @@ import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Partitioned as P hiding (combine)
 import Data.Array.Accelerate.Eval
 import Data.Array.Accelerate.Type
+import Data.Array.Accelerate.Error
 import qualified Data.Array.Accelerate.AST.Environment as Env
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
@@ -149,7 +150,7 @@ codegen name env cluster args
       -- We are not using kernel memory, so no need to initialize it.
 
       -- TODO: Rewrite using a Select
-      ifThenElse (TupRunit, A.lt singleType tileCount' $ liftInt 3)
+      _ <- ifThenElse (TupRunit, A.lt singleType tileCount' $ liftInt 3)
         (OP_Unit <$ retval_ (scalar (scalarType @Word8) 0))
         (return OP_Unit)
       retval_ (scalar (scalarType @Word8) 1)
@@ -181,7 +182,7 @@ codegen name env (Clustered c b) args =
     init <- instr $ Cmp singleType Compare.EQ workassistFirstIndex (scalar scalarType 0xFFFFFFFF)
     initBlock <- newBlock "init"
     workBlock <- newBlock "work"
-    cbr init initBlock workBlock
+    _ <- cbr init initBlock workBlock
 
     setBlock initBlock
     -- TODO: Initialize kernel memory and decide whether loopsize is large enough
@@ -259,10 +260,37 @@ opCodeGen (FlatOp NPermute
   )
   where
     ArgArray _ (ArrayR shr tp) sh _ = output
-opCodeGen (FlatOp NFold2 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
+opCodeGen (FlatOp NFold (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _) (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
   ( depth
   , OpCodeGenLoop
-    True
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      return var
+    )
+    (\var envs -> do
+      x <- readArray' envs input inputIdx
+      accum <- tupleLoad tp var
+      new <-
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+    )
+    (\var envs -> do
+      value <- tupleLoad tp var
+      writeArray' envs output outputIdx value
+    )
+  )
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+opCodeGen (FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
+  ( depth
+  , OpCodeGenLoop
+    PeelGuaranteed
     (\_ -> tupleAlloca tp)
     (\var envs -> do
       x <- readArray' envs input inputIdx
@@ -282,8 +310,7 @@ opCodeGen (FlatOp NFold2 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgId
           else
             app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
         )
-      _ <- tupleStore tp var new
-      return ()
+      tupleStore tp var new
     )
     (\var envs -> do
       value <- tupleLoad tp var
@@ -292,10 +319,10 @@ opCodeGen (FlatOp NFold2 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgId
   )
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen (FlatOp NScanl1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
+opCodeGen (FlatOp (NScan1 _) (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
   ( depth - 1
   , OpCodeGenLoop
-    True
+    PeelConditional
     (\_ -> tupleAlloca tp)
     (\var envs -> do
       x <- readArray' envs input inputIdx
@@ -310,13 +337,116 @@ opCodeGen (FlatOp NScanl1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgI
           else
             app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
         )
-      _ <- tupleStore tp var new
+      tupleStore tp var new
       writeArray' envs output outputIdx new
     )
     (\_ _ -> return ())
   )
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
+opCodeGen (FlatOp (NScan' _)
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
+    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx depth foldOutputIdx :>: _)) =
+  ( depth
+  , OpCodeGenLoop
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      return var
+    )
+    (\var envs -> do
+      accum <- tupleLoad tp var
+      writeArray' envs output outputIdx accum
+      x <- readArray' envs input inputIdx
+      new <-
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+    )
+    (\var envs -> do
+      value <- tupleLoad tp var
+      writeArray' envs foldOutput foldOutputIdx value
+    )
+  )
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+opCodeGen (FlatOp (NScan LeftToRight)
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
+    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
+  ( depth - 1
+  , OpCodeGenLoop
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      return var
+    )
+    (\var envs -> do
+      accum <- tupleLoad tp var
+      writeArray' envs output inputIdx accum
+      x <- readArray' envs input inputIdx
+      new <-
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+    )
+    (\var envs -> do
+      value <- tupleLoad tp var
+      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
+      writeArrayAt' envs output rowIdx n' value
+    )
+  )
+  where
+    ArgArray _ (ArrayR _ tp) inputSh _ = input
+    n = case inputSh of
+      TupRpair _ (TupRsingle n') -> n'
+      _ -> internalError "Shape impossible"
+    rowIdx = case inputIdx of
+      TupRpair i _ -> i
+      _ -> internalError "Shape impossible"
+opCodeGen (FlatOp (NScan RightToLeft)
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
+    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
+  ( depth - 1
+  , OpCodeGenLoop
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
+      writeArrayAt' envs output rowIdx n' seed'
+      return var
+    )
+    (\var envs -> do
+      accum <- tupleLoad tp var
+      x <- readArray' envs input inputIdx
+      new <-
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+      writeArray' envs output inputIdx new
+    )
+    (\_ _ -> return ())
+  )
+  where
+    ArgArray _ (ArrayR _ tp) inputSh _ = input
+    n = case inputSh of
+      TupRpair _ (TupRsingle n') -> n'
+      _ -> internalError "Shape impossible"
+    rowIdx = case inputIdx of
+      TupRpair i _ -> i
+      _ -> internalError "Shape impossible"
+opCodeGen _ = internalError "Missing indices when generating code for an operation"
 
 
 -- Old, EvalOp based implementation
@@ -485,7 +615,7 @@ instance EvalOp NativeOp where
         pure Env.Empty
     | d == d' = error "case above?"
     | otherwise = pure Env.Empty
-  evalOp (d',_,ixs) l NScanl1 gamma (Push (Push _ (BAE (Value' x' sh) (BCAN2 Nothing d))) (BAE f' _))
+  evalOp (d',_,ixs) l (NScan1 LeftToRight) gamma (Push (Push _ (BAE (Value' x' sh) (BCAN2 Nothing d))) (BAE f' _))
     | f <- llvmOfFun2 @Native (compileArrayInstrGamma gamma) f'
     , Lam (lhsToTupR -> ty :: TypeR e) _ <- f'
     , CJ x <- x'
@@ -496,10 +626,10 @@ instance EvalOp NativeOp where
         z <- ifThenElse (ty, eq singleType inner (constant typerInt 0)) (pure x) (app2 f accX x) -- note: need to apply the accumulator as the _left_ argument to the function
         pure (Push Env.Empty $ FromArg (Value' (CJ z) sh), M.adjust (const (Exists z, eTy)) l acc)
     | otherwise = pure $ Push Env.Empty $ FromArg (Value' CN sh)
-  evalOp _ _ NScanl1 _ (Push (Push _ (BAE _ (BCAN2 (Just BP{}) _))) (BAE _ _)) = error "backpermuted scan"
-  evalOp _ _ NFold1 _ _ = error "todo: fold1"
+  evalOp _ _ (NScan1 _) _ (Push (Push _ (BAE _ (BCAN2 (Just BP{}) _))) (BAE _ _)) = error "backpermuted scan"
+  evalOp _ _ NFold _ _ = error "todo: fold"
   -- we can ignore the index permutation for folds here
-  evalOp (d',_,ixs) l NFold2 gamma (Push (Push _ (BAE (Value' x' (Shape' (ShapeRsnoc shr') (CJ (OP_Pair sh _)))) (BCAN2 _ d))) (BAE f' _))
+  evalOp (d',_,ixs) l NFold1 gamma (Push (Push _ (BAE (Value' x' (Shape' (ShapeRsnoc shr') (CJ (OP_Pair sh _)))) (BCAN2 _ d))) (BAE f' _))
     | f <- llvmOfFun2 @Native (compileArrayInstrGamma gamma) f'
     , Lam (lhsToTupR -> ty :: TypeR e) _ <- f'
     , CJ x <- x'
@@ -604,12 +734,12 @@ instance EvalOp (JustAccumulator NativeOp) where
 
   writeOutput _ sh _ gamma _ _ = StateT $ \(acc,ls) -> pure ((), (acc, merge ls sh gamma))
 
-  evalOp () l (JA NScanl1) _ (Push (Push _ (BAE (Value' (Both ty x) sh) _)) (BAE _ _))
+  evalOp () l (JA (NScan1 LeftToRight)) _ (Push (Push _ (BAE (Value' (Both ty x) sh) _)) (BAE _ _))
     = StateT $ \(acc,ls) -> do
         let thing = zeroes ty
         pure (Push Env.Empty $ FromArg (Value' (Both ty x) sh), (M.insert l (Exists thing, Exists ty) acc, ls))
-  evalOp () _ (JA NFold1) _ _ = undefined
-  evalOp () l (JA NFold2) _ (Push (Push _ (BAE (Value' (Both ty x) (Shape' (ShapeRsnoc shr) sh)) _)) (BAE _ _))
+  evalOp () _ (JA NFold) _ _ = undefined
+  evalOp () l (JA NFold1) _ (Push (Push _ (BAE (Value' (Both ty x) (Shape' (ShapeRsnoc shr) sh)) _)) (BAE _ _))
     = StateT $ \(acc,ls) -> do
         let thing = zeroes ty
         pure (Push Env.Empty $ FromArg (Value' (Both ty x) (Shape' shr (case sh of Both (TupRpair x _) (OP_Pair x' _) -> Both x x'))), (M.insert l (Exists thing, Exists ty) acc, ls))

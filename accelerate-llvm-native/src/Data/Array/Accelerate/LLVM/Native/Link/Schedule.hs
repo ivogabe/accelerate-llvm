@@ -1230,7 +1230,7 @@ convert inAwhile (Alet lhs (Compute expr) next)
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
     maySuspend = maySuspend next1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-      value <- llvmOfOpenExp (convertArrayInstr structVars localVars) expr Empty
+      value <- llvmOfExp (convertArrayInstr structVars localVars) expr
       (structVars', localVars') <- bPhase2 bnd structVars localVars fullState (tupleLeft stateIdx) value
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }

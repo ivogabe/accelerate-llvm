@@ -17,7 +17,7 @@
 module Data.Array.Accelerate.LLVM.CodeGen.Array (
 
   readArray, readArray',
-  writeArray, writeArray',
+  writeArray, writeArray', writeArrayAt',
   readBuffer,
   writeBuffer,
 
@@ -131,6 +131,34 @@ writeArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx val = do
   let sh' = envsPrjSh shr sh env
   let idx' = envsPrjIndices idx env
   linearIdx <- intOfIndex shr sh' idx'
+  let linearIdx' = op TypeInt linearIdx
+  let
+    write :: forall t. TypeR t -> GroundVars genv (Buffers t) -> Operands t -> CodeGen arch ()
+    write TupRunit _ _ = return ()
+    write (TupRpair t1 t2) (TupRpair b1 b2)    (OP_Pair v1 v2) = write t1 b1 v1 >> write t2 b2 v2
+    write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
+      | Refl <- reprIsSingle @ScalarType @t @Buffer t
+      , irbuffer <- envsPrjBuffer buffer env
+      = writeBuffer t TypeInt irbuffer linearIdx' value
+    write _ _ _ = internalError "Tuple mismatch"
+  write tp buffers val
+
+
+-- | Write a value into an array at the given index
+--
+{-# INLINEABLE writeArrayAt' #-}
+writeArrayAt'
+    :: forall int genv idxEnv m sh e arch.
+       Envs genv idxEnv
+    -> Arg genv (m (sh, Int) e) -- m is Out or Mut
+    -> ExpVars idxEnv sh
+    -> Operand Int
+    -> Operands e
+    -> CodeGen arch ()
+writeArrayAt' env (ArgArray _ (ArrayR shr tp) sh buffers) idx i val = do
+  let sh' = envsPrjSh shr sh env
+  let idx' = envsPrjIndices idx env
+  linearIdx <- intOfIndex shr sh' (OP_Pair idx' $ OP_Int i)
   let linearIdx' = op TypeInt linearIdx
   let
     write :: forall t. TypeR t -> GroundVars genv (Buffers t) -> Operands t -> CodeGen arch ()
