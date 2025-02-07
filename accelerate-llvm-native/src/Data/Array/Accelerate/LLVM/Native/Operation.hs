@@ -315,14 +315,13 @@ instance MakesILP NativeOp where
   mkGraph (NScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
     Graph.Info
       -- Scan cannot fuse with its consumer, as the output is one larger than the input
-      -- TODO: Mark outgoing edges of scan as infusible
-      ( mempty {- & infusibleEdges .~ Set.map (l -?>) lOut -} )
+      mempty
       (    inputConstraints l lIns
         <> ILP.c (InDir  l) .==. int dir'
-        <> ILP.c (OutDir l) .==. int dir'
+        <> ILP.c (OutDir l) .==. int (-3)
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
         <> ILP.c (InDims l) .==. int (rank shr))
-      (defaultBounds l)
+      ( lower (-2) (InDir l) <> lower (-3) (OutDir l) <> lower 0 (InDims l) <> lower 0 (OutDims l) )
     where
       dir' = case dir of
         LeftToRight -> -2
