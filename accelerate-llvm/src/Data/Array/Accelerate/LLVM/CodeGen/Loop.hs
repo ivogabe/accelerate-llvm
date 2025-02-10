@@ -23,6 +23,7 @@ import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
+import Data.Array.Accelerate.LLVM.CodeGen.Constant
 
 import Prelude                                                  hiding ( fst, snd, uncurry )
 import Control.Monad
@@ -165,4 +166,62 @@ while tp test body start = do
   -- Now the loop exit
   setBlock exit
   phi tp [(start,top), (next,bot)]
+
+loopWith
+  :: LoopPeeling
+  -> Bool
+  -> Operands Int -- Inclusive lower bound
+  -> Operands Int -- Exclusive upper bound
+  -> (Operands Bool -> Operands Int -> CodeGen arch ())
+  -> CodeGen arch ()
+loopWith PeelNot False lower upper body =
+  imapFromStepTo lower (liftInt 1) upper $ \idx -> do
+    isFirst <- eq (NumSingleType numType) idx lower
+    body isFirst idx
+loopWith PeelNot True lower upper body = do
+  upperInclusive <- sub numType upper (liftInt 1)
+  imapReverseFromStepTo lower (liftInt 1) upper $ \idx -> do
+    isFirst <- eq (NumSingleType numType) idx upperInclusive
+    body isFirst idx
+loopWith peeling desc lower upper body = do
+  blockFirst <- newBlock "while.first.iteration"
+  blockEnd <- newBlock "while.end"
+
+  _ <- case peeling of
+    PeelGuaranteed -> br blockFirst
+    _ -> do
+      -- Check if we need to do work. The first iteration can only be executed
+      -- if there is at least one value in the array.
+      isEmpty <- lte singleType upper lower
+      cbr isEmpty blockEnd blockFirst
+
+  -- Generate code for the first iteration
+  setBlock blockFirst
+  firstIdx <- if desc then sub numType upper (liftInt 1) else return lower
+  body (OP_Bool $ boolean True) firstIdx
+
+  -- Generate a loop for the remaining iterations
+  if desc then do
+    imapReverseFromStepTo lower (liftInt 1) firstIdx $ \idx ->
+      body (OP_Bool $ boolean False) idx
+  else do
+    second <- add numType lower (liftInt 1)
+    imapFromStepTo second (liftInt 1) upper $ \idx ->
+      body (OP_Bool $ boolean False) idx
+
+  _ <- br blockEnd
+  -- Control flow of the cbr on isEmpty joins here
+  setBlock blockEnd
+
+data LoopPeeling
+  -- Do not perform loop peeling.
+  = PeelNot
+  -- Perform loop peeling, but do not assume that the loop will execute at
+  -- least one iteration. The code for the first iteration should thus be
+  -- placed in a conditional.
+  | PeelConditional
+  -- Perform loop peeling.
+  -- It is guaranteed that the loop executes at least one iteration.
+  | PeelGuaranteed
+  deriving (Eq, Ord)
 

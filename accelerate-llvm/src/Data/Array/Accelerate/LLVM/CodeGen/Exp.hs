@@ -88,7 +88,8 @@ compileArrayInstrGamma genv arr arg = case arr of
   Index var -> linearIndex var arg
   where
     linearIndex :: GroundVar genv (Buffer e) -> Operands Int -> IROpenExp arch env e
-    linearIndex var@(Var (GroundRbuffer tp) _) idx = fmap (ir tp) <$> readBuffer tp integralType irbuffer $ op scalarTypeInt idx
+    linearIndex var@(Var (GroundRbuffer tp) _) idx =
+      ir tp <$> readBuffer tp integralType irbuffer (op scalarTypeInt idx) Nothing
       where
         irbuffer = aprjBuffer var genv
     linearIndex (Var (GroundRscalar tp) _) _ = bufferImpossible tp
@@ -105,7 +106,8 @@ compileArrayInstrEnvs envs arr arg = case arr of
   Index var -> linearIndex var arg
   where
     linearIndex :: GroundVar genv (Buffer e) -> Operands Int -> IROpenExp arch env e
-    linearIndex var@(Var (GroundRbuffer tp) _) idx = fmap (ir tp) <$> readBuffer tp integralType irbuffer $ op scalarTypeInt idx
+    linearIndex var@(Var (GroundRbuffer tp) _) idx =
+      ir tp <$> readBuffer tp integralType irbuffer (op scalarTypeInt idx) Nothing
       where
         irbuffer = envsPrjBuffer var envs
     linearIndex (Var (GroundRscalar tp) _) _ = bufferImpossible tp

@@ -21,7 +21,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
   readBuffer,
   writeBuffer,
 
-  tupleAlloca, tupleStore, tupleLoad,
+  tupleAlloca, tuplePtrs, tupleStore, tupleLoad,
 
   intOfIndex
 
@@ -76,7 +76,7 @@ readArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx = do
     read (TupRsingle t)   (TupRsingle buffer)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- envsPrjBuffer buffer env
-      = ir t <$> readBuffer t TypeInt irbuffer linearIdx'
+      = ir t <$> readBuffer t TypeInt irbuffer linearIdx' (Just $ op TypeInt $ envsTileLocalIndex env)
     read _ _ = internalError "Tuple mismatch"
   read tp buffers
 
@@ -98,7 +98,7 @@ readArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) = read tp 
     read (TupRsingle t)   (TupRsingle buffer)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- aprjBuffer buffer env
-      = ir t <$> readBuffer t int irbuffer ix
+      = ir t <$> readBuffer t int irbuffer ix Nothing
     read _ _ = internalError "Tuple mismatch"
 
 readBuffer
@@ -106,16 +106,20 @@ readBuffer
     -> IntegralType int
     -> IRBuffer e
     -> Operand int
+    -> Maybe (Operand Int) -- Index within a tile, if in a tile loop
     -> CodeGen arch (Operand e)
-readBuffer e i (IRBuffer buffer a v IRBufferScopeArray) ix = do
+readBuffer e i (IRBuffer buffer a v IRBufferScopeArray) ix _ = do
   p <- getElementPtr a e i buffer ix
   load a e v p
-readBuffer e i (IRBuffer buffer a v IRBufferScopeSingle) _ = do
+readBuffer e i (IRBuffer buffer a v IRBufferScopeSingle) _ _ = do
   p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
   x <- load a e v p
   return x
-readBuffer _ _ _ _ = internalError "Cannot read from buffer in Tile scope"
-
+readBuffer e i (IRBuffer buffer a v IRBufferScopeTile) _ (Just localIx) = do
+  p <- getElementPtr a e TypeInt buffer localIx
+  x <- load a e v p
+  return x
+readBuffer _ _ _ _ _ = internalError "Cannot read from buffer in Tile scope"
 
 -- | Write a value into an array at the given index
 --
@@ -139,7 +143,7 @@ writeArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx val = do
     write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- envsPrjBuffer buffer env
-      = writeBuffer t TypeInt irbuffer linearIdx' value
+      = writeBuffer t TypeInt irbuffer linearIdx' (Just $ op TypeInt $ envsTileLocalIndex env) value
     write _ _ _ = internalError "Tuple mismatch"
   write tp buffers val
 
@@ -167,7 +171,9 @@ writeArrayAt' env (ArgArray _ (ArrayR shr tp) sh buffers) idx i val = do
     write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- envsPrjBuffer buffer env
-      = writeBuffer t TypeInt irbuffer linearIdx' value
+      -- Note that operations using writeArrayAt' cannot fuse,
+      -- hence we can pass Nothing here.
+      = writeBuffer t TypeInt irbuffer linearIdx' Nothing value
     write _ _ _ = internalError "Tuple mismatch"
   write tp buffers val
 
@@ -191,7 +197,7 @@ writeArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) val = wri
     write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- aprjBuffer buffer env
-      = writeBuffer t int irbuffer ix value
+      = writeBuffer t int irbuffer ix Nothing value
     write _ _ _ = internalError "Tuple mismatch"
 
 
@@ -200,17 +206,22 @@ writeBuffer
     -> IntegralType int
     -> IRBuffer e
     -> Operand int
+    -> Maybe (Operand Int) -- The local index within a tile, if in a tile loop
     -> Operand e
     -> CodeGen arch ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeArray) ix x = do
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeArray) ix _ x = do
   p <- getElementPtr a e i buffer ix
   _ <- store a v e p x
   return ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeSingle) ix x = do
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeSingle) ix _ x = do
   p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
   _ <- store a v e p x
   return ()
-writeBuffer _ _ _ _ _ = return () -- Buffer is fused away
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeTile) _ (Just localIx) x = do
+  p <- getElementPtr a e TypeInt buffer localIx
+  _ <- store a v e p x
+  return ()
+writeBuffer _ _ _ _ _ _ = internalError "Cannot write to buffer in Tile scope"
 
 
 -- | A wrapper around the GetElementPtr instruction, which correctly
@@ -368,13 +379,24 @@ tupleAlloca (TupRsingle tp)
   | Refl <- reprIsSingle @ScalarType @e @Ptr tp
   = TupRsingle <$> instr' (Alloca $ ScalarPrimType tp)
 
+tuplePtrs :: forall full arch. TypeR full -> Operand (Ptr (Struct full)) -> CodeGen arch (TupR Operand (Distribute Ptr full))
+tuplePtrs tp ptr = go TupleIdxSelf tp
+  where
+    go :: forall e. TupleIdx full e -> TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr e))
+    go _ TupRunit = return TupRunit
+    go tupleIdx (TupRpair t1 t2)
+      = TupRpair <$> go (tupleLeft tupleIdx) t1 <*> go (tupleRight tupleIdx) t2
+    go tupleIdx (TupRsingle t)
+      | Refl <- reprIsSingle @ScalarType @e @Ptr t
+      = TupRsingle <$> instr' (GetStructElementPtr (ScalarPrimType t) ptr tupleIdx)
+
 tupleStore :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> Operands e -> CodeGen arch ()
 tupleStore TupRunit _ _ = return ()
 tupleStore (TupRpair t1 t2) (TupRpair p1 p2) (OP_Pair v1 v2) =
   tupleStore t1 p1 v1 >> tupleStore t2 p2 v2
 tupleStore (TupRsingle tp) (TupRsingle ptr) value 
   | Refl <- reprIsSingle @ScalarType @e @Ptr tp = do
-    instr' $ Store NonVolatile ptr $ op tp value
+    _ <- instr' $ Store NonVolatile ptr $ op tp value
     return ()
 tupleStore _ _ _ = internalError "Tuple mismatch"
 

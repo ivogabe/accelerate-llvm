@@ -72,6 +72,7 @@ bindHeaderEnv
      , Operand (Ptr Word32)
      , Operand (Word32)
      , Operand (Ptr Word64)
+     , Operand (Ptr (SizedArray Word))
      , Gamma env
      )
 bindHeaderEnv env =
@@ -79,21 +80,27 @@ bindHeaderEnv env =
   , do
       instr_ $ downcast $ nameIndex := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ "env" := GetStructElementPtr envTp arg (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameKernelMemory := GetStructElementPtr kernelMemTp arg (TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
   , LocalReference type' nameFirstIndex
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameActivitiesSlot
+  , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
   , gamma
   )
   where
     -- The Word array at the end is kernel memory. SEE: [Kernel Memory]
     -- Note that the array here has size 0, but it may be larger.
     -- LLVM allows this, since we only use pointer casts here and the allocation does not happen here.
-    argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp `TupRpair` TupRsingle (ArrayPrimType 0 primType))) defaultAddrSpace
+    argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp `TupRpair` TupRsingle kernelMemTp)) defaultAddrSpace
     (envTp, extractEnv, gamma) = bindEnv env
 
     nameIndex = "workassist.index"
     nameFirstIndex = "workassist.first_index"
     nameActivitiesSlot = "workassist.activities_slot"
+    nameKernelMemory = "kernel_memory"
+
+    kernelMemTp :: PrimType (SizedArray Word)
+    kernelMemTp = ArrayPrimType 0 primType
 
     arg = LocalReference (PrimType argTp) "arg"

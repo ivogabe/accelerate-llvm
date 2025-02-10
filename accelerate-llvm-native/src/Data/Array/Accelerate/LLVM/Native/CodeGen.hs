@@ -10,6 +10,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -52,10 +53,14 @@ import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
 import Data.Typeable
+import Data.Maybe
 
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction.Volatile
+import LLVM.AST.Type.Instruction.Atomic
+import LLVM.AST.Type.AddrSpace
 import qualified LLVM.AST.Type.Instruction.Compare as Compare
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
@@ -64,7 +69,6 @@ import Unsafe.Coerce (unsafeCoerce)
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.Trafo.Desugar (ArrayDescriptor(..))
-import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic ( when, ifThenElse, ifThenElse', eq, fromJust, isJust, liftInt )
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.Analysis.Match (matchShapeR)
 import Data.Array.Accelerate.Trafo.Exp.Substitution (compose)
@@ -78,8 +82,9 @@ import Data.Array.Accelerate.LLVM.CodeGen.Constant (constant)
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph (MakesILP(..))
 import Data.Coerce (coerce)
 import Data.Functor.Compose
-import qualified Control.Monad as Prelude
+import Control.Monad
 import Data.Bifunctor (Bifunctor(..))
+import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
@@ -112,27 +117,111 @@ codegen name env cluster args
     -- Before the parallel work of a kernel is started, we first run the function once.
     -- This first call will initialize kernel memory (SEE: Kernel Memory)
     -- and decide whether the runtime may try to let multiple threads work on this kernel.
-    init <- instr $ Cmp singleType Compare.EQ workassistFirstIndex (scalar scalarType 0xFFFFFFFF)
     initBlock <- newBlock "init"
+    finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
-    cbr init initBlock workBlock
+    switch (OP_Word32 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
 
-    if parallelDepth == 0 then do
-      -- TODO: Parallelise over first dimension using parallel folds or scans
+    if parallelDepth == 0 && rank shr /= 0 then do
+      -- Parallelise over first dimension using parallel folds or scans
+      case parCodeGens parCodeGen 0 $ opCodeGens opCodeGen flatOps of
+        Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
+        Just (Exists parCodes) -> do
+          let tileSize = 1024 * 4 -- TODO: Implement a heuristic to choose the tile size
 
-      setBlock initBlock
-      -- TODO: Initialize kernel memory and decide whether loopsize is large enough
-      retval_ $ scalar (scalarType @Word8) 0
+          let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+          let ((idxVar, direction, size), loops') = case loops of
+                [] -> internalError "Expected at least one loop since rank shr /= 0"
+                (l:ls) -> (l, ls)
 
-      setBlock workBlock
+          -- Number of tiles
+          sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
+          OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
+          tileCount <- instr' $ Trunc boundedType boundedType tileCount'
 
-      -- Case instead of let, as this introduces existential type arguments
-      let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+          let envs' = envs{
+            envsLoopDepth = 0,
+            envsDescending = isDescending direction
+          }
 
-      genSequential envs loops $ opCodeGens opCodeGen flatOps
+          -- Kernel memory
+          let memoryTp' = parCodeGenMemory parCodes
+          let memoryTp = StructPrimType False memoryTp'
+          kernelMem <- instr' $ PtrCast (PtrPrimType memoryTp defaultAddrSpace) kernelMem'
 
-      retval_ $ scalar (scalarType @Word8) 0
-      pure 0
+          setBlock initBlock
+          -- Initialize kernel memory
+          parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
+          -- TODO: Decide whether tileCount is large enough
+          retval_ $ scalar (scalarType @Word8) 1
+
+          setBlock finishBlock
+          do
+            -- Declare fused-away and dead arrays at level zero.
+            -- This is for instance needed for `map (+1) $ fold ...`,
+            -- or a scanl' or scanr' whose reduced value is not used (like in prescanl).
+            envs'' <- bindLocals 0 envs'
+            -- Execute code for after the parallel work of this kernel, for
+            -- instance to write the result of a fold to the output array.
+            parCodeGenFinish kernelMem envs'' TupleIdxSelf parCodes
+            retval_ $ scalar (scalarType @Word8) 0
+
+          setBlock workBlock
+
+          -- Emit code to initialize a thread, and get the codes for the tile loops
+          tileLoops <- genParallel kernelMem envs' TupleIdxSelf parCodes
+
+          workassistLoop workassistIndex workassistFirstIndex workassistActivitiesSlot tileCount $ \tileIdx' -> do
+            tileIdx <- instr' $ Ext boundedType boundedType tileIdx'
+
+            tileIdxAbsolute <-
+              -- For a scanr, convert low-to-high indices to high-to-low indices:
+              -- The first block (with tileIdx 0) should now correspond with the last
+              -- values of the array. We implement that by reversing the tile indices here.
+              if isDescending direction then do
+                i <- A.sub numType (OP_Int tileCount') (OP_Int tileIdx)
+                OP_Int j <- A.sub numType i (A.liftInt 1)
+                return j
+              else
+                return tileIdx
+            lower <- A.mul numType (OP_Int tileIdxAbsolute) (A.liftInt tileSize)
+            upper' <- A.add numType lower (A.liftInt tileSize)
+            upper <- A.min singleType upper' size
+
+            -- Declare fused away arrays
+            envs'' <- bindLocalsInTile 1 tileSize envs'
+
+            forM_ ((True, ptFirstLoop tileLoops) : map (False, ) (ptOtherLoops tileLoops)) $ \(isFirstTileLoop, tileLoop) -> do
+              -- All nested loops are placed in the first tile loop by parCodeGens
+              let loops'' = if isFirstTileLoop then loops' else []
+              -- Only do loop peeling if requested and when there are no nested loops.
+              -- Peeling over nested loops causes a lot of code duplication,
+              -- and is probably not worth it.
+              let peel = if ptPeel tileLoop && null loops'' then PeelGuaranteed else PeelNot
+              -- We can use PeelGuaranteed instead of PeelConditional since we
+              -- know that each tile is non-empty.
+
+              let envs''' = envs''{
+                  envsTileIndex = OP_Int tileIdx
+                }
+
+              ptBefore tileLoop envs'''
+              Loop.loopWith peel (isDescending direction) lower upper $ \isFirst idx -> do
+                localIdx <- A.sub numType idx lower
+                let envs'''' = envs'''{
+                    envsLoopDepth = 1,
+                    envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
+                    envsIsFirst = isFirst,
+                    envsTileLocalIndex = localIdx
+                  }
+                genSequential envs'''' loops'' $ ptIn tileLoop
+              ptAfter tileLoop envs'''
+
+          ptExit tileLoops envs'
+
+          retval_ $ scalar (scalarType @Word8) 0
+          -- Return the size of kernel memory
+          pure $ fst $ primSizeAlignment memoryTp
     else do
       -- Parallelise over all independent dimensions
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -150,10 +239,14 @@ codegen name env cluster args
       -- We are not using kernel memory, so no need to initialize it.
 
       -- TODO: Rewrite using a Select
-      _ <- ifThenElse (TupRunit, A.lt singleType tileCount' $ liftInt 3)
+      _ <- A.ifThenElse (TupRunit, A.lt singleType tileCount' $ A.liftInt 3)
         (OP_Unit <$ retval_ (scalar (scalarType @Word8) 0))
         (return OP_Unit)
       retval_ (scalar (scalarType @Word8) 1)
+
+      setBlock finishBlock
+      -- Nothing has to be done in the finish function for this kernel.
+      retval_ $ scalar (scalarType @Word8) 0
 
       setBlock workBlock
       workassistChunked parallelShr workassistIndex workassistFirstIndex workassistActivitiesSlot tileSize parSizes $ \idx -> do
@@ -170,7 +263,11 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, gamma) = bindHeaderEnv env
+    (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, kernelMem', gamma) = bindHeaderEnv env
+
+    isDescending :: LoopDirection Int -> Bool
+    isDescending LoopDescending = True
+    isDescending _ = False
 
 codegen name env (Clustered c b) args =
   codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
@@ -185,7 +282,6 @@ codegen name env (Clustered c b) args =
     _ <- cbr init initBlock workBlock
 
     setBlock initBlock
-    -- TODO: Initialize kernel memory and decide whether loopsize is large enough
     retval_ $ scalar (scalarType @Word8) 1
 
     setBlock workBlock
@@ -196,12 +292,12 @@ codegen name env (Clustered c b) args =
       LS loopshr loopsh -> 
         workassistChunked' loopshr workassistIndex workassistFirstIndex workassistActivitiesSlot (flipShape loopshr loopsh) accTypeR
           (body loopshr toOp fromOp, -- the LoopWork
-          StateT $ \op -> second toOp <$> runStateT (foo (liftInt 0) []) (fromOp op)) -- the action to run after the outer loop
+          StateT $ \op -> second toOp <$> runStateT (foo (A.liftInt 0) []) (fromOp op)) -- the action to run after the outer loop
     -- acc'' <- flip execStateT acc' $ foo (liftInt 0) []
     pure 0
     where
       ba = makeBackendArg @NativeOp args gamma c b
-      (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, gamma) = bindHeaderEnv env
+      (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, _, gamma) = bindHeaderEnv env
       body :: ShapeR sh -> (Accumulated -> a) -> (a -> Accumulated) -> LoopWork sh (StateT a (CodeGen Native))
       body ShapeRz _ _ = LoopWorkZ
       body (ShapeRsnoc shr) toOp fromOp = LoopWorkSnoc (body shr toOp fromOp) (\i is -> StateT $ \op -> second toOp <$> runStateT (foo i is) (fromOp op))
@@ -213,7 +309,7 @@ codegen name env (Clustered c b) args =
         outputs <- evalOps @NativeOp i c newInputs args gamma
         writeOutputs @_ @_ @NativeOp i args outputs gamma
 
-opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native env idxEnv)
+opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
 opCodeGen (FlatOp NGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
   ( depth
   , OpCodeGenSingle $ \envs -> do
@@ -245,9 +341,9 @@ opCodeGen (FlatOp NPermute
     let sourceIdx' = envsPrjIndices sourceIdx envs
     idx' <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) idxTransform) sourceIdx'
     -- project element onto the destination array and (atomically) update
-    when (isJust idx') $ do
+    A.when (A.isJust idx') $ do
       x <- readArray' envs source sourceIdx
-      let idx = fromJust idx'
+      let idx = A.fromJust idx'
       let sh' = envsPrjParameters (shapeExpVars shr sh) envs
       j <- intOfIndex shr sh' idx
       -- TODO: Rewrite the function below to take Envs as argument instead of Gamma,
@@ -260,9 +356,10 @@ opCodeGen (FlatOp NPermute
   )
   where
     ArgArray _ (ArrayR shr tp) sh _ = output
-opCodeGen (FlatOp NFold (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _) (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
+opCodeGen flatOp@(FlatOp NFold (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _) (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
   ( depth
   , OpCodeGenLoop
+    flatOp
     PeelNot
     (\envs -> do
       var <- tupleAlloca tp
@@ -287,9 +384,10 @@ opCodeGen (FlatOp NFold (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _) 
   )
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen (FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
+opCodeGen flatOp@(FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
   ( depth
   , OpCodeGenLoop
+    flatOp
     PeelGuaranteed
     (\_ -> tupleAlloca tp)
     (\var envs -> do
@@ -299,7 +397,7 @@ opCodeGen (FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgId
       -- will then either be a constant True, or a constant False.
       -- ifThenElse' (opposed to the version with a prime) will then generate
       -- code for only one branch, and thus also without conditional jumps.
-      new <- ifThenElse' (tp, envsIsFirst envs)
+      new <- A.ifThenElse' (tp, envsIsFirst envs)
         ( do
           return x
         )
@@ -319,14 +417,15 @@ opCodeGen (FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgId
   )
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen (FlatOp (NScan1 _) (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
+opCodeGen flatOp@(FlatOp (NScan1 _) (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
   ( depth - 1
   , OpCodeGenLoop
+    flatOp
     PeelConditional
     (\_ -> tupleAlloca tp)
     (\var envs -> do
       x <- readArray' envs input inputIdx
-      new <- ifThenElse' (tp, envsIsFirst envs)
+      new <- A.ifThenElse' (tp, envsIsFirst envs)
         ( do
           return x
         )
@@ -344,11 +443,12 @@ opCodeGen (FlatOp (NScan1 _) (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxA
   )
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen (FlatOp (NScan' _)
+opCodeGen flatOp@(FlatOp (NScan' _)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx depth foldOutputIdx :>: _)) =
   ( depth
   , OpCodeGenLoop
+    flatOp
     PeelNot
     (\envs -> do
       var <- tupleAlloca tp
@@ -374,11 +474,12 @@ opCodeGen (FlatOp (NScan' _)
   )
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen (FlatOp (NScan LeftToRight)
+opCodeGen flatOp@(FlatOp (NScan LeftToRight)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
   ( depth - 1
   , OpCodeGenLoop
+    flatOp
     PeelNot
     (\envs -> do
       var <- tupleAlloca tp
@@ -411,11 +512,12 @@ opCodeGen (FlatOp (NScan LeftToRight)
     rowIdx = case inputIdx of
       TupRpair i _ -> i
       _ -> internalError "Shape impossible"
-opCodeGen (FlatOp (NScan RightToLeft)
+opCodeGen flatOp@(FlatOp (NScan RightToLeft)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
   ( depth - 1
   , OpCodeGenLoop
+    flatOp
     PeelNot
     (\envs -> do
       var <- tupleAlloca tp
@@ -448,6 +550,321 @@ opCodeGen (FlatOp (NScan RightToLeft)
       _ -> internalError "Shape impossible"
 opCodeGen _ = internalError "Missing indices when generating code for an operation"
 
+-- Parallel code generation for one-dimensional collective operations (folds and scans).
+-- Other operations, either OpCodeGenSingle or nested deeper, are handled in opCodeGen
+parCodeGen :: FlatOp NativeOp env idxEnv -> Maybe (Exists (ParLoopCodeGen Native env idxEnv))
+parCodeGen (FlatOp NFold
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
+    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
+  = Just $ parCodeGenFold fun (Just seed) input output inputIdx outputIdx
+parCodeGen (FlatOp NFold1
+    (ArgFun fun :>: input :>: output :>: _)
+    (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
+  = Just $ parCodeGenFold fun Nothing input output inputIdx outputIdx
+parCodeGen (FlatOp (NScan1 _)
+    (ArgFun fun :>: input :>: output :>: _)
+    (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _))
+  = Just $ parCodeGenScan fun Nothing input inputIdx
+    (\_ _ -> return ())
+    (\_ _ -> return ())
+    (\envs result -> writeArray' envs output outputIdx result)
+    (\_ _ -> return ())
+parCodeGen (FlatOp (NScan' _)
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
+    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx _ foldOutputIdx :>: _))
+  = Just $ parCodeGenScan fun (Just seed) input inputIdx
+    (\_ _ -> return ())
+    (\envs result -> writeArray' envs output outputIdx result)
+    (\_ _ -> return ())
+    (\envs result -> writeArray' envs foldOutput foldOutputIdx result)
+parCodeGen (FlatOp (NScan dir)
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
+    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
+  = case dir of
+      LeftToRight -> Just $ parCodeGenScan fun (Just seed) input inputIdx
+        (\_ _ -> return ())
+        (\envs result -> writeArray' envs output inputIdx result)
+        (\_ _ -> return ())
+        (\envs result -> do
+          let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
+          writeArrayAt' envs output rowIdx n' result
+        )
+      RightToLeft -> Just $ parCodeGenScan fun (Just seed) input inputIdx
+        (\envs result -> writeArray' envs output inputIdx result)
+        (\_ _ -> return ())
+        (\envs result -> do
+          let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
+          writeArrayAt' envs output rowIdx n' result
+        )
+        (\_ _ -> return ())
+  where
+    ArgArray _ (ArrayR _ tp) inputSh _ = input
+    n = case inputSh of
+      TupRpair _ (TupRsingle n') -> n'
+      _ -> internalError "Shape impossible"
+    rowIdx = case inputIdx of
+      TupRpair i _ -> i
+      _ -> internalError "Shape impossible"
+parCodeGen _ = Nothing
+
+parCodeGenFold
+  :: Fun env (e -> e -> e)
+  -> Maybe (Exp env e)
+  -> Arg env (In (sh, Int) e)
+  -> Arg env (Out sh e)
+  -> ExpVars idxEnv (sh, Int)
+  -> ExpVars idxEnv sh
+  -> Exists (ParLoopCodeGen Native env idxEnv)
+-- TODO: Specialized version for a commutative fold backed by an atomic RMW instruction,
+-- and a specialized for any other commutative fold.
+-- TODO: Specialize for the case where we have an identity value
+parCodeGenFold fun seed input output inputIdx outputIdx = Exists $ ParLoopCodeGen
+  True
+  -- In kernel memory, store the index of the block we must now handle and the
+  -- reduced value so far. 'Handle' here means that we should now add the value
+  -- of that block.
+  (mapTupR ScalarPrimType memoryTp)
+  -- Initialize kernel memory
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair (TupRsingle intPtr) valuePtrs -> do
+        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0)
+        case seed of
+          Nothing -> return ()
+          Just s -> do
+            value <- llvmOfExp (compileArrayInstrEnvs envs) s
+            tupleStore tp valuePtrs value
+  )
+  -- Initialize a thread
+  (\ptr envs -> tupleAlloca tp)
+  -- Code before the tile loop
+  (\_ _ _ -> return ())
+  -- Code within the tile loop
+  (\accumVar _ envs -> do
+    x <- readArray' envs input inputIdx
+    new <- A.ifThenElse' (tp, envsIsFirst envs)
+      ( do
+        return x
+      )
+      ( do
+        accum <- tupleLoad tp accumVar
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      )
+    tupleStore tp accumVar new
+  )
+  -- Code after the tile loop
+  (\accumVar ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair (TupRsingle idxPtr) valuePtrs -> do
+        _ <- Loop.while TupRunit
+          (\_ -> do
+            idx <- instr $ Load scalarTypeInt Volatile idxPtr
+            A.neq singleType idx (envsTileIndex envs)
+          )
+          (\_ -> return OP_Unit)
+          OP_Unit
+
+        _ <- instr' $ Fence (CrossThread, Acquire)
+        local <- tupleLoad tp accumVar
+
+        new <-
+          -- If there is no seed, then write the output directly in the first tiles.
+          -- The other tiles must combine their result with the given operator.
+          if isNothing seed then
+            A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
+              (do
+                return local
+              )
+              (do
+                old <- tupleLoad tp valuePtrs
+                if envsDescending envs then
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local old
+                else
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
+              )
+          -- If there is a seed, then all tile will combine their local result with
+          -- the already available value.
+          else do
+            old <- tupleLoad tp valuePtrs
+            if envsDescending envs then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local old
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
+        tupleStore tp valuePtrs new
+
+        _ <- instr' $ Fence (CrossThread, Release)
+        OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
+        _ <- instr' $ Store Volatile idxPtr nextIdx
+        return ()
+  )
+  (\_ _ _ -> return ())
+  -- Code after the loop
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair _ valuePtrs -> do
+        value <- tupleLoad tp valuePtrs
+        writeArray' envs output outputIdx value
+  )
+  Nothing
+  where
+    memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
+    ArgArray _ (ArrayR _ tp) _ _ = output
+
+parCodeGenScan
+  :: Fun env (e -> e -> e)
+  -> Maybe (Exp env e) -- Seed
+  -> Arg env (In (sh, Int) e)
+  -> ExpVars idxEnv (sh, Int)
+  -- Code after evaluating the seed
+  -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
+  -- Code in a tile loop, before the combination (for exclusive scans)
+  -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
+  -- Code in a tile loop, after the combination (for inclusive scans)
+  -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
+  -- Code after the parallel loop
+  -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
+  -> Exists (ParLoopCodeGen Native env idxEnv)
+parCodeGenScan fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
+  -- TODO: If we know an identity value, we can implement this without loop peeling
+  -- TODO: Also request loop peeling for the next tile loop, if seed is Nothing
+  True
+  -- In kernel memory, store the index of the block we must now handle and the
+  -- reduced value so far. 'Handle' here means that we should now add the value
+  -- of that block.
+  (mapTupR ScalarPrimType memoryTp)
+  -- Initialize kernel memory
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair (TupRsingle intPtr) valuePtrs -> do
+        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0)
+        case seed of
+          Nothing -> return ()
+          Just s -> do
+            value <- llvmOfExp (compileArrayInstrEnvs envs) s
+            codeSeed envs value
+            tupleStore tp valuePtrs value
+  )
+  -- Initialize a thread
+  (\ptr envs -> tupleAlloca tp)
+  -- Code before the tile loop
+  (\_ _ _ -> return ())
+  -- Code within the tile loop
+  (\accumVar _ envs -> do
+    x <- readArray' envs input index
+    new <- A.ifThenElse' (tp, envsIsFirst envs)
+      ( do
+        return x
+      )
+      ( do
+        accum <- tupleLoad tp accumVar
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      )
+    tupleStore tp accumVar new
+  )
+  -- Code after the tile loop
+  (\accumVar ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair (TupRsingle idxPtr) valuePtrs -> do
+        _ <- Loop.while TupRunit
+          (\_ -> do
+            idx <- instr $ Load scalarTypeInt Volatile idxPtr
+            A.neq singleType idx (envsTileIndex envs)
+          )
+          (\_ -> return OP_Unit)
+          OP_Unit
+
+        _ <- instr' $ Fence (CrossThread, Acquire)
+        local <- tupleLoad tp accumVar
+
+        new <-
+          -- If there is no seed, then write the output directly in the first tiles.
+          -- The other tiles must combine their result with the given operator.
+          if isNothing seed then
+            A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
+              (do
+                return local
+              )
+              (do
+                prefix <- tupleLoad tp valuePtrs
+                tupleStore tp accumVar prefix
+                if envsDescending envs then
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
+                else
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
+              )
+          -- If there is a seed, then all tile will combine their local result with
+          -- the already available value.
+          else do
+            prefix <- tupleLoad tp valuePtrs
+            tupleStore tp accumVar prefix
+            if envsDescending envs then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
+        tupleStore tp valuePtrs new
+
+        _ <- instr' $ Fence (CrossThread, Release)
+        OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
+        _ <- instr' $ Store Volatile idxPtr nextIdx
+        return ()
+  )
+  (\_ _ _ -> return ())
+  -- Code after the loop
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair _ valuePtrs -> do
+        value <- tupleLoad tp valuePtrs
+        codeEnd envs value
+  )
+  (Just $ \accumVar ptr envs -> do
+    x <- readArray' envs input index
+    if isJust seed then do
+      accum <- tupleLoad tp accumVar
+      codePre envs accum
+      new <- if envsDescending envs then
+        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+      else
+        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      codePost envs new
+      tupleStore tp accumVar new
+    else do
+      isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
+      new <- A.ifThenElse (tp, A.land isFirstTile $ envsIsFirst envs)
+        ( do
+          return x
+        )
+        ( do
+          accum <- tupleLoad tp accumVar
+          codePre envs accum
+          if envsDescending envs then
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+          else
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+        )
+      codePost envs new
+      tupleStore tp accumVar new
+  )
+  where
+    memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
+    ArgArray _ (ArrayR _ tp) _ _ = input
 
 -- Old, EvalOp based implementation
 
@@ -537,7 +954,7 @@ instance EvalOp NativeOp where
     CN -> pure ()
     CJ x
       | Refl <- reprIsSingle @ScalarType @_ @Buffer tp
-      -> lift $ Prelude.when (sh `isAtDepth` d) $ writeBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) (op tp x)
+      -> lift $ when (sh `isAtDepth` d) $ writeBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) Nothing (op tp x)
   writeOutput _ _ _ _ _ = error "not single"
 
   readInput :: forall e env sh. ScalarType e -> GroundVars env sh -> GroundVars env (Buffers e) -> Gamma env -> BackendClusterArg2 NativeOp env (In sh e) -> (Int, Operands Int, [Operands Int]) -> StateT Accumulated (CodeGen Native) (Compose Maybe Operands e)
@@ -545,7 +962,7 @@ instance EvalOp NativeOp where
   readInput tp _ (TupRsingle buf) gamma (BCAN2 Nothing d') (d,i, _)
     | d /= d' = pure CN
     | Refl <- reprIsSingle @ScalarType @e @Buffer tp
-    = lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i)
+    = lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) Nothing
   readInput tp sh (TupRsingle buf) gamma (BCAN2 (Just (BP shr1 (shr2 :: ShapeR sh2) f _ls)) _) (d,_,ix)
     | Just Refl <- varsContainsThisShape sh shr2
     , shr1 `isAtDepth'` d
@@ -554,7 +971,7 @@ instance EvalOp NativeOp where
       sh2 <- app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) $ multidim shr1 ix
       let sh' = aprjParameters (groundToExpVar (shapeType shr2) sh) gamma
       i <- intOfIndex shr2 sh' sh2
-      readBuffer tp TypeInt (aprjBuffer (buf) gamma) (op TypeInt i)
+      readBuffer tp TypeInt (aprjBuffer (buf) gamma) (op TypeInt i) Nothing
     | otherwise = pure CN
   readInput _ _ (TupRsingle _) _ _ (_,_,_) = error "here"
   -- assuming no bp, and I'll just make a read at every depth?
@@ -604,8 +1021,8 @@ instance EvalOp NativeOp where
     = traceIfDebugging ("permute" <> show d') $ lift $ do
         ix' <- app1 f (multidim shrx is)
         -- project element onto the destination array and (atomically) update
-        when (isJust ix') $ do
-          let ix = fromJust ix'
+        A.when (A.isJust ix') $ do
+          let ix = A.fromJust ix'
           let sht' = aprjParameters (unsafeToExpVars sht) gamma
           j <- intOfIndex shrt sht' ix
           atomically gamma (ArgArray Mut (ArrayR shrl lty) shl bufl) j $ do
@@ -623,7 +1040,7 @@ instance EvalOp NativeOp where
     , inner:_ <- ixs
     = traceIfDebugging ("scan" <> show d') $ StateT $ \acc -> do
         let (Exists (unsafeCoerce @(Operands _) @(Operands e) -> accX), eTy) = acc M.! l
-        z <- ifThenElse (ty, eq singleType inner (constant typerInt 0)) (pure x) (app2 f accX x) -- note: need to apply the accumulator as the _left_ argument to the function
+        z <- A.ifThenElse (ty, A.eq singleType inner (constant typerInt 0)) (pure x) (app2 f accX x) -- note: need to apply the accumulator as the _left_ argument to the function
         pure (Push Env.Empty $ FromArg (Value' (CJ z) sh), M.adjust (const (Exists z, eTy)) l acc)
     | otherwise = pure $ Push Env.Empty $ FromArg (Value' CN sh)
   evalOp _ _ (NScan1 _) _ (Push (Push _ (BAE _ (BCAN2 (Just BP{}) _))) (BAE _ _)) = error "backpermuted scan"
@@ -637,7 +1054,7 @@ instance EvalOp NativeOp where
     , inner:_ <- ixs
     = traceIfDebugging ("fold2work" <> show d') $ StateT $ \acc -> do
         let (Exists (unsafeCoerce @(Operands _) @(Operands e) -> accX), eTy) = acc M.! l
-        z <- ifThenElse (ty, eq singleType inner (constant typerInt 0)) (pure x) (app2 f accX x) -- note: need to apply the accumulator as the _left_ argument to the function
+        z <- A.ifThenElse (ty, A.eq singleType inner (constant typerInt 0)) (pure x) (app2 f accX x) -- note: need to apply the accumulator as the _left_ argument to the function
         pure (Push Env.Empty $ FromArg (Value' (CJ z) (Shape' shr' (CJ sh))), M.adjust (const (Exists z, eTy)) l acc)
     | Lam (lhsToTupR -> _ty :: TypeR e) _ <- f'
     , d == d'+1 -- the fold was in the iteration above; we grab the result from the accumulator now

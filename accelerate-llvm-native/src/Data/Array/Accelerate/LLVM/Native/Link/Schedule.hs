@@ -1291,16 +1291,6 @@ blockName 0 = "block.start"
 blockName 1 = "block.destructor"
 blockName idx = "block." ++ show idx
 
-tupleLeft :: TupleIdx a (b, c) -> TupleIdx a b
-tupleLeft (TupleIdxLeft  idx) = TupleIdxLeft  $ tupleLeft idx
-tupleLeft (TupleIdxRight idx) = TupleIdxRight $ tupleLeft idx
-tupleLeft TupleIdxSelf        = TupleIdxLeft TupleIdxSelf
-
-tupleRight :: TupleIdx a (b, c) -> TupleIdx a c
-tupleRight (TupleIdxLeft  idx) = TupleIdxLeft  $ tupleRight idx
-tupleRight (TupleIdxRight idx) = TupleIdxRight $ tupleRight idx
-tupleRight TupleIdxSelf        = TupleIdxRight TupleIdxSelf
-
 getPtr :: StructVars env -> Idx env t -> CodeGen Native (Operand (Ptr (ReprBaseR t)))
 getPtr env idx = case prjPartial idx env of
   Just (StructVar _ _ m) -> m

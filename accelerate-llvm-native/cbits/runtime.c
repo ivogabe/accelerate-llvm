@@ -129,7 +129,10 @@ void* accelerate_worker(void *data_packed) {
 
         if (is_last) {
           // The last thread executes the finish function.
-          // In this implementation, that is given by program_continuation in the KernelLaunch structure.
+          // First, execute the finish procedure of the kernel:
+          kernel->work_function(kernel, 0xFFFFFFFE, NULL);
+          // Then continue the program after this kernel, via
+          // program_continuation in the KernelLaunch structure.
           task.program = kernel->program;
           task.location = kernel->program_continuation;
         } else {
@@ -191,7 +194,10 @@ void* accelerate_worker(void *data_packed) {
       }
       if (is_last) {
         // The last thread executes the finish function.
-        // In this implementation, that is given by program_continuation in the KernelLaunch structure.
+        // First, execute the finish procedure of the kernel:
+        kernel->work_function(kernel, 0xFFFFFFFE, NULL);
+        // Then continue the program after this kernel, via
+        // program_continuation in the KernelLaunch structure.
         task.program = kernel->program;
         task.location = kernel->program_continuation;
       }

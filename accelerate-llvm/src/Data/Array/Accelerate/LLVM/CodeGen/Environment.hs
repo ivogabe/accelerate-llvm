@@ -28,7 +28,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Environment
   , marshalScalarArg
   -- , scalarParameter, ptrParameter
   , bindParameters, bindEnv, envType
-  , Envs(..), initEnv, bindLocals
+  , Envs(..), initEnv, bindLocals, bindLocalsInTile
   , envsGamma, envsPrjBuffer, envsPrjParameter
   , envsPrjParameters, envsPrjSh, envsPrjIndex, envsPrjIndices
   , parallelIterSize
@@ -85,7 +85,13 @@ data Envs env idxEnv = Envs
   -- This is a partial environment as some indices are only available in
   -- deeper loop depths.
   , envsIdx :: PartialEnv Operand idxEnv
-  -- Whether the iteration at the current loop depth is the first iteration of the loop
+  -- The index of the tile, if this is in a parallel tiled loop
+  , envsTileIndex :: Operands Int
+  -- The index within the tile, if this is in a parallel tiled loop
+  , envsTileLocalIndex :: Operands Int
+  -- Whether the iteration at the current loop depth is the first iteration of
+  -- the loop If this is in a tile loop, this says if this is the first
+  -- iteration of that tile loop.
   , envsIsFirst :: Operands Bool
   -- Whether the loop at the current loop depth is descending
   -- (iterating from high indices to low indices)
@@ -118,7 +124,8 @@ initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
       , envsGround = partialEnvSkipLHS localLHS $ envToPartial gamma
       , envsLocal = partialEnvToList $ partialEnvPushLHS localLHS localsR PEnd
       , envsIdx = PEnd
-      -- , envsLocalIndex = []
+      , envsTileIndex = OP_Int $ scalar scalarTypeInt 0
+      , envsTileLocalIndex = OP_Int $ scalar scalarTypeInt 0
       , envsIsFirst = OP_Bool $ boolean True
       , envsDescending = False
       }
@@ -141,11 +148,26 @@ bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
     go :: Envs env idxEnv -> EnvBinding LocalBufferR env -> CodeGen target (Envs env idxEnv)
     go envs (EnvBinding idx (LocalBufferR tp depth'))
       | depth /= depth' = return envs
+      | Just _ <- prjPartial idx (envsGround envs) = return envs -- Already bound
       | otherwise = do
         -- Introduce a new mutable variable on the stack
         ptr <- instr' $ Alloca $ ScalarPrimType tp
         ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle
+        return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
+
+bindLocalsInTile :: LoopDepth -> Int -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
+bindLocalsInTile depth tileSize = \envs -> foldlM go envs $ envsLocal envs
+  where
+    go :: Envs env idxEnv -> EnvBinding LocalBufferR env -> CodeGen target (Envs env idxEnv)
+    go envs (EnvBinding idx (LocalBufferR tp depth'))
+      | depth /= depth' = return envs
+      | Just _ <- prjPartial idx (envsGround envs) = return envs -- Already bound
+      | otherwise = do
+        -- Introduce a new mutable variable on the stack
+        ptr <- instr' $ Alloca $ ArrayPrimType (fromIntegral tileSize) (ScalarPrimType tp)
+        ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
+        let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeTile
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
 envsGamma :: HasCallStack => Envs env idxEnv -> Gamma env
