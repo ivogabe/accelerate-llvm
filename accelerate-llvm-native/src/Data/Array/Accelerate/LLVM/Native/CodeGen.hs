@@ -127,7 +127,7 @@ codegen name env cluster args
       case parCodeGens parCodeGen 0 $ opCodeGens opCodeGen flatOps of
         Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
         Just (Exists parCodes) -> do
-          let tileSize = 1024 * 4 -- TODO: Implement a heuristic to choose the tile size
+          let tileSize = if rank shr > 1 then 1 else 1024 * 4 -- TODO: Implement a better heuristic to choose the tile size
 
           let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
           let ((idxVar, direction, size), loops') = case loops of
@@ -150,10 +150,14 @@ codegen name env cluster args
           kernelMem <- instr' $ PtrCast (PtrPrimType memoryTp defaultAddrSpace) kernelMem'
 
           setBlock initBlock
-          -- Initialize kernel memory
-          parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
-          -- TODO: Decide whether tileCount is large enough
-          retval_ $ scalar (scalarType @Word8) 1
+          do
+            -- Initialize kernel memory
+            parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
+            -- Decide whether tileCount is large enough
+
+            OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
+            value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
+            retval_ value
 
           setBlock finishBlock
           do
@@ -232,17 +236,16 @@ codegen name env cluster args
       -- The work per iteration is probably large enough.
       let tileSize = if parallelDepth == rank shr then chunkSize parallelShr else chunkSizeOne parallelShr
       let parSizes = parallelIterSize parallelShr loops
-      tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
 
       setBlock initBlock
-      tileCount' <- shapeSize parallelShr tileCount
-      -- We are not using kernel memory, so no need to initialize it.
+      do
+        tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
+        tileCount' <- shapeSize parallelShr tileCount
+        -- We are not using kernel memory, so no need to initialize it.
 
-      -- TODO: Rewrite using a Select
-      _ <- A.ifThenElse (TupRunit, A.lt singleType tileCount' $ A.liftInt 3)
-        (OP_Unit <$ retval_ (scalar (scalarType @Word8) 0))
-        (return OP_Unit)
-      retval_ (scalar (scalarType @Word8) 1)
+        OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
+        value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
+        retval_ value
 
       setBlock finishBlock
       -- Nothing has to be done in the finish function for this kernel.
