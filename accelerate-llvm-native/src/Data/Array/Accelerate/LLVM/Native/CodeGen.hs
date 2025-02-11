@@ -41,6 +41,7 @@ import Data.Array.Accelerate.Representation.Shape (shapeRFromRank, shapeType, Sh
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Partitioned as P hiding (combine)
+import Data.Array.Accelerate.Analysis.Exp
 import Data.Array.Accelerate.Eval
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Error
@@ -123,16 +124,16 @@ codegen name env cluster args
     switch (OP_Word32 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
 
     if parallelDepth == 0 && rank shr /= 0 then do
+      let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+      let ((idxVar, direction, size), loops') = case loops of
+            [] -> internalError "Expected at least one loop since rank shr /= 0"
+            (l:ls) -> (l, ls)
+
       -- Parallelise over first dimension using parallel folds or scans
-      case parCodeGens parCodeGen 0 $ opCodeGens opCodeGen flatOps of
+      case parCodeGens (parCodeGen $ isDescending direction) 0 $ opCodeGens opCodeGen flatOps of
         Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
         Just (Exists parCodes) -> do
           let tileSize = if rank shr > 1 then 1 else 1024 * 4 -- TODO: Implement a better heuristic to choose the tile size
-
-          let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
-          let ((idxVar, direction, size), loops') = case loops of
-                [] -> internalError "Expected at least one loop since rank shr /= 0"
-                (l:ls) -> (l, ls)
 
           -- Number of tiles
           sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
@@ -555,36 +556,36 @@ opCodeGen _ = internalError "Missing indices when generating code for an operati
 
 -- Parallel code generation for one-dimensional collective operations (folds and scans).
 -- Other operations, either OpCodeGenSingle or nested deeper, are handled in opCodeGen
-parCodeGen :: FlatOp NativeOp env idxEnv -> Maybe (Exists (ParLoopCodeGen Native env idxEnv))
-parCodeGen (FlatOp NFold
+parCodeGen :: Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (ParLoopCodeGen Native env idxEnv))
+parCodeGen descending (FlatOp NFold
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenFold fun (Just seed) input output inputIdx outputIdx
-parCodeGen (FlatOp NFold1
+  = Just $ parCodeGenFold descending fun (Just seed) input output inputIdx outputIdx
+parCodeGen descending (FlatOp NFold1
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenFold fun Nothing input output inputIdx outputIdx
-parCodeGen (FlatOp (NScan1 _)
+  = Just $ parCodeGenFold descending fun Nothing input output inputIdx outputIdx
+parCodeGen descending (FlatOp (NScan1 _)
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _))
-  = Just $ parCodeGenScan fun Nothing input inputIdx
+  = Just $ parCodeGenScan descending fun Nothing input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
     (\_ _ -> return ())
-parCodeGen (FlatOp (NScan' _)
+parCodeGen descending (FlatOp (NScan' _)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx _ foldOutputIdx :>: _))
-  = Just $ parCodeGenScan fun (Just seed) input inputIdx
+  = Just $ parCodeGenScan descending fun (Just seed) input inputIdx
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
     (\_ _ -> return ())
     (\envs result -> writeArray' envs foldOutput foldOutputIdx result)
-parCodeGen (FlatOp (NScan dir)
+parCodeGen descending (FlatOp (NScan dir)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
   = case dir of
-      LeftToRight -> Just $ parCodeGenScan fun (Just seed) input inputIdx
+      LeftToRight -> Just $ parCodeGenScan descending fun (Just seed) input inputIdx
         (\_ _ -> return ())
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
@@ -592,7 +593,7 @@ parCodeGen (FlatOp (NScan dir)
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
-      RightToLeft -> Just $ parCodeGenScan fun (Just seed) input inputIdx
+      RightToLeft -> Just $ parCodeGenScan descending fun (Just seed) input inputIdx
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
         (\envs result -> do
@@ -608,20 +609,29 @@ parCodeGen (FlatOp (NScan dir)
     rowIdx = case inputIdx of
       TupRpair i _ -> i
       _ -> internalError "Shape impossible"
-parCodeGen _ = Nothing
+parCodeGen _ _ = Nothing
 
 parCodeGenFold
-  :: Fun env (e -> e -> e)
+  :: Bool
+  -> Fun env (e -> e -> e)
   -> Maybe (Exp env e)
   -> Arg env (In (sh, Int) e)
   -> Arg env (Out sh e)
   -> ExpVars idxEnv (sh, Int)
   -> ExpVars idxEnv sh
   -> Exists (ParLoopCodeGen Native env idxEnv)
+parCodeGenFold descending fun Nothing input output inputIdx outputIdx
+  | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
+  = parCodeGenFold descending fun (Just $ mkConstant tp identity) input output inputIdx outputIdx
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = output
 -- TODO: Specialized version for a commutative fold backed by an atomic RMW instruction,
 -- and a specialized for any other commutative fold.
+-- parCodeGenFold _ fun seed input output inputIdx outputIdx
+--  | isCommutative fun
 -- TODO: Specialize for the case where we have an identity value
-parCodeGenFold fun seed input output inputIdx outputIdx = Exists $ ParLoopCodeGen
+-- TODO: Implement regular, non-commutative, folds via parCodeGenScan?
+parCodeGenFold _ fun seed input output inputIdx outputIdx = Exists $ ParLoopCodeGen
   True
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
@@ -723,7 +733,8 @@ parCodeGenFold fun seed input output inputIdx outputIdx = Exists $ ParLoopCodeGe
     ArgArray _ (ArrayR _ tp) _ _ = output
 
 parCodeGenScan
-  :: Fun env (e -> e -> e)
+  :: Bool
+  -> Fun env (e -> e -> e)
   -> Maybe (Exp env e) -- Seed
   -> Arg env (In (sh, Int) e)
   -> ExpVars idxEnv (sh, Int)
@@ -736,10 +747,14 @@ parCodeGenScan
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenScan fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
-  -- TODO: If we know an identity value, we can implement this without loop peeling
-  -- TODO: Also request loop peeling for the next tile loop, if seed is Nothing
-  True
+parCodeGenScan descending fun Nothing input index codeSeed codePre codePost codeEnd
+  | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
+  = parCodeGenScan descending fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+parCodeGenScan descending fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
+  -- If we know an identity value, we can implement this without loop peeling
+  (isNothing identity)
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
   -- of that block.
@@ -761,21 +776,34 @@ parCodeGenScan fun seed input index codeSeed codePre codePost codeEnd = Exists $
   -- Initialize a thread
   (\ptr envs -> tupleAlloca tp)
   -- Code before the tile loop
-  (\_ _ _ -> return ())
+  (\accumVar _ envs -> case identity of
+    Nothing -> return ()
+    Just identity' -> do
+      value <- llvmOfExp (compileArrayInstrEnvs envs) identity'
+      tupleStore tp accumVar value
+  )
   -- Code within the tile loop
   (\accumVar _ envs -> do
     x <- readArray' envs input index
-    new <- A.ifThenElse' (tp, envsIsFirst envs)
-      ( do
-        return x
-      )
-      ( do
+    new <-
+      if isJust identity then do
         accum <- tupleLoad tp accumVar
         if envsDescending envs then
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
         else
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      )
+      else
+        A.ifThenElse' (tp, envsIsFirst envs)
+          ( do
+            return x
+          )
+          ( do
+            accum <- tupleLoad tp accumVar
+            if envsDescending envs then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+          )
     tupleStore tp accumVar new
   )
   -- Code after the tile loop
@@ -871,6 +899,14 @@ parCodeGenScan fun seed input index codeSeed codePre codePost codeEnd = Exists $
   where
     memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input
+    identity
+      | Just s <- seed
+      , if descending then isRightIdentity fun s else isLeftIdentity fun s
+      = Just s
+      | Just v <- if descending then findRightIdentity fun else findLeftIdentity fun
+      = Just $ mkConstant tp v
+      | otherwise
+      = Nothing
 
 -- Old, EvalOp based implementation
 
