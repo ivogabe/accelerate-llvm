@@ -837,7 +837,10 @@ parCodeGenScan fun seed input index codeSeed codePre codePost codeEnd = Exists $
         value <- tupleLoad tp valuePtrs
         codeEnd envs value
   )
-  (Just $ \accumVar ptr envs -> do
+  -- In the next tile loop, we prefer loop peeling iff there is no seed.
+  -- In the first iteration, the first tile loop will then start without a prefix value,
+  -- and we thus should do loop peeling there.
+  (Just (isNothing seed, \accumVar ptr envs -> do
     x <- readArray' envs input index
     if isJust seed then do
       accum <- tupleLoad tp accumVar
@@ -864,7 +867,7 @@ parCodeGenScan fun seed input index codeSeed codePre codePost codeEnd = Exists $
         )
       codePost envs new
       tupleStore tp accumVar new
-  )
+  ))
   where
     memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input

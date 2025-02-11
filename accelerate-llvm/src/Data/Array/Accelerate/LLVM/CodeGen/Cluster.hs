@@ -368,8 +368,8 @@ data ParLoopCodeGen target env idxEnv kernelMemory where
     -> (a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -- Code after a row, *executed once*, by only one thread, per row
     -> (Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
-    -- Code in the next tile loop
-    -> Maybe (a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
+    -- Code in the next tile loop, and whether we want to do loop peeling in that loop.
+    -> Maybe (Bool, a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -> ParLoopCodeGen target env idxEnv kernelMemory
 
 parLoopMultipleTileLoops :: ParLoopCodeGen target env idxEnv kernelMemory -> Bool
@@ -512,8 +512,12 @@ genParallel ptr envs tupleIdx = \case
     let exit' = \e -> exit a thisPtr e >> exitNext e
     let loops' = case nextLoop of
           Nothing -> loops
-          Just n -> case loops of
-            l : ls -> l{ ptIn = GenOp (depth + 1) (OpCodeGenSingle $ n a thisPtr) $ ptIn l } : ls
+          Just (p, n) -> case loops of
+            l : ls ->
+              l{
+                ptPeel = p || ptPeel l,
+                ptIn = GenOp (depth + 1) (OpCodeGenSingle $ n a thisPtr) $ ptIn l
+              } : ls
             _ -> internalError "Operations wants to emit code in next tile loop, but there is no next tile loop. Is there a ParGenTileLoopBoundary missing or misplaced?"
     return $ ParTileLoops loop' loops' exit'
   ParGenDeeper d opC next -> do
