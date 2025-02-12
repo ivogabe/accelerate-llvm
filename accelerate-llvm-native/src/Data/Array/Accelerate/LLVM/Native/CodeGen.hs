@@ -61,6 +61,7 @@ import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
+import LLVM.AST.Type.Instruction.RMW
 import LLVM.AST.Type.AddrSpace
 import qualified LLVM.AST.Type.Instruction.Compare as Compare
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
@@ -389,6 +390,7 @@ opCodeGen flatOp@(FlatOp NFold (ArgFun fun :>: ArgExp seed :>: input :>: output 
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
 opCodeGen flatOp@(FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
+  -- TODO: Try to find an identity value, and convert to NFold
   ( depth
   , OpCodeGenLoop
     flatOp
@@ -422,6 +424,8 @@ opCodeGen flatOp@(FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: I
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
 opCodeGen flatOp@(FlatOp (NScan1 _) (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
+  -- TODO: Try to find an identity value to prevent loop peeling / the conditional in the body of the loop.
+  -- Ideally we add a PostScan as primitive, such that we can convert a scan1 into a postscan
   ( depth - 1
   , OpCodeGenLoop
     flatOp
@@ -625,13 +629,15 @@ parCodeGenFold descending fun Nothing input output inputIdx outputIdx
   = parCodeGenFold descending fun (Just $ mkConstant tp identity) input output inputIdx outputIdx
   where
     ArgArray _ (ArrayR _ tp) _ _ = output
--- TODO: Specialized version for a commutative fold backed by an atomic RMW instruction,
--- and a specialized for any other commutative fold.
--- parCodeGenFold _ fun seed input output inputIdx outputIdx
---  | isCommutative fun
--- TODO: Specialize for the case where we have an identity value
+-- Specialized version for commutative folds with identity
+parCodeGenFold descending fun seed input output inputIdx outputIdx
+  | isCommutative fun
+  , Just s <- seed
+  , Just i <- identity
+  = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
+  
 -- TODO: Implement regular, non-commutative, folds via parCodeGenScan?
-parCodeGenFold _ fun seed input output inputIdx outputIdx = Exists $ ParLoopCodeGen
+  | otherwise = Exists $ ParLoopCodeGen
   True
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
@@ -731,6 +737,109 @@ parCodeGenFold _ fun seed input output inputIdx outputIdx = Exists $ ParLoopCode
   where
     memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = output
+    identity
+      | Just s <- seed
+      , if descending then isRightIdentity fun s else isLeftIdentity fun s
+      = Just s
+      | Just v <- if descending then findRightIdentity fun else findLeftIdentity fun
+      = Just $ mkConstant tp v
+      | otherwise
+      = Nothing
+
+parCodeGenFoldCommutative
+  :: Bool
+  -> Fun env (e -> e -> e)
+  -> Exp env e
+  -> Exp env e
+  -> Arg env (In (sh, Int) e)
+  -> Arg env (Out sh e)
+  -> ExpVars idxEnv (sh, Int)
+  -> ExpVars idxEnv sh
+  -> Exists (ParLoopCodeGen Native env idxEnv)
+parCodeGenFoldCommutative descending fun seed identity input output inputIdx outputIdx = Exists $ ParLoopCodeGen
+  False
+  -- In kernel memory, store a lock (Word8) and the
+  -- reduced value so far. The lock must be acquired to read or update the total value.
+  -- Value 0 means unlocked, 1 is locked.
+  (mapTupR ScalarPrimType memoryTp)
+  -- Initialize kernel memory
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair (TupRsingle intPtr) valuePtrs -> do
+        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeWord8 0) -- unlocked
+        value <- llvmOfExp (compileArrayInstrEnvs envs) seed
+        tupleStore tp valuePtrs value
+  )
+  -- Initialize a thread
+  (\ptr envs -> do
+    accumVar <- tupleAlloca tp
+    value <- llvmOfExp (compileArrayInstrEnvs envs) identity
+    tupleStore tp accumVar value
+    return accumVar
+  )
+  -- Code before the tile loop
+  (\_ _ _ -> return ())
+  -- Code within the tile loop
+  (\accumVar _ envs -> do
+    x <- readArray' envs input inputIdx
+    accum <- tupleLoad tp accumVar
+    new <-
+      if envsDescending envs then
+        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+      else
+        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+    tupleStore tp accumVar new
+  )
+  -- Code after the tile loop
+  (\_ _ _ -> return ())
+  -- Code at the end of a thread
+  (\accumVar ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair (TupRsingle lock) valuePtrs -> do
+        -- TODO: Use atomic compare-and-swap or read-modify-write
+        -- to update the value in kernel memory lock-free,
+        -- instead of taking a lock here.
+        _ <- Loop.while TupRunit
+          (\_ -> do
+            -- While the lock is taken
+            old <- instr $ AtomicRMW numType NonVolatile Exchange lock (scalar scalarTypeWord8 1) (CrossThread, Acquire)
+            A.neq singleType old (A.liftWord8 0)
+          )
+          (\_ -> return OP_Unit)
+          OP_Unit
+
+        local <- tupleLoad tp accumVar
+
+        old <- tupleLoad tp valuePtrs
+        new <-
+          if envsDescending envs then
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local old
+          else
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
+        tupleStore tp valuePtrs new
+
+        -- Release the lock
+        _ <- instr' $ Fence (CrossThread, Release)
+        _ <- instr' $ Store Volatile lock (scalar scalarTypeWord8 0)
+        return ()
+  )
+  -- Code after the loop
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair _ valuePtrs -> do
+        value <- tupleLoad tp valuePtrs
+        writeArray' envs output outputIdx value
+  )
+  Nothing
+  where
+    memoryTp = TupRsingle scalarTypeWord8 `TupRpair` tp
+    ArgArray _ (ArrayR _ tp) _ _ = input
 
 parCodeGenScan
   :: Bool
