@@ -134,7 +134,7 @@ codegen name env cluster args
       case parCodeGens (parCodeGen $ isDescending direction) 0 $ opCodeGens opCodeGen flatOps of
         Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
         Just (Exists parCodes) -> do
-          let tileSize = if rank shr > 1 then 1 else 1024 * 4 -- TODO: Implement a better heuristic to choose the tile size
+          let tileSize = if rank shr > 1 then 32 else 1024 * 4 -- TODO: Implement a better heuristic to choose the tile size
 
           -- Number of tiles
           sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
@@ -177,7 +177,9 @@ codegen name env cluster args
           -- Emit code to initialize a thread, and get the codes for the tile loops
           tileLoops <- genParallel kernelMem envs' TupleIdxSelf parCodes
 
-          workassistLoop workassistIndex workassistFirstIndex workassistActivitiesSlot tileCount $ \tileIdx' -> do
+          -- Declare fused away arrays
+          envs'' <- bindLocalsInTile 1 tileSize envs'
+          workassistLoop workassistIndex workassistFirstIndex workassistActivitiesSlot tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ Ext boundedType boundedType tileIdx'
 
             tileIdxAbsolute <-
@@ -194,34 +196,68 @@ codegen name env cluster args
             upper' <- A.add numType lower (A.liftInt tileSize)
             upper <- A.min singleType upper' size
 
-            -- Declare fused away arrays
-            envs'' <- bindLocalsInTile 1 tileSize envs'
+            -- If there is only a single tile loop (i.e. no parallel scans),
+            -- then we don't generate code for a single-threaded mode:
+            -- the default mode already is as fast as a single-threaded mode.
+            let seqMode' = if null (ptOtherLoops tileLoops) then boolean False else seqMode
 
-            forM_ ((True, ptFirstLoop tileLoops) : map (False, ) (ptOtherLoops tileLoops)) $ \(isFirstTileLoop, tileLoop) -> do
-              -- All nested loops are placed in the first tile loop by parCodeGens
-              let loops'' = if isFirstTileLoop then loops' else []
-              -- Only do loop peeling if requested and when there are no nested loops.
-              -- Peeling over nested loops causes a lot of code duplication,
-              -- and is probably not worth it.
-              let peel = if ptPeel tileLoop && null loops'' then PeelGuaranteed else PeelNot
-              -- We can use PeelGuaranteed instead of PeelConditional since we
-              -- know that each tile is non-empty.
+            let envs''' = envs''{
+                envsTileIndex = OP_Int tileIdx
+              }
 
-              let envs''' = envs''{
-                  envsTileIndex = OP_Int tileIdx
-                }
+            -- Note: ifThenElse' does not generate code for the then-branch if
+            -- the condition is a constant. Thus, if a kernel does not have a
+            -- scan, we won't generate separate code for a single-threaded mode.
+            _ <- A.ifThenElse' (TupRunit, OP_Bool seqMode')
+              -- Sequential mode
+              (do
+                let tileLoop = ptSingleThreaded tileLoops
+                -- Only do loop peeling if requested and when there are no nested loops.
+                -- Peeling over nested loops causes a lot of code duplication,
+                -- and is probably not worth it.
+                let peel = if ptPeel tileLoop && null loops' then PeelGuaranteed else PeelNot
+                -- We can use PeelGuaranteed instead of PeelConditional since we
+                -- know that each tile is non-empty.
 
-              ptBefore tileLoop envs'''
-              Loop.loopWith peel (isDescending direction) lower upper $ \isFirst idx -> do
-                localIdx <- A.sub numType idx lower
-                let envs'''' = envs'''{
-                    envsLoopDepth = 1,
-                    envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
-                    envsIsFirst = isFirst,
-                    envsTileLocalIndex = localIdx
-                  }
-                genSequential envs'''' loops'' $ ptIn tileLoop
-              ptAfter tileLoop envs'''
+                ptBefore tileLoop envs'''
+                Loop.loopWith peel (isDescending direction) lower upper $ \isFirst idx -> do
+                  localIdx <- A.sub numType idx lower
+                  let envs'''' = envs'''{
+                      envsLoopDepth = 1,
+                      envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
+                      envsIsFirst = isFirst,
+                      envsTileLocalIndex = localIdx
+                    }
+                  genSequential envs'''' loops $ ptIn tileLoop
+                ptAfter tileLoop envs'''
+                return OP_Unit
+              )
+              -- Parallel mode
+              (do
+                forM_ ((True, ptFirstLoop tileLoops) : map (False, ) (ptOtherLoops tileLoops)) $ \(isFirstTileLoop, tileLoop) -> do
+                  -- All nested loops are placed in the first tile loop by parCodeGens
+                  let loops'' = if isFirstTileLoop then loops' else []
+                  -- Only do loop peeling if requested and when there are no nested loops.
+                  -- Peeling over nested loops causes a lot of code duplication,
+                  -- and is probably not worth it.
+                  let peel = if ptPeel tileLoop && null loops'' then PeelGuaranteed else PeelNot
+                  -- We can use PeelGuaranteed instead of PeelConditional since we
+                  -- know that each tile is non-empty.
+
+                  ptBefore tileLoop envs'''
+                  Loop.loopWith peel (isDescending direction) lower upper $ \isFirst idx -> do
+                    localIdx <- A.sub numType idx lower
+                    let envs'''' = envs'''{
+                        envsLoopDepth = 1,
+                        envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
+                        envsIsFirst = isFirst,
+                        envsTileLocalIndex = localIdx
+                      }
+                    genSequential envs'''' loops'' $ ptIn tileLoop
+                  ptAfter tileLoop envs'''
+                return OP_Unit
+              )
+            return ()
 
           ptExit tileLoops envs'
 
@@ -572,7 +608,7 @@ parCodeGen descending (FlatOp NFold1
 parCodeGen descending (FlatOp (NScan1 _)
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _))
-  = Just $ parCodeGenScan descending fun Nothing input inputIdx
+  = Just $ parCodeGenScan descending False fun Nothing input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
@@ -580,7 +616,7 @@ parCodeGen descending (FlatOp (NScan1 _)
 parCodeGen descending (FlatOp (NScan' _)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx _ foldOutputIdx :>: _))
-  = Just $ parCodeGenScan descending fun (Just seed) input inputIdx
+  = Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
     (\_ _ -> return ())
@@ -589,7 +625,7 @@ parCodeGen descending (FlatOp (NScan dir)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
   = case dir of
-      LeftToRight -> Just $ parCodeGenScan descending fun (Just seed) input inputIdx
+      LeftToRight -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
         (\_ _ -> return ())
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
@@ -597,7 +633,7 @@ parCodeGen descending (FlatOp (NScan dir)
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
-      RightToLeft -> Just $ parCodeGenScan descending fun (Just seed) input inputIdx
+      RightToLeft -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
         (\envs result -> do
@@ -635,107 +671,13 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
   , Just s <- seed
   , Just i <- identity
   = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
-  
--- TODO: Implement regular, non-commutative, folds via parCodeGenScan?
-  | otherwise = Exists $ ParLoopCodeGen
-  True
-  -- In kernel memory, store the index of the block we must now handle and the
-  -- reduced value so far. 'Handle' here means that we should now add the value
-  -- of that block.
-  (mapTupR ScalarPrimType memoryTp)
-  -- Initialize kernel memory
-  (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0)
-        case seed of
-          Nothing -> return ()
-          Just s -> do
-            value <- llvmOfExp (compileArrayInstrEnvs envs) s
-            tupleStore tp valuePtrs value
-  )
-  -- Initialize a thread
-  (\ptr envs -> tupleAlloca tp)
-  -- Code before the tile loop
-  (\_ _ _ -> return ())
-  -- Code within the tile loop
-  (\accumVar _ envs -> do
-    x <- readArray' envs input inputIdx
-    new <- A.ifThenElse' (tp, envsIsFirst envs)
-      ( do
-        return x
-      )
-      ( do
-        accum <- tupleLoad tp accumVar
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      )
-    tupleStore tp accumVar new
-  )
-  -- Code after the tile loop
-  (\accumVar ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle idxPtr) valuePtrs -> do
-        _ <- Loop.while TupRunit
-          (\_ -> do
-            idx <- instr $ Load scalarTypeInt Volatile idxPtr
-            A.neq singleType idx (envsTileIndex envs)
-          )
-          (\_ -> return OP_Unit)
-          OP_Unit
-
-        _ <- instr' $ Fence (CrossThread, Acquire)
-        local <- tupleLoad tp accumVar
-
-        new <-
-          -- If there is no seed, then write the output directly in the first tiles.
-          -- The other tiles must combine their result with the given operator.
-          if isNothing seed then
-            A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
-              (do
-                return local
-              )
-              (do
-                old <- tupleLoad tp valuePtrs
-                if envsDescending envs then
-                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local old
-                else
-                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
-              )
-          -- If there is a seed, then all tile will combine their local result with
-          -- the already available value.
-          else do
-            old <- tupleLoad tp valuePtrs
-            if envsDescending envs then
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local old
-            else
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
-        tupleStore tp valuePtrs new
-
-        _ <- instr' $ Fence (CrossThread, Release)
-        OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-        _ <- instr' $ Store Volatile idxPtr nextIdx
-        return ()
-  )
-  (\_ _ _ -> return ())
-  -- Code after the loop
-  (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair _ valuePtrs -> do
-        value <- tupleLoad tp valuePtrs
-        writeArray' envs output outputIdx value
-  )
-  Nothing
+  | otherwise
+  = parCodeGenScan descending True fun seed input inputIdx
+    (\_ _ -> return ())
+    (\_ _ -> return ())
+    (\_ _ -> return ())
+    (\envs result -> writeArray' envs output outputIdx result)
   where
-    memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = output
     identity
       | Just s <- seed
@@ -780,9 +722,9 @@ parCodeGenFoldCommutative descending fun seed identity input output inputIdx out
     return accumVar
   )
   -- Code before the tile loop
-  (\_ _ _ -> return ())
+  (\_ _ _ _ -> return ())
   -- Code within the tile loop
-  (\accumVar _ envs -> do
+  (\_ accumVar _ envs -> do
     x <- readArray' envs input inputIdx
     accum <- tupleLoad tp accumVar
     new <-
@@ -793,7 +735,7 @@ parCodeGenFoldCommutative descending fun seed identity input output inputIdx out
     tupleStore tp accumVar new
   )
   -- Code after the tile loop
-  (\_ _ _ -> return ())
+  (\_ _ _ _ -> return ())
   -- Code at the end of a thread
   (\accumVar ptr envs -> do
     ptrs <- tuplePtrs memoryTp ptr
@@ -842,26 +784,31 @@ parCodeGenFoldCommutative descending fun seed identity input output inputIdx out
     ArgArray _ (ArrayR _ tp) _ _ = input
 
 parCodeGenScan
-  :: Bool
+  :: Bool -- Whether the loop is descending
+  -- Whether this is a fold. Folds use similar code generation as scans, hence
+  -- it is handled here. Commutative folds are handled separately.
+  -> Bool
   -> Fun env (e -> e -> e)
   -> Maybe (Exp env e) -- Seed
   -> Arg env (In (sh, Int) e)
   -> ExpVars idxEnv (sh, Int)
   -- Code after evaluating the seed
+  -- Must be 'return ()' if the seed is Nothing
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -- Code in a tile loop, before the combination (for exclusive scans)
+  -- Must be 'return ()' if the seed is Nothing
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -- Code in a tile loop, after the combination (for inclusive scans)
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenScan descending fun Nothing input index codeSeed codePre codePost codeEnd
+parCodeGenScan descending isFold fun Nothing input index codeSeed codePre codePost codeEnd
   | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
-  = parCodeGenScan descending fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
+  = parCodeGenScan descending isFold fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-parCodeGenScan descending fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
+parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
   -- If we know an identity value, we can implement this without loop peeling
   (isNothing identity)
   -- In kernel memory, store the index of the block we must now handle and the
@@ -885,57 +832,112 @@ parCodeGenScan descending fun seed input index codeSeed codePre codePost codeEnd
   -- Initialize a thread
   (\ptr envs -> tupleAlloca tp)
   -- Code before the tile loop
-  (\accumVar _ envs -> case identity of
-    Nothing -> return ()
-    Just identity' -> do
-      value <- llvmOfExp (compileArrayInstrEnvs envs) identity'
-      tupleStore tp accumVar value
+  (\singleThreaded accumVar ptr envs ->
+    if singleThreaded then do
+      -- In the single threaded mode, we directly do a scan over this tile,
+      -- instead of the reduce, lookback and scan phases.
+      ptrs <- tuplePtrs memoryTp ptr
+      case ptrs of
+        TupRsingle _ -> internalError "Pair impossible"
+        TupRpair (TupRsingle idxPtr) valuePtrs -> do
+          prefix <- tupleLoad tp valuePtrs
+          tupleStore tp accumVar prefix
+          -- Note: on the first tile, we read an undefined value if there is no
+          -- seed. This is fine, as we don't use this value in the tile loop.
+    else
+      case identity of
+        Nothing -> return ()
+        Just identity' -> do
+          value <- llvmOfExp (compileArrayInstrEnvs envs) identity'
+          tupleStore tp accumVar value
   )
   -- Code within the tile loop
-  (\accumVar _ envs -> do
-    x <- readArray' envs input index
-    new <-
-      if isJust identity then do
+  (\singleThreaded accumVar _ envs ->
+    if singleThreaded then do
+      -- Single threaded mode. We directly perform a scan here.
+      x <- readArray' envs input index
+      if isJust seed then do
         accum <- tupleLoad tp accumVar
-        if envsDescending envs then
+        codePre envs accum
+        new <- if envsDescending envs then
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
         else
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      else
-        A.ifThenElse' (tp, envsIsFirst envs)
+        codePost envs new
+        tupleStore tp accumVar new
+      else do
+        isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
+        new <- A.ifThenElse (tp, A.land isFirstTile $ envsIsFirst envs)
           ( do
             return x
           )
           ( do
             accum <- tupleLoad tp accumVar
+            codePre envs accum
             if envsDescending envs then
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
             else
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
           )
-    tupleStore tp accumVar new
+        codePost envs new
+        tupleStore tp accumVar new
+    else do
+      -- Parallel mode.
+      -- Execute the reduce-phase of a parallel chained scan here.
+      x <- readArray' envs input index
+      new <-
+        if isJust identity then do
+          accum <- tupleLoad tp accumVar
+          if envsDescending envs then
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+          else
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+        else
+          A.ifThenElse' (tp, envsIsFirst envs)
+            ( do
+              return x
+            )
+            ( do
+              accum <- tupleLoad tp accumVar
+              if envsDescending envs then
+                app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+              else
+                app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+            )
+      tupleStore tp accumVar new
   )
   -- Code after the tile loop
-  (\accumVar ptr envs -> do
+  (\singleThreaded accumVar ptr envs -> do
     ptrs <- tuplePtrs memoryTp ptr
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair (TupRsingle idxPtr) valuePtrs -> do
-        _ <- Loop.while TupRunit
-          (\_ -> do
-            idx <- instr $ Load scalarTypeInt Volatile idxPtr
-            A.neq singleType idx (envsTileIndex envs)
-          )
-          (\_ -> return OP_Unit)
-          OP_Unit
+        if singleThreaded then
+          -- It is our turn since we are in the sequential mode,
+          -- no need to wait
+          return ()
+        else do
+          _ <- Loop.while TupRunit
+            (\_ -> do
+              idx <- instr $ Load scalarTypeInt Volatile idxPtr
+              A.neq singleType idx (envsTileIndex envs)
+            )
+            (\_ -> return OP_Unit)
+            OP_Unit
+          _ <- instr' $ Fence (CrossThread, Acquire)
+          return ()
 
-        _ <- instr' $ Fence (CrossThread, Acquire)
         local <- tupleLoad tp accumVar
 
         new <-
-          -- If there is no seed, then write the output directly in the first tiles.
-          -- The other tiles must combine their result with the given operator.
-          if isNothing seed then
+          if singleThreaded then
+            -- In the single threaded mode, 'local' is already the prefix,
+            -- as this loop starts with the prefix value of the previous
+            -- thread. We can directly write that to kernel memory.
+            return local
+          else if isNothing seed then
+            -- If there is no seed, then write the output directly in the first tiles.
+            -- The other tiles must combine their result with the given operator.
             A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
               (do
                 return local
@@ -977,34 +979,37 @@ parCodeGenScan descending fun seed input index codeSeed codePre codePost codeEnd
   -- In the next tile loop, we prefer loop peeling iff there is no seed.
   -- In the first iteration, the first tile loop will then start without a prefix value,
   -- and we thus should do loop peeling there.
-  (Just (isNothing seed, \accumVar ptr envs -> do
-    x <- readArray' envs input index
-    if isJust seed then do
-      accum <- tupleLoad tp accumVar
-      codePre envs accum
-      new <- if envsDescending envs then
-        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-      else
-        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      codePost envs new
-      tupleStore tp accumVar new
-    else do
-      isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
-      new <- A.ifThenElse (tp, A.land isFirstTile $ envsIsFirst envs)
-        ( do
-          return x
-        )
-        ( do
-          accum <- tupleLoad tp accumVar
-          codePre envs accum
-          if envsDescending envs then
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-        )
-      codePost envs new
-      tupleStore tp accumVar new
-  ))
+  -- Not executed when this tile is executed in the sequential mode.
+  (if isFold then Nothing else
+    Just (isNothing seed, \accumVar ptr envs -> do
+      x <- readArray' envs input index
+      if isJust seed then do
+        accum <- tupleLoad tp accumVar
+        codePre envs accum
+        new <- if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+        codePost envs new
+        tupleStore tp accumVar new
+      else do
+        isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
+        new <- A.ifThenElse (tp, A.land isFirstTile $ envsIsFirst envs)
+          ( do
+            return x
+          )
+          ( do
+            accum <- tupleLoad tp accumVar
+            codePre envs accum
+            if envsDescending envs then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+          )
+        codePost envs new
+        tupleStore tp accumVar new
+    )
+  )
   where
     memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input

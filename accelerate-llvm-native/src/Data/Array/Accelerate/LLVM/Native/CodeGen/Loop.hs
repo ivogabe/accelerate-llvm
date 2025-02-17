@@ -209,12 +209,13 @@ iterFromTo
 iterFromTo tp start end seed body =
   Loop.iterFromStepTo tp start (liftInt 1) end seed body
 
+-- TODO: Remove activitiesSlot
 workassistLoop
     :: Operand (Ptr Word32)                 -- index into work
     -> Operand Word32                       -- index of the first block to work on
     -> Operand (Ptr Word64)                 -- number of threads that are working
     -> Operand Word32                       -- size of total work
-    -> (Operand Word32 -> CodeGen Native ())
+    -> (Operand Bool -> Operand Word32 -> CodeGen Native ())
     -> CodeGen Native ()
 workassistLoop counter firstIndex activitiesSlot size doWork = do
   entry    <- getBlock
@@ -224,22 +225,33 @@ workassistLoop counter firstIndex activitiesSlot size doWork = do
   finished <- newBlock "workassist.finished"
 
   initialCondition <- lt singleType (OP_Word32 firstIndex) (OP_Word32 size)
+  initialSeq <- eq singleType (OP_Word32 firstIndex) (liftWord32 0)
   _ <- cbr initialCondition work exit
 
   _ <- setBlock work
   let indexName = "block_index"
+  -- Whether the thread should operate in the single threaded mode of
+  -- zero-overhead parallel scans.
+  let seqName = "sequential_mode"
+  let seqMode = LocalReference type' seqName
   let index = LocalReference type' indexName
 
-  doWork index
+  doWork seqMode index
 
   nextIndex <- atomicAdd Monotonic counter (integral TypeWord32 1)
   condition <- lt singleType (OP_Word32 nextIndex) (OP_Word32 size)
+  indexPlusOne <- add numType (OP_Word32 index) (liftWord32 1)
+  nextSeq' <- eq singleType indexPlusOne (OP_Word32 nextIndex)
+  -- Continue in sequential mode if the newly claimed block directly follows
+  -- the previous block, and we were still in the sequential mode.
+  nextSeq <- land nextSeq' (OP_Bool seqMode)
 
   -- Append the phi node to the start of the 'work' block.
   -- We can only do this now, as we need to have 'nextIndex', and know the
   -- exit block of 'doWork'.
   currentBlock <- getBlock
   phi1 work indexName [(firstIndex, entry), (nextIndex, currentBlock)]
+  phi1 work seqName [(op BoolPrimType initialSeq, entry), (op BoolPrimType nextSeq, currentBlock)]
 
   cbr condition work exit
 
@@ -336,7 +348,7 @@ workassistChunked shr counter firstIndex activitiesSlot chunkSz' sh doWork = do
   chunkCounts <- chunkCount shr sh chunkSz
   chunkCnt <- shapeSize shr chunkCounts
   chunkCnt' :: Operand Word32 <- instr' $ Trunc boundedType boundedType $ op TypeInt chunkCnt
-  workassistLoop counter firstIndex activitiesSlot chunkCnt' $ \chunkLinearIndex -> do
+  workassistLoop counter firstIndex activitiesSlot chunkCnt' $ \_ chunkLinearIndex -> do
     chunkLinearIndex' <- instr' $ Ext boundedType boundedType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex

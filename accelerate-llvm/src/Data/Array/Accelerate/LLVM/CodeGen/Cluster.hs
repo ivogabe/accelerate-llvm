@@ -259,9 +259,9 @@ parCodeGens' g depth = \case
           ( ParLoopCodeGen False TupRunit
             (\_ _ -> return ())
             (\_ _ -> return ())
-            (\_ _ _ -> return ())
-            (\_ _ _ -> return ())
-            (\_ _ _ -> return ())
+            (\_ _ _ _ -> return ())
+            (\_ _ _ _ -> return ())
+            (\_ _ _ _ -> return ())
             (\_ _ _ -> return ())
             (\_ envs -> code envs)
             Nothing
@@ -272,9 +272,9 @@ parCodeGens' g depth = \case
           ( ParLoopCodeGen False TupRunit
             (\_ _ -> return ())
             (\_ _ -> return ())
-            (\_ _ _ -> return ())
-            (\_ _ envs -> code envs)
-            (\_ _ _ -> return ())
+            (\_ _ _ _ -> return ())
+            (\_ _ _ envs -> code envs)
+            (\_ _ _ _ -> return ())
             (\_ _ _ -> return ())
             (\_ _ -> return ())
             Nothing
@@ -358,12 +358,14 @@ data ParLoopCodeGen target env idxEnv kernelMemory where
     -> (Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -- Initialize a thread for the current row.
     -> (Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target a)
-    -- Code before a tile loop
-    -> (a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
+    -- Code before a tile loop. Bool denotes whether we generate code for the
+    -- single threaded mode of zero overhead parallel scans.
+    -- See https://dl.acm.org/doi/abs/10.1145/3649169.3649248
+    -> (Bool -> a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -- Code within the tile loop
-    -> (a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
+    -> (Bool -> a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -- Code after the tile loop
-    -> (a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
+    -> (Bool -> a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -- Code when the thread stops working on this row.
     -> (a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -- Code after a row, *executed once*, by only one thread, per row
@@ -456,6 +458,8 @@ data ParTileLoops target op env idxEnv where
   ParTileLoops ::
     { ptFirstLoop  :: ParTileLoop target op env idxEnv
     , ptOtherLoops :: [ParTileLoop target op env idxEnv]
+    -- Loop for the single threaded mode
+    , ptSingleThreaded :: ParTileLoop target op env idxEnv
     -- Code when the thread stops working on this row.
     , ptExit       :: (Envs env idxEnv -> CodeGen target ())
     } -> ParTileLoops target op env idxEnv
@@ -472,7 +476,7 @@ genParallel
 genParallel ptr envs tupleIdx = \case
   ParGenNil ->
     return
-      ( ParTileLoops emptyParTileLoop [] (\_ -> return ()) )
+      ( ParTileLoops emptyParTileLoop [] emptyParTileLoop (\_ -> return ()) )
 
   ParGenBind d lhs expr next
     | depth == d -> do
@@ -480,19 +484,21 @@ genParallel ptr envs tupleIdx = \case
       let envs' = envs{
           envsIdx = envsIdx envs `pushIdxEnv` (lhs, value)
         }
-      ParTileLoops loop loops exit <- genParallel ptr envs' tupleIdx next
+      ParTileLoops loop loops loopSeq exit <- genParallel ptr envs' tupleIdx next
       return $ ParTileLoops
           (loopExtendedEnv d lhs value loop)
           (map (loopExtendedEnv d lhs value) loops)
+          (loopExtendedEnv d lhs value loopSeq)
           (withExtendedEnv lhs value exit)
     | otherwise -> do
       let envs' = envs{
             envsIdx = partialEnvSkipLHS lhs $ envsIdx envs
           }
-      ParTileLoops loop loops exit <- genParallel ptr envs' tupleIdx next
+      ParTileLoops loop loops loopSeq exit <- genParallel ptr envs' tupleIdx next
       return $ ParTileLoops
           (loopSkippedEnv d lhs expr loop)
           (map (loopSkippedEnv d lhs expr) loops)
+          (loopSkippedEnv d lhs expr loopSeq)
           (withSkippedEnv lhs exit)
 
   ParGenPar (ParLoopCodeGen peel tp _ init before body after exit _ nextLoop) next -> do
@@ -501,14 +507,19 @@ genParallel ptr envs tupleIdx = \case
     -- Initialize the thread state of this operation (type variable 'a' in ParLoopCodeGen)
     a <- init thisPtr envs
     -- Initialize later operations
-    ParTileLoops loop loops exitNext <- genParallel ptr envs (tupleRight tupleIdx) next
+    ParTileLoops loop loops loopSeq exitNext <- genParallel ptr envs (tupleRight tupleIdx) next
     -- Construct data structures describing the code generation of the tile loops
     -- Include this operation in the first tile loop
     let loop' = ParTileLoop
           (peel || ptPeel loop)
-          (\e -> before a thisPtr e >> ptBefore loop e)
-          (GenOp (depth + 1) (OpCodeGenSingle $ body a thisPtr) $ ptIn loop)
-          (\e -> after a thisPtr e >> ptAfter loop e)
+          (\e -> before False a thisPtr e >> ptBefore loop e)
+          (GenOp (depth + 1) (OpCodeGenSingle $ body False a thisPtr) $ ptIn loop)
+          (\e -> after False a thisPtr e >> ptAfter loop e)
+    let loopSeq' = ParTileLoop
+          (peel || ptPeel loopSeq)
+          (\e -> before True a thisPtr e >> ptBefore loopSeq e)
+          (GenOp (depth + 1) (OpCodeGenSingle $ body True a thisPtr) $ ptIn loopSeq)
+          (\e -> after True a thisPtr e >> ptAfter loopSeq e)
     let exit' = \e -> exit a thisPtr e >> exitNext e
     let loops' = case nextLoop of
           Nothing -> loops
@@ -519,17 +530,22 @@ genParallel ptr envs tupleIdx = \case
                 ptIn = GenOp (depth + 1) (OpCodeGenSingle $ n a thisPtr) $ ptIn l
               } : ls
             _ -> internalError "Operations wants to emit code in next tile loop, but there is no next tile loop. Is there a ParGenTileLoopBoundary missing or misplaced?"
-    return $ ParTileLoops loop' loops' exit'
+    return $ ParTileLoops loop' loops' loopSeq' exit'
   ParGenDeeper d opC next -> do
-    ParTileLoops loop loops exit <- genParallel ptr envs tupleIdx next
+    ParTileLoops loop loops loopSeq exit <- genParallel ptr envs tupleIdx next
     let loop' = loop{
         ptIn = GenOp d opC $ ptIn loop
       }
-    return $ ParTileLoops loop' loops exit
+    let loopSeq' = loopSeq{
+        ptIn = GenOp d opC $ ptIn loop
+      }
+    return $ ParTileLoops loop' loops loopSeq' exit
   ParGenTileLoopBoundary next -> do
     -- Start a new empty tile loop
-    ParTileLoops loop loops exit <- genParallel ptr envs tupleIdx next
-    return $ ParTileLoops emptyParTileLoop (loop : loops) exit
+    ParTileLoops loop loops loopSeq exit <- genParallel ptr envs tupleIdx next
+    -- loopSeq, the loop for the single threaded mode of zero overhead
+    -- parallel scans, does not need multiple tile loops.
+    return $ ParTileLoops emptyParTileLoop (loop : loops) loopSeq exit
   where
     depth = envsLoopDepth envs
 
