@@ -33,11 +33,12 @@ module Data.Array.Accelerate.LLVM.CodeGen.Monad (
   newBlock, newBlockNamed, setBlock, getBlock, beginBlock, createBlocks,
 
   -- instructions
-  instr, instr', do_, return_, retval_, br, cbr, switch, phi, phi', phi1,
+  instr, instr', instrMD, instrMD', do_, return_, retval_, br, cbr, switch,
+  phi, phi', phi1,
   instr_,
 
   -- metadata
-  addMetadata,
+  addNamedMetadata, addMetadata,
 
 ) where
 
@@ -96,7 +97,8 @@ data CodeGenState = CodeGenState
   { blockChain          :: Seq Block                                      -- blocks for this function
   , symbolTable         :: HashMap Label LLVM.Global                      -- global (external) function declarations
   , typedefTable        :: HashMap Label (Maybe LLVM.Type)                -- global type definitions
-  , metadataTable       :: HashMap ShortByteString (Seq [Maybe Metadata]) -- module metadata to be collected
+  , namedMetadataTable  :: HashMap ShortByteString (Seq [Maybe Metadata]) -- module metadata to be collected
+  , metadataTable       :: Seq [Maybe Metadata]                           -- module metadata with numbers as keys
   , intrinsicTable      :: HashMap ShortByteString Label                  -- standard math intrinsic functions
   , local               :: {-# UNPACK #-} !Word                           -- a name supply
   , global              :: {-# UNPACK #-} !Word                           -- a name supply for global variables
@@ -137,20 +139,22 @@ codeGenFunction name returnTp bind body = do
       pure (a, blocks)
     )
     $ CodeGenState
-        { blockChain        = initBlockChain
-        , symbolTable       = HashMap.empty
-        , typedefTable      = HashMap.empty
-        , metadataTable     = HashMap.empty
-        , intrinsicTable    = intrinsicForTarget @arch
-        , local             = 0
-        , global            = 0
-        , blocksAllocated   = 0
+        { blockChain         = initBlockChain
+        , symbolTable        = HashMap.empty
+        , typedefTable       = HashMap.empty
+        , namedMetadataTable = HashMap.empty
+        , metadataTable      = Seq.Empty
+        , intrinsicTable     = intrinsicForTarget @arch
+        , local              = 0
+        , global             = 0
+        , blocksAllocated    = 0
         }
-  
+
   let
     typeDefs = map (\(n,t) -> LLVM.TypeDefinition (downcast n) t) $ HashMap.toList $ typedefTable st
     symbols = map LLVM.GlobalDefinition $ HashMap.elems $ symbolTable st
-    metadata = createMetadata $ metadataTable st
+    metadata = createMetadata (metadataTable st)
+      ++ createNamedMetadata (Seq.length $ metadataTable st) (namedMetadataTable st)
 
   return 
     ( a
@@ -288,16 +292,23 @@ instr :: HasCallStack => Instruction a -> CodeGen arch (Operands a)
 instr ins = ir (typeOf ins) <$> instr' ins
 
 instr' :: HasCallStack => Instruction a -> CodeGen arch (Operand a)
-instr' ins =
+instr' ins = instrMD' ins []
+
+-- | The MD variants of instr and instr' also take metadata of the instruction.
+instrMD :: HasCallStack => Instruction a -> LLVM.InstructionMetadata -> CodeGen arch (Operands a)
+instrMD ins md = ir (typeOf ins) <$> instrMD' ins md
+
+instrMD' :: HasCallStack => Instruction a -> LLVM.InstructionMetadata -> CodeGen arch (Operand a)
+instrMD' ins md =
   -- LLVM-5 does not allow instructions of type void to have a name.
   case typeOf ins of
     VoidType -> do
-      do_ ins
+      instr_ $ LLVM.Do $ downcastInstruction ins md
       return $ LocalReference VoidType (Name B.empty)
     --
     ty -> do
       name <- freshLocalName
-      instr_ $ downcast (name := ins)
+      instr_ $ downcast name LLVM.:= downcastInstruction ins md
       return $ LocalReference ty name
 
 -- | Execute an unnamed instruction
@@ -437,10 +448,16 @@ intrinsic key =
 
 -- | Insert a metadata key/value pair into the current module.
 --
-addMetadata :: ShortByteString -> [Maybe Metadata] -> CodeGen arch ()
-addMetadata key val =
+addNamedMetadata :: ShortByteString -> [Maybe Metadata] -> CodeGen arch ()
+addNamedMetadata key val =
   modify $ \s ->
-    s { metadataTable = HashMap.insertWith (flip (Seq.><)) key (Seq.singleton val) (metadataTable s) }
+    s { namedMetadataTable = HashMap.insertWith (flip (Seq.><)) key (Seq.singleton val) (namedMetadataTable s) }
+
+addMetadata :: (LLVM.MetadataNodeID -> [Maybe Metadata]) -> CodeGen arch LLVM.MetadataNodeID
+addMetadata val =
+  state $ \s ->
+    let index = LLVM.MetadataNodeID $ fromIntegral $ Seq.length $ metadataTable s
+    in (index, s{ metadataTable = metadataTable s Seq.:|> val index })
 
 
 -- | Generate the metadata definitions for the file. Every key in the map
@@ -448,15 +465,15 @@ addMetadata key val =
 -- represent the metadata node definitions that will be attached to that
 -- definition.
 --
-createMetadata :: HashMap ShortByteString (Seq [Maybe Metadata]) -> [LLVM.Definition]
-createMetadata md = go (HashMap.toList md) (Seq.empty, Seq.empty)
+createNamedMetadata :: Int -> HashMap ShortByteString (Seq [Maybe Metadata]) -> [LLVM.Definition]
+createNamedMetadata offset md = go (HashMap.toList md) (Seq.empty, Seq.empty)
   where
     go :: [(ShortByteString, Seq [Maybe Metadata])]
        -> (Seq LLVM.Definition, Seq LLVM.Definition) -- accumulator of (names, metadata)
        -> [LLVM.Definition]
     go []     (k,d) = F.toList (k Seq.>< d)
     go (x:xs) (k,d) =
-      let (k',d') = meta (Seq.length d) x
+      let (k',d') = meta (offset + Seq.length d) x
       in  go xs (k Seq.|> k', d Seq.>< d')
 
     meta :: Int                                         -- number of metadata node definitions so far
@@ -468,6 +485,12 @@ createMetadata md = go (HashMap.toList md) (Seq.empty, Seq.empty)
             name        = LLVM.NamedMetadataDefinition key [ node i | i <- [0 .. Seq.length vals - 1] ]
         in
         (name, nodes)
+
+createMetadata :: Seq [Maybe Metadata] -> [LLVM.Definition]
+createMetadata md = zipWith convert [0..] $ F.toList md
+  where
+    convert :: Word -> [Maybe Metadata] -> LLVM.Definition
+    convert idx vals = LLVM.MetadataNodeDefinition (LLVM.MetadataNodeID idx) (downcast vals)
 
 
 -- Debug

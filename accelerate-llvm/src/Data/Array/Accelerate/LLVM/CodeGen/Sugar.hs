@@ -1,7 +1,8 @@
-{-# LANGUAGE GADTs           #-}
-{-# LANGUAGE RankNTypes      #-}
-{-# LANGUAGE RoleAnnotations #-}
-{-# LANGUAGE TypeFamilies    #-}
+{-# LANGUAGE GADTs             #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes        #-}
+{-# LANGUAGE RoleAnnotations   #-}
+{-# LANGUAGE TypeFamilies      #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.CodeGen.Sugar
@@ -18,7 +19,9 @@ module Data.Array.Accelerate.LLVM.CodeGen.Sugar (
   IRExp, MIRExp, IRFun1, IRFun2,
   IROpenExp, IROpenFun1(..), IROpenFun2(..),
 
-  IRBuffer(..), IRBufferScope(..)
+  IRBuffer(..), IRBufferScope(..),
+
+  bufferMetadata, bufferMetadata'
 
 ) where
 
@@ -26,6 +29,7 @@ import Data.Array.Accelerate.Array.Buffer
 import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Operand
+import qualified LLVM.AST                                    as LLVM
 import Foreign.Ptr
 
 import Data.Array.Accelerate.LLVM.CodeGen.IR
@@ -67,6 +71,9 @@ data IRBuffer e
       -- fused-away buffer), a tile (a block of a fused-away buffer in a kernel
       -- containing a chained scan) or a regular manifest array.
       IRBufferScope
+      -- If we have metadata for alias annotation, this field stores
+      -- the alias.scope list and noalias list.
+      (Maybe (LLVM.MetadataNodeID, LLVM.MetadataNodeID))
 
 data IRBufferScope
   -- The pointer of the buffer refers to a single value.
@@ -85,3 +92,11 @@ data IRBufferScope
   -- The pointer should be incremented by the (absolute) linear index of the
   -- element.
   | IRBufferScopeArray
+
+bufferMetadata :: IRBuffer e -> LLVM.InstructionMetadata
+bufferMetadata (IRBuffer _ _ _ _ a) = bufferMetadata' a
+
+bufferMetadata' :: Maybe (LLVM.MetadataNodeID, LLVM.MetadataNodeID) -> LLVM.InstructionMetadata
+bufferMetadata' (Just (aliasscope, noalias))
+  = [("alias.scope", LLVM.MDRef aliasscope), ("noalias", LLVM.MDRef noalias)]
+bufferMetadata' _ = [("noalias", LLVM.MDRef $ LLVM.MetadataNodeID 1)]

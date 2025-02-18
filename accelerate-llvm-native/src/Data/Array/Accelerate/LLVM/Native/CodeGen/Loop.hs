@@ -391,10 +391,10 @@ chunkSizeOne (ShapeRsnoc sh) = (chunkSizeOne sh, 1)
 
 chunkSize :: ShapeR sh -> sh
 chunkSize ShapeRz = ()
-chunkSize (ShapeRsnoc ShapeRz) = ((), 1024 * 4)
-chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 64), 64)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 8), 8), 64)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((chunkSizeOne sh, 4), 4), 4), 64)
+chunkSize (ShapeRsnoc ShapeRz) = ((), 1024 * 8)
+chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 64), 128)
+chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 8), 16), 64)
+chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((chunkSizeOne sh, 4), 4), 8), 64)
 
 chunkCount :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen Native (Operands sh)
 chunkCount ShapeRz OP_Unit OP_Unit = return OP_Unit

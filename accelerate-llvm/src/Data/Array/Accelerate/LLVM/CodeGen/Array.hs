@@ -37,6 +37,7 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
+import qualified LLVM.AST                                           as LLVM
 
 import Data.Array.Accelerate.AST.Environment
 import Data.Array.Accelerate.AST.Var
@@ -108,17 +109,15 @@ readBuffer
     -> Operand int
     -> Maybe (Operand Int) -- Index within a tile, if in a tile loop
     -> CodeGen arch (Operand e)
-readBuffer e i (IRBuffer buffer a v IRBufferScopeArray) ix _ = do
+readBuffer e i (IRBuffer buffer a v IRBufferScopeArray alias) ix _ = do
   p <- getElementPtr a e i buffer ix
-  load a e v p
-readBuffer e i (IRBuffer buffer a v IRBufferScopeSingle) _ _ = do
+  load a e v p alias
+readBuffer e i (IRBuffer buffer a v IRBufferScopeSingle alias) _ _ = do
   p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
-  x <- load a e v p
-  return x
-readBuffer e i (IRBuffer buffer a v IRBufferScopeTile) _ (Just localIx) = do
+  load a e v p alias
+readBuffer e i (IRBuffer buffer a v IRBufferScopeTile alias) _ (Just localIx) = do
   p <- getElementPtr a e TypeInt buffer localIx
-  x <- load a e v p
-  return x
+  load a e v p alias
 readBuffer _ _ _ _ _ = internalError "Cannot read from buffer in Tile scope"
 
 -- | Write a value into an array at the given index
@@ -209,17 +208,17 @@ writeBuffer
     -> Maybe (Operand Int) -- The local index within a tile, if in a tile loop
     -> Operand e
     -> CodeGen arch ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeArray) ix _ x = do
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeArray alias) ix _ x = do
   p <- getElementPtr a e i buffer ix
-  _ <- store a v e p x
+  _ <- store a v e p x alias
   return ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeSingle) ix _ x = do
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeSingle alias) ix _ x = do
   p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
-  _ <- store a v e p x
+  _ <- store a v e p x alias
   return ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeTile) _ (Just localIx) x = do
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeTile alias) _ (Just localIx) x = do
   p <- getElementPtr a e TypeInt buffer localIx
-  _ <- store a v e p x
+  _ <- store a v e p x alias
   return ()
 writeBuffer _ _ _ _ _ _ = internalError "Cannot write to buffer in Tile scope"
 
@@ -279,9 +278,10 @@ load :: AddrSpace
      -> ScalarType e
      -> Volatility
      -> Operand (Ptr e)
+     -> Maybe (LLVM.MetadataNodeID, LLVM.MetadataNodeID)
      -> CodeGen arch (Operand e)
-load addrspace e v p
-  | SingleScalarType{} <- e = instr' $ Load e v p
+load addrspace e v p alias
+  | SingleScalarType{} <- e = instrMD' (Load e v p) (bufferMetadata' alias)
   | VectorScalarType s <- e
   , VectorType n base  <- s
   , m                  <- fromIntegral n
@@ -294,7 +294,7 @@ load addrspace e v p
                | i >= m    = return w
                | otherwise = do
                    q  <- instr' $ GetElementPtr (SingleScalarType base) p' [integral integralType i]
-                   r  <- instr' $ Load (SingleScalarType base) v q
+                   r  <- instrMD' (Load (SingleScalarType base) v q) (bufferMetadata' alias)
                    w' <- instr' $ InsertElement i w r
                    go (i+1) w'
          --
@@ -311,9 +311,12 @@ store :: AddrSpace
       -> ScalarType e
       -> Operand (Ptr e)
       -> Operand e
+      -> Maybe (LLVM.MetadataNodeID, LLVM.MetadataNodeID)
       -> CodeGen arch ()
-store addrspace volatility e p v
-  | SingleScalarType{} <- e = do_ $ Store volatility p v
+store addrspace volatility e p v alias
+  | SingleScalarType{} <- e = do
+    _ <- instrMD' (Store volatility p v) (bufferMetadata' alias)
+    return ()
   | VectorScalarType s <- e
   , VectorType n base  <- s
   , m                  <- fromIntegral n
@@ -327,7 +330,7 @@ store addrspace volatility e p v
                | otherwise = do
                    x <- instr' $ ExtractElement i v
                    q <- instr' $ GetElementPtr (SingleScalarType base) p' [integral integralType i]
-                   _ <- instr' $ Store volatility q x
+                   _ <- instrMD' (Store volatility q x) (bufferMetadata' alias)
                    go (i+1)
          go 0
 

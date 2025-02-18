@@ -26,6 +26,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Cluster
   -- Parallel code generation
   , ParCodeGens(..), ParLoopCodeGen(..)
   , parCodeGens, parCodeGenMemory, parCodeGenInitMemory, parCodeGenFinish
+  , parCodeGenHasMultipleTileLoops
   , genParallel
   , ParTileLoop(..), ParTileLoops(..)
   -- Utilities
@@ -385,6 +386,14 @@ parCodeGenMemory (ParGenTileLoopBoundary next) = parCodeGenMemory next
 parCodeGenMemory (ParGenPar par next)
   | ParLoopCodeGen _ tp _ _ _ _ _ _ _ _ <- par
   = TupRsingle (StructPrimType False tp) `TupRpair` parCodeGenMemory next
+
+parCodeGenHasMultipleTileLoops :: ParCodeGens target op env idxEnv kernelMemory -> Bool
+parCodeGenHasMultipleTileLoops = \case
+  ParGenNil -> False
+  ParGenTileLoopBoundary _ -> True
+  ParGenBind _ _ _ next -> parCodeGenHasMultipleTileLoops next
+  ParGenPar _ next -> parCodeGenHasMultipleTileLoops next
+  ParGenDeeper _ _ next -> parCodeGenHasMultipleTileLoops next
 
 parCodeGenInitMemory
   :: Operand (Ptr (Struct memoryFull))

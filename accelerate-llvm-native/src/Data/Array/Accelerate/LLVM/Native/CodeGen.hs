@@ -134,7 +134,18 @@ codegen name env cluster args
       case parCodeGens (parCodeGen $ isDescending direction) 0 $ opCodeGens opCodeGen flatOps of
         Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
         Just (Exists parCodes) -> do
-          let tileSize = if rank shr > 1 then 32 else 1024 * 4 -- TODO: Implement a better heuristic to choose the tile size
+          let hasScan = parCodeGenHasMultipleTileLoops parCodes
+          let tileSize =
+                if rank shr > 1 then
+                  32
+                else if hasScan then
+                  -- We need to choose a tile size such that the values in the
+                  -- first tile loop (the reduce step of the chained scan) are
+                  -- still in the cache during the second tile loop (the scan
+                  -- step of the chained scan).
+                  1024 * 4
+                else
+                  1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
           -- Number of tiles
           sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)

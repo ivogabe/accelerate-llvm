@@ -316,7 +316,7 @@ atomically
 atomically gamma (ArgArray Mut (ArrayR shr _) sh (TupRsingle (Var _ bufidx))) i action = 
   case prj' bufidx gamma of
     GroundOperandParam _ -> error "impossible"
-    GroundOperandBuffer (IRBuffer bufptr _ _ IRBufferScopeArray) -> do
+    GroundOperandBuffer irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) -> do
       let
           lock      = integral integralType 1
           unlock    = integral integralType 0
@@ -333,7 +333,7 @@ atomically gamma (ArgArray Mut (ArrayR shr _) sh (TupRsingle (Var _ bufidx))) i 
       -- was unlocked we just acquired it, otherwise the state remains unchanged and
       -- we spin until it becomes available.
       setBlock spin
-      old  <- instr $ AtomicRMW numType NonVolatile Exchange addr lock   (CrossThread, Acquire)
+      old  <- instrMD (AtomicRMW numType NonVolatile Exchange addr lock   (CrossThread, Acquire)) (bufferMetadata irbuffer)
       ok   <- A.eq singleType old unlocked
       _    <- cbr ok crit spin
 
@@ -343,9 +343,9 @@ atomically gamma (ArgArray Mut (ArrayR shr _) sh (TupRsingle (Var _ bufidx))) i 
       -- rules.
       setBlock crit
       r    <- action
-      _    <- instr $ AtomicRMW numType NonVolatile Exchange addr unlock (CrossThread, Release)
+      _    <- instrMD (AtomicRMW numType NonVolatile Exchange addr unlock (CrossThread, Release)) (bufferMetadata irbuffer)
       _    <- br exit
 
       setBlock exit
       return r
-    GroundOperandBuffer (IRBuffer _ _ _ _) -> error "Expected IRBufferScopeArray"
+    GroundOperandBuffer (IRBuffer _ _ _ _ _) -> error "Expected IRBufferScopeArray"

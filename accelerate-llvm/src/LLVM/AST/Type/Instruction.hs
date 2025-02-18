@@ -424,7 +424,10 @@ data Named ins a where
 -- | Convert to llvm-hs
 --
 instance Downcast (Instruction a) LLVM.Instruction where
-  downcast = \case
+  downcast instruction = downcastInstruction instruction []
+
+downcastInstruction :: Instruction a -> LLVM.InstructionMetadata -> LLVM.Instruction
+downcastInstruction instruction md = case instruction of
     Add t x y             -> add t (downcast x) (downcast y)
     Sub t x y             -> sub t (downcast x) (downcast y)
     Mul t x y             -> mul t (downcast x) (downcast y)
@@ -546,9 +549,6 @@ instance Downcast (Instruction a) LLVM.Instruction where
       atomicRMW volatile rmwOperation address value atomicity' metadata =
         LLVM.AtomicRMW volatile rmwOperation address value atomicity' metadata
 #endif
-
-      md :: LLVM.InstructionMetadata
-      md = []
 
       constant :: IsScalar a => a -> LLVM.Operand
       constant x = downcast (ConstantOperand (ScalarConstant scalarType x))

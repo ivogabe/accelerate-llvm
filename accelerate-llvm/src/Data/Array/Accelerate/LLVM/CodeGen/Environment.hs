@@ -27,7 +27,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Environment
   , MarshalArg, MarshalFun, MarshalFun', MarshalEnv
   , marshalScalarArg
   -- , scalarParameter, ptrParameter
-  , bindParameters, bindEnv, envType
+  , bindEnv, envType
   , Envs(..), initEnv, bindLocals, bindLocalsInTile
   , envsGamma, envsPrjBuffer, envsPrjParameter
   , envsPrjParameters, envsPrjSh, envsPrjIndex, envsPrjIndices
@@ -39,7 +39,7 @@ import Data.String
 
 import Data.Array.Accelerate.AST.Environment                    hiding ( Val, prj )
 import Data.Array.Accelerate.AST.Operation
-import Data.Array.Accelerate.AST.Partitioned
+import Data.Array.Accelerate.AST.Partitioned                    hiding ( Label )
 import Data.Array.Accelerate.AST.Idx                            ( Idx )
 import Data.Array.Accelerate.Error                              ( internalError )
 import Data.Array.Accelerate.Array.Buffer
@@ -49,6 +49,7 @@ import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Type
 
+import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
@@ -60,13 +61,18 @@ import LLVM.AST.Type.Function                                   as LLVM
 import LLVM.AST.Type.Global
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
+import LLVM.AST.Type.Metadata
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
+import qualified LLVM.AST.ParameterAttribute as ParameterAttribute
+import qualified LLVM.AST.Operand as LLVM
 
 import GHC.Stack
 import Data.Typeable
 import Data.Foldable
+import Data.ByteString.Short                                    ( ShortByteString(..) )
+import Control.Monad
 
 data Envs env idxEnv = Envs
   -- The current loop depth
@@ -153,7 +159,7 @@ bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
         -- Introduce a new mutable variable on the stack
         ptr <- instr' $ Alloca $ ScalarPrimType tp
         ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
-        let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle
+        let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
 bindLocalsInTile :: LoopDepth -> Int -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
@@ -167,7 +173,7 @@ bindLocalsInTile depth tileSize = \envs -> foldlM go envs $ envsLocal envs
         -- Introduce a new mutable variable on the stack
         ptr <- instr' $ Alloca $ ArrayPrimType (fromIntegral tileSize) (ScalarPrimType tp)
         ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
-        let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeTile
+        let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeTile Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
 envsGamma :: HasCallStack => Envs env idxEnv -> Gamma env
@@ -312,23 +318,58 @@ bindEnv
      , Gamma env
      )
 bindEnv environment =
-  let (gen, gamma, _, _) = go id environment in (envTp, gen, gamma)
+  let (gen, gamma, _, _, mutOutCount) = go id environment
+  in
+    ( envTp
+    , do
+      -- Declare domain for alias annotations
+      domain <- addMetadata (\d -> [Just $ MetadataNodeOperand $ MetadataNodeReference d])
+      when (domain /= LLVM.MetadataNodeID 0) $
+        internalError "bindEnv assumes this is the first place where metadata nodes are created"
+
+      -- The metadata nodes are introduced as follows:
+      -- 0 is the domain
+      -- 1 is the list with all scopes we define here
+      -- 2 is the scope for all inputs (which share one domain)
+      -- 3 is the list containing only the scope for all inputs (i.e. the alias.scope)
+      -- 4 is the list containing all scopes but the input scope (i.e. the noalias)
+      -- 5 + 3 * k is the scope of the kth Out or Mut buffer
+      -- 6 + 3 * k is the list containing only this scope
+      -- 7 + 3 * k is the list containing all other scopes,
+      --   i.e. the noalias list of the kth Out or Mut buffer
+      
+      let allScopes = [ LLVM.MetadataNodeID (2 + 3 * fromIntegral k) | k <- [0 .. mutOutCount + 1] ]
+      _ <- addMetadata (\_ -> map (Just . MetadataNodeOperand . MetadataNodeReference) allScopes)
+      forM_ allScopes $ \scope -> do
+        -- scope
+        scope' <- addMetadata (\s -> [Just $ MetadataNodeOperand $ MetadataNodeReference s, Just $ MetadataNodeOperand $ MetadataNodeReference domain])
+        when (scope /= scope') $
+          internalError "Index of scope does not match"
+        -- alias.scope
+        _ <- addMetadata (\_ -> [Just $ MetadataNodeOperand $ MetadataNodeReference scope])
+        -- noalias list
+        _ <- addMetadata (\_ -> map (Just . MetadataNodeOperand . MetadataNodeReference) $ filter (/= scope) allScopes)
+        return ()
+
+      gen
+    , gamma)
   where
     envTp = StructPrimType False $ envType environment
     operandEnv = LocalReference (PrimType (PtrPrimType envTp defaultAddrSpace)) "env"
     go :: (forall t. TupleIdx (MarshalEnv env') t -> TupleIdx (MarshalEnv env) t)
        -> Env AccessGroundR env'
-       -> ( CodeGen arch ()
+       -> ( CodeGen arch () -- Gets names of scopes as argument
           , Gamma env'
           , Int -- Next fresh scalar variable index
           , Int -- Next fresh buffer variable index
+          , Int -- Next fresh index for an Out or Mut argument (i.e. the number of Out and Mut arguments so far)
           )
-    go _ Empty = (return (), Empty, 0, 0)
+    go _ Empty = (return (), Empty, 0, 0, 0)
     go toTupleIdx (Push env (AccessGroundRscalar tp))
       | Refl <- marshalScalarArg tp = 
         ( instr_ (downcast $
             namePtr := GetStructElementPtr (ScalarPrimType tp) operandEnv (toTupleIdx $ TupleIdxRight TupleIdxSelf)
-          ) 
+          )
           >> instr_ (downcast $
             name := Load tp NonVolatile operandPtr
           )
@@ -336,9 +377,10 @@ bindEnv environment =
         , gamma `Push` GroundOperandParam operand
         , freshScalar + 1
         , freshBuffer
+        , mutOutCount
         )
       where
-        (codegen, gamma, freshScalar, freshBuffer) = go (toTupleIdx . TupleIdxLeft) env
+        (codegen, gamma, freshScalar, freshBuffer, mutOutCount) = go (toTupleIdx . TupleIdxLeft) env
         operand = LocalReference (PrimType $ ScalarPrimType tp) name
         operandPtr = LocalReference (PrimType $ PtrPrimType (ScalarPrimType tp) defaultAddrSpace) namePtr
         name = fromString $ "param." ++ show freshScalar
@@ -350,90 +392,55 @@ bindEnv environment =
         >> instr_ (downcast $
           name := LoadPtr NonVolatile operandPtr
         )
+        >> annotation
         >> codegen
       , gamma `Push` GroundOperandBuffer irbuffer
       , freshScalar
       , freshBuffer + 1
+      , mutOutCount'
       )
       where
-        (codegen, gamma, freshScalar, freshBuffer) = go (toTupleIdx . TupleIdxLeft) env
+        (codegen, gamma, freshScalar, freshBuffer, mutOutCount) = go (toTupleIdx . TupleIdxLeft) env
         operand = LocalReference (PrimType ptrType) name
         operandPtr = LocalReference (PrimType $ PtrPrimType ptrType defaultAddrSpace) namePtr
         prefix = case m of
           In  -> "in."
           Out -> "out."
           Mut -> "mut."
-        name = fromString $ prefix ++ show freshBuffer
+        name' = prefix ++ show freshBuffer
+        name = fromString name'
         namePtr = fromString $ prefix ++ show freshBuffer ++ ".ptr"
         irbuffer :: IRBuffer t
-        irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray
+        irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray alias
         ptrType :: PrimType (MarshalArg (Buffer t))
         ptrType = case tp of
           SingleScalarType t
             | SingleArrayDict <- singleArrayDict t -> PtrPrimType (ScalarPrimType tp) defaultAddrSpace
           VectorScalarType (VectorType _ t) -> PtrPrimType (ScalarPrimType $ SingleScalarType t) defaultAddrSpace
 
-bindParameters
-  :: Env AccessGroundR env
-  -> ( Result t :~: Result (MarshalFun' env t)
-     , GlobalFunctionDefinition t -> GlobalFunctionDefinition (MarshalFun' env t)
-     , Gamma env
-     )
-bindParameters env = (eq, fun, gamma)
-  where
-    (eq, fun, gamma, _, _) = bindParameters' env
+        mutOutCount'
+          | In <- m = mutOutCount
+          | otherwise = mutOutCount + 1
 
-bindParameters'
-  :: forall env t. Env AccessGroundR env
-  -> ( Result t :~: Result (MarshalFun' env t)
-     , GlobalFunctionDefinition t -> GlobalFunctionDefinition (MarshalFun' env t)
-     , Gamma env
-     , Int -- Next fresh scalar variable index
-     , Int -- Next fresh buffer variable index
-     -- TODO: Should we have separate indices for in, mut and out buffers?
-     )
-bindParameters' Empty = (Refl, id, Empty, 0, 0)
-bindParameters' (Push env (AccessGroundRscalar tp :: AccessGroundR s))
-  | (eq, fun, gamma, nextScalar, nextBuffer) <- bindParameters' env =
-  let
-    operand = LocalReference (PrimType $ ScalarPrimType tp) name
-    name = fromString $ "param." ++ show nextScalar
+        alias
+          | In <- m = Just (LLVM.MetadataNodeID 3, LLVM.MetadataNodeID 4)
+          | otherwise = Just (LLVM.MetadataNodeID $ fromIntegral mutOutCount' * 3 + 6, LLVM.MetadataNodeID $ fromIntegral mutOutCount' * 3 + 7)
 
-    -- Not sure why, but it seems GHC gets confused if we pattern match for
-    -- 's ~ MarshalArg s' on toplevel, hence we do that nested here.
-    --
-    tp' :: ScalarType (MarshalArg s)
-    name' :: Name (MarshalArg s)
-    (tp', name')
-      | Refl <- marshalScalarArg @s tp = (tp, name)
-  in
-    ( case eq of Refl -> Refl -- Again, we need to pattern match nested
-    , \b -> fun $ LLVM.Lam (ScalarPrimType tp') name' b
-    , gamma `Push` GroundOperandParam operand
-    , nextScalar + 1
-    , nextBuffer
-    )
-bindParameters' (Push env (AccessGroundRbuffer m tp))
-  | (eq, fun, gamma, nextScalar, nextBuffer) <- bindParameters' env =
-  let
-    operand = LocalReference (PrimType ptrType) name
-    prefix = case m of
-      In  -> "in."
-      Out -> "out."
-      Mut -> "mut."
-    name = fromString $ prefix ++ show nextBuffer
-    irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray
-    ptrType = case tp of
-      SingleScalarType t
-        | SingleArrayDict <- singleArrayDict t -> PtrPrimType (ScalarPrimType tp) defaultAddrSpace
-      VectorScalarType (VectorType _ t) -> PtrPrimType (ScalarPrimType $ SingleScalarType t) defaultAddrSpace
-  in
-    ( case eq of Refl -> Refl -- Again, we need to pattern match nested
-    , \b -> fun $ LLVM.Lam ptrType name b
-    , gamma `Push` GroundOperandBuffer irbuffer
-    , nextScalar
-    , nextBuffer + 1
-    )
+        annotation :: CodeGen arch ()
+        annotation
+          | In <- m = do
+            _ <- call'
+              (lamUnnamed (primType @Int64)
+                $ lamUnnamed (primType @(Ptr Word8))
+                $ LLVM.Body (PrimType (primType @(Ptr Word8))) Nothing (Label "llvm.invariant.start.p0")) 
+              -- Note: we use 'name' as a Word8 pointer here, instead of a pointer to 'tp'.
+              -- This is allowed, as LLVM now has a single concrete pointer type,
+              -- instead of a parameterized pointer type.
+              ( ArgumentsCons (scalar scalarType (-1)) []
+                $ ArgumentsCons (LocalReference type' $ fromString name') [ParameterAttribute.NoCapture] ArgumentsNil)
+              []
+            return ()
+          | otherwise = return ()
 
 marshalScalarArg :: ScalarType t -> t :~: MarshalArg t
 -- Pattern match to prove that 't' is not a buffer

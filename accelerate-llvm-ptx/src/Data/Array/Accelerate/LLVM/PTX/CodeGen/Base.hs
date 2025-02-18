@@ -784,7 +784,7 @@ makeKernel
 makeKernel config name@(Label l) param kernel = do
   _    <- kernel
   code <- createBlocks
-  addMetadata "nvvm.annotations"
+  addNamedMetadata "nvvm.annotations"
     [ Just . MetadataConstantOperand
       $ LLVM.GlobalReference
 #if !MIN_VERSION_llvm_hs(15,0,0)
