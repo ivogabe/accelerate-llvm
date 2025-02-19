@@ -111,6 +111,7 @@ instance PrettyOp NativeOp where
   prettyOp NBackpermute = "backpermute"
   prettyOp NGenerate    = "generate"
   prettyOp NPermute     = "permute"
+  prettyOp NPermute'    = "permuteUnique"
   prettyOp (NScan dir) = case dir of
     LeftToRight -> "scanl"
     RightToLeft -> "scanr"
@@ -171,6 +172,7 @@ instance EncodeOperation NativeOp where
   encodeOperation NBackpermute = intHost $(hashQ ("Backpermute" :: String))
   encodeOperation NGenerate    = intHost $(hashQ ("Generate" :: String))
   encodeOperation NPermute     = intHost $(hashQ ("Permute" :: String))
+  encodeOperation NPermute'    = intHost $(hashQ ("Permute'" :: String))
   encodeOperation (NScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
   encodeOperation (NScan RightToLeft)  = intHost $(hashQ ("Scanr" :: String))
   encodeOperation (NScan1 LeftToRight) = intHost $(hashQ ("Scanl1" :: String))
@@ -319,9 +321,18 @@ instance MakesILP NativeOp where
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
         <> inrankifmanifest shr l)
       (defaultBounds l)
-  mkGraph NPermute (_ :>: L _ (_, lTargets) :>: L _ (_, lLocks) :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
+  mkGraph NPermute (_ :>: L _ (_, lTargets) :>: L _ (_, lLocks) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
     Graph.Info
       ( mempty & infusibleEdges .~ Set.map (-?> l) (lTargets <> lLocks)) -- add infusible edges from the producers of target and lock arrays to the permute
+      (    inputConstraints l lIns
+        <> ILP.c (InDims l) .==. int (rank shr)
+        <> ILP.c (InDir  l) .==. int (-2)
+        <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
+      ( lower (-2) (InDir l)
+      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). 
+  mkGraph NPermute' (L _ (_, lTargets) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
+    Graph.Info
+      ( mempty & infusibleEdges .~ Set.map (-?> l) lTargets) -- add infusible edges from the producers of target array to the permute
       (    inputConstraints l lIns
         <> ILP.c (InDims l) .==. int (rank shr)
         <> ILP.c (InDir  l) .==. int (-2)
