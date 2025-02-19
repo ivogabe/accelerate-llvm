@@ -73,8 +73,10 @@ data NativeOp t where
   NPermute     :: NativeOp (Fun' (e -> e -> e)
                          -> Mut sh' e
                          -> Mut sh' Word8
-                         -> Fun' (sh -> PrimMaybe sh')
-                         -> In sh e
+                         -> In sh (PrimMaybe (sh', e))
+                         -> ())
+  NPermute'    :: NativeOp (Mut sh' e
+                         -> In sh (PrimMaybe (sh', e))
                          -> ())
   NScan        :: Direction
                -> NativeOp (Fun' (e -> e -> e)
@@ -134,7 +136,7 @@ instance DesugarAcc NativeOp where
     = Exec (NScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
     = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute     a b@(ArgArray _ (ArrayR shr _) sh _) c d
+  mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
     | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord8
     = aletUnique lhs 
         (Alloc shr scalarTypeWord8 $ groundToExpVar (shapeType shr) sh)
@@ -148,8 +150,8 @@ instance DesugarAcc NativeOp where
             :>: weaken w b 
             :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId) 
             :>: weaken w c 
-            :>: weaken w d 
             :>: ArgsNil))
+  mkPermute Nothing a b = Exec NPermute' (a :>: b :>: ArgsNil)
   mkFold a (Just seed) b c = Exec NFold (a :>: seed :>: b :>: c :>: ArgsNil)
   mkFold a Nothing b c = Exec NFold1 (a :>: b :>: c :>: ArgsNil)
 
@@ -211,10 +213,24 @@ instance SetOpIndices NativeOp where
     | otherwise
     = Nothing
   setOpIndices _ NFold1 _ _ = error "Missing indices for NFold1"
-  setOpIndices indexVar NPermute (_ :>: _ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+  setOpIndices indexVar NPermute (_ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
-      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
+      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
+    | otherwise
+    = Nothing
+    where
+      findIndex :: ShapeR sh -> Maybe (ExpVars idxEnv sh)
+      findIndex ShapeRz = Just TupRunit
+      findIndex (ShapeRsnoc shr')
+        | Just a <- findIndex shr'
+        , Just b <- indexVar (rank shr')
+        = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
+        | otherwise = Nothing
+  setOpIndices indexVar NPermute' (_ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+    | Just i <- findIndex shr
+    = Just $ Right $
+      IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
     | otherwise
     = Nothing
     where
@@ -452,11 +468,14 @@ instance StaticClusterAnalysis NativeOp where
                                           = BCAN2 Nothing d :>: BCAN2 (Just (BP shrO shrI f sh)) d             :>: BCAN2 Nothing d           :>: ArgsNil    
   onOp NGenerate (bp :>: ArgsNil) (_:>:ArgArray Out (ArrayR shR _) _ _ :>:ArgsNil) _ = 
     bcan2id bp :>: bp :>: ArgsNil -- store the bp in the function, because there is no input array
-  onOp NPermute ArgsNil (_:>:_:>:_:>:_:>:ArgArray In (ArrayR shR _) _ _ :>:ArgsNil) _ = 
-    BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing (rank shR) :>: ArgsNil
+  onOp NPermute  ArgsNil (_:>:_:>:_:>:ArgArray In (ArrayR shR _) _ _ :>:ArgsNil) _ = 
+    BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing (rank shR) :>: ArgsNil
+  onOp NPermute' ArgsNil (_:>:ArgArray In (ArrayR shR _) _ _ :>:ArgsNil) _ = 
+    BCAN2 Nothing 999 :>: BCAN2 Nothing (rank shR) :>: ArgsNil
   -- onOp NFold  (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: fold1bp bp :>: bp :>: ArgsNil
   onOp NFold1  (bp :>: ArgsNil) (_ :>: ArgArray In _ fs _ :>: _ :>: ArgsNil) _ = BCAN2 Nothing 999 :>: fold2bp bp (case fs of TupRpair _ x -> x) :>: bp :>: ArgsNil
   onOp (NScan1 _) (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: bcan2id bp :>: bp :>: ArgsNil
+  onOp _ _ _ _ = error "todo"
   pairinfo _ IsUnit IsUnit = error "can't yet"
   pairinfo a@(ArrayR shr (TupRpair l r)) IsUnit x = shrinkOrGrow (ArrayR shr r) a x
   pairinfo a@(ArrayR shr (TupRpair l r)) x IsUnit = shrinkOrGrow (ArrayR shr l) a x

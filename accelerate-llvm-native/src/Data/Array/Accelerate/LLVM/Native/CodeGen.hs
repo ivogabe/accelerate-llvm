@@ -386,16 +386,16 @@ opCodeGen (FlatOp NBackpermute (_ :>: input :>: output :>: _) (_ :>: IdxArgIdx d
     writeArray' envs output outputIdx x
   )
 opCodeGen (FlatOp NPermute
-    (ArgFun combine :>: output :>: locks :>: ArgFun idxTransform :>: source :>: _)
-    (_ :>: _ :>: _ :>: _ :>: IdxArgIdx depth sourceIdx :>: _)) =
+    (ArgFun combine :>: output :>: locks :>: source :>: _)
+    (_ :>: _ :>: _ :>: IdxArgIdx depth sourceIdx :>: _)) =
   ( depth
   , OpCodeGenSingle $ \envs -> do
-    let sourceIdx' = envsPrjIndices sourceIdx envs
-    idx' <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) idxTransform) sourceIdx'
     -- project element onto the destination array and (atomically) update
-    A.when (A.isJust idx') $ do
-      x <- readArray' envs source sourceIdx
-      let idx = A.fromJust idx'
+    x' <- readArray' envs source sourceIdx
+    A.when (A.isJust x') $ do
+      let idxx = A.fromJust x'
+      let idx = A.fst idxx
+      let x = A.snd idxx
       let sh' = envsPrjParameters (shapeExpVars shr sh) envs
       j <- intOfIndex shr sh' idx
       -- TODO: Rewrite the function below to take Envs as argument instead of Gamma,
@@ -405,6 +405,23 @@ opCodeGen (FlatOp NPermute
         y <- readArray TypeInt gamma output j
         r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combine) x y
         writeArray TypeInt gamma output j r
+  )
+  where
+    ArgArray _ (ArrayR shr tp) sh _ = output
+opCodeGen (FlatOp NPermute'
+    (output :>: source :>: _)
+    (_ :>: IdxArgIdx depth sourceIdx :>: _)) =
+  ( depth
+  , OpCodeGenSingle $ \envs -> do
+    x' <- readArray' envs source sourceIdx
+    A.when (A.isJust x') $ do
+      let idxx = A.fromJust x'
+      let idx = A.fst idxx
+      let x = A.snd idxx
+      let sh' = envsPrjParameters (shapeExpVars shr sh) envs
+      j <- intOfIndex shr sh' idx
+      let gamma = envsGamma envs
+      writeArray TypeInt gamma output j x
   )
   where
     ArgArray _ (ArrayR shr tp) sh _ = output
@@ -1177,25 +1194,42 @@ instance EvalOp NativeOp where
     = traceIfDebugging ("generate" <> show d') $ lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr sh) . CJ <$> app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) (compose f idxTransform)) (multidim shrO is)
     | otherwise = error "bp shapeR doesn't match generate's output"
   -- For Permute, we ignore all the BP info here and simply assume that there is none
-  evalOp (d',_,is) _ NPermute gamma (Push (Push (Push (Push (Push Env.Empty
-    (BAE (Value' x' (Shape' shrx _))           (BCAN2 _ d))) -- input
-    (BAE (llvmOfFun1 @Native (compileArrayInstrGamma gamma) -> f) _)) -- index function
+  evalOp (d',_,is) _ NPermute gamma (Push (Push (Push (Push Env.Empty
+    (BAE (Value' x'' (Shape' shrx _))           (BCAN2 _ d))) -- input
     (BAE (ArrayDescriptor shrl shl bufl, lty)   _)) -- lock
     (BAE (ArrayDescriptor shrt sht buft, tty)   _)) -- target
     (BAE (llvmOfFun2 @Native (compileArrayInstrGamma gamma) -> c) _)) -- combination function
-    | CJ x <- x'
+    | CJ x' <- x''
     , d == d'
     = traceIfDebugging ("permute" <> show d') $ lift $ do
-        ix' <- app1 f (multidim shrx is)
         -- project element onto the destination array and (atomically) update
-        A.when (A.isJust ix') $ do
-          let ix = A.fromJust ix'
+        A.when (A.isJust x') $ do
+          let ixx = A.fromJust x'
+          let ix = A.fst ixx
+          let x = A.snd ixx
           let sht' = aprjParameters (unsafeToExpVars sht) gamma
           j <- intOfIndex shrt sht' ix
           atomically gamma (ArgArray Mut (ArrayR shrl lty) shl bufl) j $ do
             y <- readArray TypeInt gamma (ArgArray Mut (ArrayR shrt tty) sht buft) j
             r <- app2 c x y
             writeArray TypeInt gamma (ArgArray Mut (ArrayR shrt tty) sht buft) j r
+        pure Env.Empty
+    | d == d' = error "case above?"
+    | otherwise = pure Env.Empty
+  evalOp (d',_,is) _ NPermute' gamma (Push (Push Env.Empty
+    (BAE (Value' x'' (Shape' shrx _))           (BCAN2 _ d))) -- input
+    (BAE (ArrayDescriptor shrt sht buft, tty)   _)) -- target
+    | CJ x' <- x''
+    , d == d'
+    = traceIfDebugging ("permute'" <> show d') $ lift $ do
+        -- project element onto the destination array and (atomically) update
+        A.when (A.isJust x') $ do
+          let ixx = A.fromJust x'
+          let ix = A.fst ixx
+          let x = A.snd ixx
+          let sht' = aprjParameters (unsafeToExpVars sht) gamma
+          j <- intOfIndex shrt sht' ix
+          writeArray TypeInt gamma (ArgArray Mut (ArrayR shrt tty) sht buft) j x
         pure Env.Empty
     | d == d' = error "case above?"
     | otherwise = pure Env.Empty
@@ -1333,9 +1367,11 @@ instance EvalOp (JustAccumulator NativeOp) where
     = lift $ pure $ Push Env.Empty $ FromArg $ Value' x $ Shape' shr sh
   evalOp () _ (JA NGenerate) _ (Push (Push Env.Empty (BAE (Shape' shr sh) _)) (BAE f _))
     = lift $ pure $ Push Env.Empty $ FromArg $ Value' (Both (getOutputType f) (zeroes (getOutputType f))) (Shape' shr sh)
-  evalOp _ _ (JA NPermute) _ (Push (Push (Push (Push (Push Env.Empty (BAE (Value' _ (Shape' shr (Both _ sh))) _)) _) _) _) _)
+  evalOp _ _ (JA NPermute) _ (Push (Push (Push (Push Env.Empty (BAE (Value' _ (Shape' shr (Both _ sh))) _)) _) _) _)
     = StateT $ \(acc,ls) -> pure (Env.Empty, (acc, combine ls $ LS shr sh))
-
+  evalOp _ _ (JA NPermute') _ (Push (Push Env.Empty (BAE (Value' _ (Shape' shr (Both _ sh))) _)) _)
+    = StateT $ \(acc,ls) -> pure (Env.Empty, (acc, combine ls $ LS shr sh))
+  evalOp _ _ _ _ _ = error "missing"
 
 getOutputType :: Fun env (i -> o) -> TypeR o
 getOutputType (Lam _ (Body e)) = expType e
