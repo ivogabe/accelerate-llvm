@@ -31,11 +31,16 @@ static void accelerate_parker_cancel_park(struct ThreadParker *parker) {
   // Note: we cannot change parker->any_sleeping here, as that may prevent other threads from waking up.
 }
 void accelerate_parker_wake_all(struct ThreadParker *parker) {
+  pthread_mutex_lock(&parker->lock);
+  // TODO: We need to perform this check inside the critical section to avoid
+  // a race condition. However, this does increase lock contention, so ideally
+  // we should find a better solution for this. For now, this at least makes it
+  // sound.
   if (atomic_load_explicit(&parker->any_sleeping, memory_order_acquire) == 0) {
     // No thread is sleeping
+    pthread_mutex_unlock(&parker->lock);
     return;
   }
-  pthread_mutex_lock(&parker->lock);
   atomic_store_explicit(&parker->any_sleeping, 0, memory_order_release);
   pthread_cond_broadcast(&parker->cond_var);
   pthread_mutex_unlock(&parker->lock);
@@ -73,7 +78,6 @@ void* accelerate_worker(void *data_packed) {
         // Initialize kernel memory and check if the kernel should be executed in parallel.
         unsigned char parallel =
           kernel->work_function(kernel, 0xFFFFFFFF, NULL);
-        
 
         // start_task from the Work Assisting paper
         if (parallel == 1) {
@@ -210,6 +214,7 @@ void* accelerate_worker(void *data_packed) {
     // No task or data-parallel activity available.
     if (attempts_remaining == 0) {
       accelerate_parker_confirm_park(&workers->scheduler.parker);
+      attempts_remaining = ATTEMPTS;
     } else {
       if (attempts_remaining < ATTEMPTS / 2) {
         sched_yield();
