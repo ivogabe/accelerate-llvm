@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
@@ -24,9 +25,14 @@ import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
+import LLVM.AST.Type.Metadata
+
+import qualified LLVM.AST.Operand as LLVM
+import qualified LLVM.AST.Constant as LLVM
 
 import Prelude                                                  hiding ( fst, snd, uncurry )
 import Control.Monad
+import Data.Maybe (mapMaybe)
 
 
 -- | TODO: Iterate over a multidimensional index space.
@@ -44,18 +50,35 @@ import Control.Monad
 --     -> CodeGen (Operands a)
 -- iterate from to body = error "CodeGen.Loop.iterate"
 
+data LoopAnnotation
+  -- | Add a vectorization instruction to the generated LLVM code. This is no
+  -- guarantee that LLVM will actually vectorize it.
+  = LoopVectorize
+  -- | Add an annotation to the generated LLVM code to inform LLVM that is
+  -- should interleave iterations of the loop. This might be a good
+  -- alternative, if vectorization is not possible.
+  | LoopInterleave
+  -- | This annotation guarantees that the loop does at least one iteration.
+  | LoopNonEmpty
+  -- | Hint to apply loop peeling
+  -- Loop peeling is only applied via loopWith.
+  -- Other loop combinators ignore this annotation.
+  | LoopPeel
+  deriving (Eq, Ord)
 
 -- | Execute the given function at each index in the range
 --
 imapFromStepTo
     :: forall i arch. IsNum i
-    => Operands i                                     -- ^ starting index (inclusive)
+    => [LoopAnnotation]
+    -> Operands i                                     -- ^ starting index (inclusive)
     -> Operands i                                     -- ^ step size
     -> Operands i                                     -- ^ final index (exclusive)
     -> (Operands i -> CodeGen arch ())                -- ^ loop body
     -> CodeGen arch ()
-imapFromStepTo start step end body =
-  for (TupRsingle $ SingleScalarType $ NumSingleType num) start
+imapFromStepTo ann start step end body =
+  for ann
+      (TupRsingle $ SingleScalarType $ NumSingleType num) start
       (\i -> lt (NumSingleType num) i end)
       (\i -> add num i step)
       body
@@ -67,14 +90,16 @@ imapFromStepTo start step end body =
 --
 imapReverseFromStepTo
     :: forall i arch. IsNum i
-    => Operands i                                     -- ^ starting index (inclusive)
+    => [LoopAnnotation]
+    -> Operands i                                     -- ^ starting index (inclusive)
     -> Operands i                                     -- ^ step size
     -> Operands i                                     -- ^ final index (exclusive)
     -> (Operands i -> CodeGen arch ())                -- ^ loop body
     -> CodeGen arch ()
-imapReverseFromStepTo start step end body = do
+imapReverseFromStepTo ann start step end body = do
   end' <- sub num end step
-  for (TupRsingle $ SingleScalarType $ NumSingleType num) end'
+  for ann
+      (TupRsingle $ SingleScalarType $ NumSingleType num) end'
       (\i -> gte (NumSingleType num) i start)
       (\i -> sub num i step)
       body
@@ -86,15 +111,17 @@ imapReverseFromStepTo start step end body = do
 --
 iterFromStepTo
     :: forall i a arch. IsNum i
-    => TypeR a
+    => [LoopAnnotation]
+    -> TypeR a
     -> Operands i                                     -- ^ starting index (inclusive)
     -> Operands i                                     -- ^ step size
     -> Operands i                                     -- ^ final index (exclusive)
     -> Operands a                                     -- ^ initial value
     -> (Operands i -> Operands a -> CodeGen arch (Operands a))    -- ^ loop body
     -> CodeGen arch (Operands a)
-iterFromStepTo tp start step end seed body =
-  iter (TupRsingle $ SingleScalarType $ NumSingleType num) tp start seed
+iterFromStepTo ann tp start step end seed body =
+  iter ann
+       (TupRsingle $ SingleScalarType $ NumSingleType num) tp start seed
        (\i -> lt (NumSingleType num) i end)
        (\i -> add num i step)
        body
@@ -103,19 +130,21 @@ iterFromStepTo tp start step end seed body =
 
 -- | A standard 'for' loop.
 --
-for :: TypeR i
+for :: [LoopAnnotation]
+    -> TypeR i
     -> Operands i                                         -- ^ starting index
     -> (Operands i -> CodeGen arch (Operands Bool))       -- ^ loop test to keep going
     -> (Operands i -> CodeGen arch (Operands i))          -- ^ increment loop counter
     -> (Operands i -> CodeGen arch ())                    -- ^ body of the loop
     -> CodeGen arch ()
-for tp start test incr body =
-  void $ while tp test (\i -> body i >> incr i) start
+for ann tp start test incr body =
+  void $ while ann tp test (\i -> body i >> incr i) start
 
 
 -- | An loop with iteration count and accumulator.
 --
-iter :: TypeR i
+iter :: [LoopAnnotation]
+     -> TypeR i
      -> TypeR a
      -> Operands i                                                -- ^ starting index
      -> Operands a                                                -- ^ initial value
@@ -123,8 +152,8 @@ iter :: TypeR i
      -> (Operands i -> CodeGen arch (Operands i))                 -- ^ increment loop counter
      -> (Operands i -> Operands a -> CodeGen arch (Operands a))   -- ^ loop body
      -> CodeGen arch (Operands a)
-iter tpi tpa start seed test incr body = do
-  r <- while (TupRpair tpi tpa)
+iter ann tpi tpa start seed test incr body = do
+  r <- while ann (TupRpair tpi tpa)
              (test . fst)
              (\v -> do v' <- uncurry body v     -- update value and then...
                        i' <- incr (fst v)       -- ...calculate new index
@@ -135,19 +164,33 @@ iter tpi tpa start seed test incr body = do
 
 -- | A standard 'while' loop
 --
-while :: TypeR a
+while :: [LoopAnnotation]
+      -> TypeR a
       -> (Operands a -> CodeGen arch (Operands Bool))
       -> (Operands a -> CodeGen arch (Operands a))
       -> Operands a
       -> CodeGen arch (Operands a)
-while tp test body start = do
+while ann tp test body start = do
   loop <- newBlock   "while.top"
   exit <- newBlock   "while.exit"
   _    <- beginBlock "while.entry"
 
+  -- Loop annotations
+  annotations <- sequence $ mapMaybe placeAnnotation ann
+  annotation <- addMetadata $ \i ->
+    map (Just . MetadataNodeOperand . MetadataNodeReference) (i : annotations)
+
   -- Entry: generate the initial value
-  p    <- test start
-  top  <- cbr p loop exit
+  top <-
+    if LoopNonEmpty `elem` ann then
+      -- Ivo: br would make more sense than cbr here,
+      -- but using br causes LLVM to crash with a segmentation fault.
+      -- I didn't investigate this further, and went for the easy fix
+      -- by using cbr instead of br here.
+      cbr (OP_Bool $ boolean True) loop exit
+    else do
+      p <- test start
+      cbr p loop exit
 
   -- Create the critical variable that will be used to accumulate the results
   prev <- fresh tp
@@ -159,59 +202,74 @@ while tp test body start = do
   setBlock loop
   next <- body prev
   p'   <- test next
-  bot  <- cbr p' loop exit
+  bot  <- cbrMD p' loop exit [("llvm.loop", LLVM.MDRef annotation)]
 
   _    <- phi' tp loop prev [(start,top), (next,bot)]
 
   -- Now the loop exit
   setBlock exit
   phi tp [(start,top), (next,bot)]
+  where
+    placeAnnotation :: LoopAnnotation -> Maybe (CodeGen arch LLVM.MetadataNodeID)
+    placeAnnotation LoopVectorize = Just $
+      addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.vectorize.enable", Just $ MetadataConstantOperand $ LLVM.Int 1 1])
+    placeAnnotation LoopInterleave = Just $
+      addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.interleave.count", Just $ MetadataConstantOperand $ LLVM.Int 32 32])
+    placeAnnotation _ = Nothing
 
 loopWith
-  :: LoopPeeling
+  :: [LoopAnnotation]
   -> Bool
   -> Operands Int -- Inclusive lower bound
   -> Operands Int -- Exclusive upper bound
   -> (Operands Bool -> Operands Int -> CodeGen arch ())
   -> CodeGen arch ()
-loopWith PeelNot False lower upper body =
-  imapFromStepTo lower (liftInt 1) upper $ \idx -> do
+loopWith ann desc lower upper body
+  | LoopPeel `elem` ann = do
+    blockFirst <- newBlock "while.first.iteration"
+    blockEnd <- newBlock "while.end"
+
+    _ <-
+      if LoopNonEmpty `elem` ann then
+        br blockFirst
+      else do
+        -- Check if we need to do work. The first iteration can only be executed
+        -- if there is at least one value in the array.
+        isEmpty <- lte singleType upper lower
+        cbr isEmpty blockEnd blockFirst
+
+    -- Generate code for the first iteration
+    setBlock blockFirst
+    firstIdx <- if desc then sub numType upper (liftInt 1) else return lower
+    body (OP_Bool $ boolean True) firstIdx
+
+    -- Generate a loop for the remaining iterations
+    if desc then do
+      imapReverseFromStepTo ann' lower (liftInt 1) firstIdx $ \idx ->
+        body (OP_Bool $ boolean False) idx
+    else do
+      second <- add numType lower (liftInt 1)
+      imapFromStepTo ann' second (liftInt 1) upper $ \idx ->
+        body (OP_Bool $ boolean False) idx
+
+    _ <- br blockEnd
+    -- Control flow of the cbr on isEmpty joins here
+    setBlock blockEnd
+  where
+    -- Remove peel and non-empty annotations, as these do no longer hold
+    -- in the loop for all but the first iterations.
+    ann' = filter (\a -> a /= LoopPeel && a /= LoopNonEmpty) ann
+
+-- No loop peeling
+loopWith ann False lower upper body =
+  imapFromStepTo ann lower (liftInt 1) upper $ \idx -> do
     isFirst <- eq (NumSingleType numType) idx lower
     body isFirst idx
-loopWith PeelNot True lower upper body = do
+loopWith ann True lower upper body = do
   upperInclusive <- sub numType upper (liftInt 1)
-  imapReverseFromStepTo lower (liftInt 1) upper $ \idx -> do
+  imapReverseFromStepTo ann lower (liftInt 1) upper $ \idx -> do
     isFirst <- eq (NumSingleType numType) idx upperInclusive
     body isFirst idx
-loopWith peeling desc lower upper body = do
-  blockFirst <- newBlock "while.first.iteration"
-  blockEnd <- newBlock "while.end"
-
-  _ <- case peeling of
-    PeelGuaranteed -> br blockFirst
-    _ -> do
-      -- Check if we need to do work. The first iteration can only be executed
-      -- if there is at least one value in the array.
-      isEmpty <- lte singleType upper lower
-      cbr isEmpty blockEnd blockFirst
-
-  -- Generate code for the first iteration
-  setBlock blockFirst
-  firstIdx <- if desc then sub numType upper (liftInt 1) else return lower
-  body (OP_Bool $ boolean True) firstIdx
-
-  -- Generate a loop for the remaining iterations
-  if desc then do
-    imapReverseFromStepTo lower (liftInt 1) firstIdx $ \idx ->
-      body (OP_Bool $ boolean False) idx
-  else do
-    second <- add numType lower (liftInt 1)
-    imapFromStepTo second (liftInt 1) upper $ \idx ->
-      body (OP_Bool $ boolean False) idx
-
-  _ <- br blockEnd
-  -- Control flow of the cbr on isEmpty joins here
-  setBlock blockEnd
 
 data LoopPeeling
   -- Do not perform loop peeling.
@@ -225,3 +283,8 @@ data LoopPeeling
   | PeelGuaranteed
   deriving (Eq, Ord)
 
+loopPeelingToAnnotation :: LoopPeeling -> [LoopAnnotation]
+loopPeelingToAnnotation = \case
+  PeelNot         -> []
+  PeelConditional -> [LoopPeel]
+  PeelGuaranteed  -> [LoopPeel, LoopNonEmpty]

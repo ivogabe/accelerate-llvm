@@ -64,13 +64,12 @@ data Terminator a where
 -- | Convert to llvm-hs
 --
 instance Downcast (Terminator a) LLVM.Terminator where
-  downcast = \case
-    Ret           -> LLVM.Ret Nothing md
-    RetVal x      -> LLVM.Ret (Just (downcast x)) md
-    Br l          -> LLVM.Br (downcast l) md
-    CondBr p t f  -> LLVM.CondBr (downcast p) (downcast t) (downcast f) md
-    Switch p d a  -> LLVM.Switch (downcast p) (downcast d) (downcast a) md
-    where
-      md :: LLVM.InstructionMetadata
-      md = []
+  downcast term = downcastTerminator term []
 
+downcastTerminator :: Terminator a -> LLVM.InstructionMetadata -> LLVM.Terminator
+downcastTerminator term md = case term of
+  Ret           -> LLVM.Ret Nothing md
+  RetVal x      -> LLVM.Ret (Just (downcast x)) md
+  Br l          -> LLVM.Br (downcast l) md
+  CondBr p t f  -> LLVM.CondBr (downcast p) (downcast t) (downcast f) md
+  Switch p d a  -> LLVM.Switch (downcast p) (downcast d) (downcast a) md

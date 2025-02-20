@@ -52,7 +52,7 @@ imapFromTo
     -> (Operands Int -> CodeGen Native ())            -- ^ apply at each index
     -> CodeGen Native ()
 imapFromTo start end body =
-  Loop.imapFromStepTo start (liftInt 1) end body
+  Loop.imapFromStepTo [] start (liftInt 1) end body
 
 
 -- | Generate a series of nested 'for' loops which iterate between the start and
@@ -61,13 +61,15 @@ imapFromTo start end body =
 -- representation utilising to/from index.
 --
 imapNestFromTo
-    :: ShapeR sh
+    :: [Loop.LoopAnnotation]                                     -- ^ annotations for all but the innermost loop
+    -> [Loop.LoopAnnotation]                                     -- ^ annotations for the innermost loop
+    -> ShapeR sh
     -> Operands sh                                          -- ^ initial index (inclusive)
     -> Operands sh                                          -- ^ final index (exclusive)
     -> Operands sh                                          -- ^ total array extent
     -> (Operands sh -> Operands Int -> CodeGen Native ())   -- ^ apply at each index
     -> CodeGen Native ()
-imapNestFromTo shr start end extent body =
+imapNestFromTo annOuter annInner shr start end extent body =
   go shr start end body'
   where
     body' ix = body ix =<< intOfIndex shr extent ix
@@ -78,8 +80,12 @@ imapNestFromTo shr start end extent body =
 
     go (ShapeRsnoc shr') (OP_Pair ssh ssz) (OP_Pair esh esz) k
       = go shr' ssh esh
-      $ \sz      -> imapFromTo ssz esz
+      $ \sz      -> Loop.imapFromStepTo ann ssz (liftInt 1) esz
       $ \i       -> k (OP_Pair sz i)
+      where
+        ann = case shr' of
+          ShapeRz -> annInner
+          _ -> annOuter
 
 loopWorkFromTo :: ShapeR sh -> Operands sh -> Operands sh -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)),StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
 loopWorkFromTo shr start end extent tys (loopwork,finish) = do
@@ -94,7 +100,7 @@ loopWorkFromTo' ShapeRz OP_Unit OP_Unit OP_Unit _ _ _ LoopWorkZ = pure ()
 loopWorkFromTo' (ShapeRsnoc shr) (OP_Pair start' start) (OP_Pair end' endMaybe) (OP_Pair extent' extent) linixprev ixs tys (LoopWorkSnoc lw foo) = do
   linix <- lift $ add numType start linixprev
   end <- lift $ A.min singleType endMaybe extent
-  StateT $ \s -> ((),) <$> Loop.iter
+  StateT $ \s -> ((),) <$> Loop.iter []
     (TupRpair typerInt typerInt)
     tys
     (OP_Pair start linix)
@@ -207,7 +213,7 @@ iterFromTo
     -> (Operands Int -> Operands a -> CodeGen Native (Operands a))    -- ^ apply at each index
     -> CodeGen Native (Operands a)
 iterFromTo tp start end seed body =
-  Loop.iterFromStepTo tp start (liftInt 1) end seed body
+  Loop.iterFromStepTo [] tp start (liftInt 1) end seed body
 
 -- TODO: Remove activitiesSlot
 workassistLoop
@@ -342,8 +348,8 @@ workassistLoop' counter firstIndex activitiesSlot size doWork = do
   -- lift $ setBlock dummy -- without this, the previous block always returns True for some reason
   
 
-workassistChunked :: ShapeR sh -> Operand (Ptr Word32) -> Operand Word32 -> Operand (Ptr Word64) -> sh -> Operands sh -> (Operands sh -> CodeGen Native ()) -> CodeGen Native ()
-workassistChunked shr counter firstIndex activitiesSlot chunkSz' sh doWork = do
+workassistChunked :: [Loop.LoopAnnotation] -> ShapeR sh -> Operand (Ptr Word32) -> Operand Word32 -> Operand (Ptr Word64) -> sh -> Operands sh -> (Operands sh -> CodeGen Native ()) -> CodeGen Native ()
+workassistChunked ann shr counter firstIndex activitiesSlot chunkSz' sh doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
   chunkCounts <- chunkCount shr sh chunkSz
   chunkCnt <- shapeSize shr chunkCounts
@@ -353,7 +359,7 @@ workassistChunked shr counter firstIndex activitiesSlot chunkSz' sh doWork = do
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex
     end <- chunkEnd shr sh chunkSz start
-    imapNestFromTo shr start end sh (\ix _ -> doWork ix)
+    imapNestFromTo [] ann shr start end sh (\ix _ -> doWork ix)
 
 workassistChunked' :: ShapeR sh -> Operand (Ptr Word32) -> Operand Word32 -> Operand (Ptr Word64) -> Operands sh -> TypeR s -> (LoopWork sh (StateT (Operands s) (CodeGen Native)), StateT (Operands s) (CodeGen Native) ()) -> StateT (Operands s) (CodeGen Native) ()
 workassistChunked' shr counter firstIndex activitiesSlot sh tys loopwork = do

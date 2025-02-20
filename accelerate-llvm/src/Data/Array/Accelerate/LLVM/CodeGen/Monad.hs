@@ -33,7 +33,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Monad (
   newBlock, newBlockNamed, setBlock, getBlock, beginBlock, createBlocks,
 
   -- instructions
-  instr, instr', instrMD, instrMD', do_, return_, retval_, br, cbr, switch,
+  instr, instr', instrMD, instrMD', do_, return_, retval_, br, cbr, cbrMD, switch,
   phi, phi', phi1,
   instr_,
 
@@ -348,6 +348,9 @@ br target = terminate $ Br (blockLabel target)
 cbr :: HasCallStack => Operands Bool -> Block -> Block -> CodeGen arch Block
 cbr (OP_Bool cond) t f = terminate $ CondBr cond (blockLabel t) (blockLabel f)
 
+cbrMD :: HasCallStack => Operands Bool -> Block -> Block -> LLVM.InstructionMetadata -> CodeGen arch Block
+cbrMD (OP_Bool cond) t f md = terminateMD (CondBr cond (blockLabel t) (blockLabel f)) md
+
 -- | Switch statement. Return the name of the block that was branched from.
 --
 switch :: forall arch tag. (HasCallStack, IsIntegral tag) => Operands tag -> Block -> [(tag, Block)] -> CodeGen arch Block
@@ -399,12 +402,14 @@ phi1 target crit incoming =
 -- the block that was just terminated.
 --
 terminate :: HasCallStack => Terminator a -> CodeGen arch Block
-terminate term =
+terminate term = terminateMD term []
+
+terminateMD :: HasCallStack => Terminator a -> LLVM.InstructionMetadata -> CodeGen arch Block
+terminateMD term md =
   state $ \s ->
     case Seq.viewr (blockChain s) of
       Seq.EmptyR  -> internalError "empty block chain"
-      bs Seq.:> b -> ( b, s { blockChain = bs Seq.|> b { terminator = downcast term } } )
-
+      bs Seq.:> b -> ( b, s { blockChain = bs Seq.|> b { terminator = downcastTerminator term md } } )
 
 -- | Add a global declaration to the symbol table
 --

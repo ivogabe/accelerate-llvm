@@ -123,6 +123,7 @@ codegen name env cluster args
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
     switch (OP_Word32 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
+    let hasPermute = hasNPermute flat
 
     if parallelDepth == 0 && rank shr /= 0 then do
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -143,7 +144,7 @@ codegen name env cluster args
                   -- first tile loop (the reduce step of the chained scan) are
                   -- still in the cache during the second tile loop (the scan
                   -- step of the chained scan).
-                  1024 * 4
+                  1024 * 16
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
@@ -223,15 +224,21 @@ codegen name env cluster args
               -- Sequential mode
               (do
                 let tileLoop = ptSingleThreaded tileLoops
-                -- Only do loop peeling if requested and when there are no nested loops.
-                -- Peeling over nested loops causes a lot of code duplication,
-                -- and is probably not worth it.
-                let peel = if ptPeel tileLoop && null loops' then PeelGuaranteed else PeelNot
-                -- We can use PeelGuaranteed instead of PeelConditional since we
-                -- know that each tile is non-empty.
+                let ann =
+                      -- Only do loop peeling if requested and when there are no nested loops.
+                      -- Peeling over nested loops causes a lot of code duplication,
+                      -- and is probably not worth it.
+                      [ Loop.LoopPeel | ptPeel tileLoop && null loops' ]
+                      -- We can use LoopNonEmpty since we
+                      -- know that each tile is non-empty.
+                      -- We cannot vectorize this loop (yet), as LLVM cannot vectorize loops
+                      -- containing scans. We should either wait until LLVM supports this,
+                      -- or vectorize loops (partially) ourselves.
+                      -- As an alternative to vectorization, we ask LLVM to interleave the loop.
+                      ++ [ Loop.LoopNonEmpty, Loop.LoopInterleave ]
 
                 ptBefore tileLoop envs'''
-                Loop.loopWith peel (isDescending direction) lower upper $ \isFirst idx -> do
+                Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
                   localIdx <- A.sub numType idx lower
                   let envs'''' = envs'''{
                       envsLoopDepth = 1,
@@ -248,15 +255,22 @@ codegen name env cluster args
                 forM_ ((True, ptFirstLoop tileLoops) : map (False, ) (ptOtherLoops tileLoops)) $ \(isFirstTileLoop, tileLoop) -> do
                   -- All nested loops are placed in the first tile loop by parCodeGens
                   let loops'' = if isFirstTileLoop then loops' else []
-                  -- Only do loop peeling if requested and when there are no nested loops.
-                  -- Peeling over nested loops causes a lot of code duplication,
-                  -- and is probably not worth it.
-                  let peel = if ptPeel tileLoop && null loops'' then PeelGuaranteed else PeelNot
-                  -- We can use PeelGuaranteed instead of PeelConditional since we
-                  -- know that each tile is non-empty.
+                  let ann =
+                        -- Only do loop peeling if requested and when there are no nested loops.
+                        -- Peeling over nested loops causes a lot of code duplication,
+                        -- and is probably not worth it.
+                        [ Loop.LoopPeel | ptPeel tileLoop && null loops'' ]
+                        -- LLVM cannot vectorize loops containing scans (yet).
+                        -- The first tile loop only does a reduction, others will perform a scan.
+                        -- Loops containing permute (not permuteUnique) can
+                        -- also not be vectorized.
+                        ++ [ if isFirstTileLoop && not hasPermute then Loop.LoopVectorize else Loop.LoopInterleave ]
+                        -- We can use LoopNonEmpty since we
+                        -- know that each tile is non-empty.
+                        ++ [ Loop.LoopNonEmpty ]
 
                   ptBefore tileLoop envs'''
-                  Loop.loopWith peel (isDescending direction) lower upper $ \isFirst idx -> do
+                  Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
                     localIdx <- A.sub numType idx lower
                     let envs'''' = envs'''{
                         envsLoopDepth = 1,
@@ -301,7 +315,8 @@ codegen name env cluster args
       retval_ $ scalar (scalarType @Word8) 0
 
       setBlock workBlock
-      workassistChunked parallelShr workassistIndex workassistFirstIndex workassistActivitiesSlot tileSize parSizes $ \idx -> do
+      let ann = [if hasPermute then Loop.LoopInterleave else Loop.LoopVectorize]
+      workassistChunked ann parallelShr workassistIndex workassistFirstIndex workassistActivitiesSlot tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -773,7 +788,7 @@ parCodeGenFoldCommutative descending fun seed identity input output inputIdx out
         -- TODO: Use atomic compare-and-swap or read-modify-write
         -- to update the value in kernel memory lock-free,
         -- instead of taking a lock here.
-        _ <- Loop.while TupRunit
+        _ <- Loop.while [] TupRunit
           (\_ -> do
             -- While the lock is taken
             old <- instr $ AtomicRMW numType NonVolatile Exchange lock (scalar scalarTypeWord8 1) (CrossThread, Acquire)
@@ -945,7 +960,7 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
           -- no need to wait
           return ()
         else do
-          _ <- Loop.while TupRunit
+          _ <- Loop.while [] TupRunit
             (\_ -> do
               idx <- instr $ Load scalarTypeInt Volatile idxPtr
               A.neq singleType idx (envsTileIndex envs)
@@ -1049,6 +1064,17 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
       = Just $ mkConstant tp v
       | otherwise
       = Nothing
+
+-- Checks if the cluster has a permute.
+hasNPermute :: FlatCluster NativeOp env -> Bool
+hasNPermute (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
+  where
+    go :: FlatOps NativeOp env idxEnv -> Bool
+    go FlatOpsNil = False
+    go (FlatOpsBind _ _ _ ops) = go ops
+    go (FlatOpsOp (FlatOp NPermute _ _) _) = True
+    go (FlatOpsOp (FlatOp NPermute' _ _) _) = True
+    go (FlatOpsOp _ ops) = go ops
 
 -- Old, EvalOp based implementation
 

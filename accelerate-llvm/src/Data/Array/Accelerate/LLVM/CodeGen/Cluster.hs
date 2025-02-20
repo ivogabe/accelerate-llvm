@@ -139,7 +139,7 @@ genSequential envs sizes ops = do
       -- there are nested loops. Furthermore, if there are (expensive) nested
       -- loops, then the benefit of loop peeling here will be less.
       let peeling' = if null szs then peeling else PeelNot
-      loopWith peeling' (isDescending dir) (A.liftInt 0) sz $ \isFirst idx -> do
+      loopWith (loopPeelingToAnnotation peeling') (isDescending dir) (A.liftInt 0) sz $ \isFirst idx -> do
         let envs2 = envs1{
             envsLoopDepth = depth + 1,
             envsIdx = partialUpdate (op scalarTypeInt idx) idxIdx $ envsIdx envs1,

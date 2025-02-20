@@ -237,7 +237,7 @@ llvmOfOpenExp arrayInstr top env = cvtE top
           -> IROpenExp  arch env a
           -> IROpenExp  arch env a
     while tp p f x =
-      L.while tp (bool . app1 p) (app1 f) =<< x
+      L.while [] tp (bool . app1 p) (app1 f) =<< x
 
     land :: Operands PrimBool
          -> Operands PrimBool
