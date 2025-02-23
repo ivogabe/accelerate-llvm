@@ -144,7 +144,7 @@ codegen name env cluster args
                   -- first tile loop (the reduce step of the chained scan) are
                   -- still in the cache during the second tile loop (the scan
                   -- step of the chained scan).
-                  1024 * 16
+                  1024 * 2
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
