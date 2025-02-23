@@ -1,3 +1,9 @@
+#ifdef __linux__
+// Define this to get access to thread affinities.
+// We only set thread affinities on Linux, since macOS does not support this.
+#define _GNU_SOURCE
+#endif
+
 #include "types.h"
 #include <unistd.h>
 #include <sched.h>
@@ -53,6 +59,17 @@ void* accelerate_worker(void *data_packed) {
   uint16_t thread_idx = accelerate_unpack_tag((uintptr_t) data_packed);
 
   unsigned int attempts_remaining = ATTEMPTS;
+
+#ifdef __linux__
+  {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(thread_idx, &cpuset);
+
+    pthread_t current_thread = pthread_self();    
+    pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
+  }
+#endif
 
   struct Task task;
   task.program = NULL;
