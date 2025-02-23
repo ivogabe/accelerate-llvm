@@ -76,8 +76,13 @@ instance Execute UniformScheduleFun NativeKernel where
     NativeLinked
       (linkSchedule (hashUniformScheduleFun schedule) schedule)
       schedule
-  executeAfunSchedule _ (NativeLinked (NativeProgram fun size lifetimes imports offset) schedule) =
-    prepareProgram schedule start final
+  executeAfunSchedule _ (NativeLinked (NativeProgram fun size lifetimes imports offset) schedule)
+    | not rtsSupportsBoundThreads = error
+      $ "\nCannot run Accelerate programs without GHC's multi-threaded runtime\n\n"
+      ++ "In your .cabal file, add -threaded to ghc-options in the section of your executable:\n"
+      ++ "  ghc-options: -threaded\n\n"
+      ++ "For more information, see:\nhttps://downloads.haskell.org/ghc/latest/docs/users_guide/phases.html#ghc-flag-threaded \n"
+    | otherwise = prepareProgram schedule start final
     where
       start :: IO (Ptr Int8, Int)
       start = do
