@@ -55,6 +55,11 @@ import Control.Monad
 import Prelude                                                      hiding ( exp, any )
 
 import GHC.TypeNats
+import Data.Primitive (Ptr(Ptr))
+import Data.Array.Accelerate.LLVM.CodeGen.Base (call, call')
+import qualified LLVM.AST.Type.Function as F
+import LLVM.AST.Type.Representation (IsPrim(primType), Type (PrimType))
+import LLVM.AST.Type.Name (Label(Label))
 
 
 -- Scalar expressions
@@ -167,6 +172,7 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         ShapeSize shr sh            -> shapeSize shr =<< cvtE sh
         While c f x                 -> while (expType x) (cvtF1 c) (cvtF1 f) (cvtE x)
         Coerce t1 t2 x              -> coerce t1 t2 =<< cvtE x
+        Assert c e                  -> assert (expType e) (cvtE c) (cvtE e)
 
     indexSlice :: SliceIndex slix sl co sh -> Operands slix -> Operands sh -> Operands sl
     indexSlice SliceNil              OP_Unit               OP_Unit          = OP_Unit
@@ -230,6 +236,13 @@ llvmOfOpenExp arrayInstr top env = cvtE top
          -> IROpenExp arch env a
     cond tp p t e =
       A.ifThenElse (tp, bool p) t e
+
+    assert :: TypeR a
+         -> IROpenExp arch env PrimBool
+         -> IROpenExp arch env a
+         -> IROpenExp arch env a
+    assert tp c e =
+      A.ifThenElse (tp, bool c) e (trap e)
 
     while :: TypeR a
           -> IROpenFun1 arch env (a -> PrimBool)
@@ -403,3 +416,10 @@ pushE env (LeftHandSideSingle tp , e)               = env `Push` op tp e
 pushE env (LeftHandSideWildcard _, _)               = env
 pushE env (LeftHandSidePair l1 l2, (OP_Pair e1 e2)) = pushE env (l1, e1) `pushE` (l2, e2)
 
+trap :: CodeGen arch (Operands a) ->  CodeGen arch (Operands a)
+trap e = do
+    _ <- call'
+      (F.lamUnnamed (primType @Int64)
+        $ F.Body (PrimType (primType @(Ptr Word8))) Nothing (Label "llvm.trap")) 
+      ( F.ArgumentsCons (scalar scalarType (-1)) [] F.ArgumentsNil) []
+    e
