@@ -85,20 +85,20 @@ readArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx = do
 --
 {-# INLINEABLE readArray #-}
 readArray
-    :: forall int genv m sh e arch.
+    :: forall int genv idxEnv m sh e arch.
        IntegralType int
-    -> Gamma genv
+    -> Envs genv idxEnv
     -> Arg genv (m sh e) -- m is In or Mut
     -> Operands int
     -> CodeGen arch (Operands e)
-readArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) = read tp buffers
+readArray int envs (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) = read tp buffers
   where
     read :: forall t. TypeR t -> GroundVars genv (Buffers t) -> CodeGen arch (Operands t)
     read TupRunit         _                = return OP_Unit
     read (TupRpair t1 t2) (TupRpair b1 b2) = OP_Pair <$> read t1 b1 <*> read t2 b2
     read (TupRsingle t)   (TupRsingle buffer)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
-      , irbuffer <- aprjBuffer buffer env
+      , irbuffer <- envsPrjBuffer buffer envs
       = ir t <$> readBuffer t int irbuffer ix Nothing
     read _ _ = internalError "Tuple mismatch"
 
@@ -181,21 +181,21 @@ writeArrayAt' env (ArgArray _ (ArrayR shr tp) sh buffers) idx i val = do
 --
 {-# INLINEABLE writeArray #-}
 writeArray
-    :: forall int genv m sh e arch.
+    :: forall int genv idxEnv m sh e arch.
        IntegralType int
-    -> Gamma genv
+    -> Envs genv idxEnv
     -> Arg genv (m sh e) -- m is Out or Mut
     -> Operands int
     -> Operands e
     -> CodeGen arch ()
-writeArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) val = write tp buffers val
+writeArray int envs (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) val = write tp buffers val
   where
     write :: forall t. TypeR t -> GroundVars genv (Buffers t) -> Operands t -> CodeGen arch ()
     write TupRunit _ _ = return ()
     write (TupRpair t1 t2) (TupRpair b1 b2)    (OP_Pair v1 v2) = write t1 b1 v1 >> write t2 b2 v2
     write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
-      , irbuffer <- aprjBuffer buffer env
+      , irbuffer <- envsPrjBuffer buffer envs
       = writeBuffer t int irbuffer ix Nothing value
     write _ _ _ = internalError "Tuple mismatch"
 

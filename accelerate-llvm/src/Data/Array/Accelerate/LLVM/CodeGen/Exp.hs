@@ -389,8 +389,8 @@ indexOfInt (ShapeRsnoc shr) (OP_Pair sh sz) i
 
 -- | Reads from an array at a multidimensional index.
 readArrayIndex
-    :: forall genv m sh e arch.
-       Gamma genv
+    :: forall genv idxEnv m sh e arch.
+       Envs genv idxEnv
     -> Arg genv (m sh e) -- m is In or Mut
     -> Operands sh
     -> CodeGen arch (Operands e)

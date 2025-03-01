@@ -17,40 +17,26 @@
 module Data.Array.Accelerate.LLVM.Native.CodeGen.Permute
   where
 
-import Data.Array.Accelerate.AST                                    ( PrimMaybe )
 import Data.Array.Accelerate.Error
-import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
-import Data.Array.Accelerate.LLVM.CodeGen.Array
-import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
-import Data.Array.Accelerate.LLVM.CodeGen.Permute
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
-import Data.Array.Accelerate.LLVM.Compile.Cache
 
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 
-import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW                                as RMW
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Representation
 
-import Control.Applicative
-import Control.Monad                                                ( void )
 import Prelude
-import Data.Array.Accelerate.AST.Operation (Mut, Arg (ArgArray), Modifier (Mut), Var (Var))
-import Data.Array.Accelerate.AST.Environment (prj')
+import Data.Array.Accelerate.AST.Operation (Mut, Arg (ArgArray), Modifier (Mut))
 
 {-
 -- Forward permutation specified by an indexing mapping. The resulting array is
@@ -308,15 +294,14 @@ reprLock = ArrayR (ShapeRsnoc ShapeRz) $ TupRsingle scalarTypeWord8
 
 
 atomically 
-  :: Gamma env
+  :: Envs env idxEnv
   -> Arg env (Mut sh' Word8)
   -> Operands Int 
   -> CodeGen Native () 
   -> CodeGen Native ()
-atomically gamma (ArgArray Mut (ArrayR shr _) sh (TupRsingle (Var _ bufidx))) i action = 
-  case prj' bufidx gamma of
-    GroundOperandParam _ -> error "impossible"
-    GroundOperandBuffer irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) -> do
+atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
+  | irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
+  = do
       let
           lock      = integral integralType 1
           unlock    = integral integralType 0
@@ -348,4 +333,4 @@ atomically gamma (ArgArray Mut (ArrayR shr _) sh (TupRsingle (Var _ bufidx))) i 
 
       setBlock exit
       return r
-    GroundOperandBuffer (IRBuffer _ _ _ _ _) -> error "Expected IRBufferScopeArray"
+  | otherwise = internalError "Expected IRBufferScopeArray"

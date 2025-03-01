@@ -280,8 +280,8 @@ aprjBuffer (Var (GroundRbuffer _) idx) env =
     GroundOperandParam _       -> internalError "Scalar impossible"
 aprjBuffer (Var (GroundRscalar tp) _) _ = bufferImpossible tp
 
-arraySize :: HasCallStack => Arg genv (m sh e) -> Gamma genv -> Operands sh
-arraySize (ArgArray _ (ArrayR shr _) sh _) = aprjParameters $ shapeExpVars shr sh
+arraySize :: HasCallStack => Arg genv (m sh e) -> Envs genv idxEnv -> Operands sh
+arraySize (ArgArray _ (ArrayR shr _) sh _) = envsPrjParameters $ shapeExpVars shr sh
 
 type family MarshalArg a where
   MarshalArg (Buffer e) = Ptr (ScalarArrayDataR e)

@@ -35,7 +35,6 @@ import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
-import Data.Array.Accelerate.Eval
 import Data.Array.Accelerate.Error
 
 
@@ -290,9 +289,9 @@ pattern OutDims  l = BackendSpecific (Dims           OutArr l)
 -- TODO: constraints and bounds for the new variable(s)
 instance MakesILP NativeOp where
   type BackendVar NativeOp = NativeILPVar
-  type BackendArg NativeOp = (Int, IterationDepth) -- direction, depth
-  defaultBA = (0,0)
-  data BackendClusterArg NativeOp a = BCAN IterationDepth
+  type BackendArg NativeOp = () -- (Int, IterationDepth) -- direction, depth
+  defaultBA = ()
+  data BackendClusterArg NativeOp a = BCAN
 
   mkGraph NBackpermute (_ :>: L (ArgArray In (ArrayR _shrI _) _ _) (_, lIns) :>: L (ArgArray Out (ArrayR shrO _) _ _) _ :>: ArgsNil) l@(Label i _) =
     Graph.Info
@@ -401,15 +400,15 @@ instance MakesILP NativeOp where
       (defaultBounds l)
 
   labelLabelledArg :: M.Map (Graph.Var NativeOp) Int -> Label -> LabelledArg env a -> LabelledArgOp NativeOp env a
-  labelLabelledArg vars l (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! InDir  l, vars M.!  InDims l)
-  labelLabelledArg vars l (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! OutDir l, vars M.! OutDims l)
-  labelLabelledArg _ _ (L x y) = LOp x y (0,0)
+  labelLabelledArg vars l (L x@(ArgArray In  _ _ _) y) = LOp x y ()
+  labelLabelledArg vars l (L x@(ArgArray Out _ _ _) y) = LOp x y ()
+  labelLabelledArg _ _ (L x y) = LOp x y ()
   getClusterArg :: LabelledArgOp NativeOp env a -> BackendClusterArg NativeOp a
-  getClusterArg (LOp _ _ (_, d)) = BCAN d
+  getClusterArg (LOp _ _ _) = BCAN
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
   finalize = foldMap $ \l -> timesN (manifest l) .>. ILP.c (OutDir l)
 
-  encodeBackendClusterArg (BCAN i) = intHost $(hashQ ("BCAN" :: String)) <> intHost i
+  encodeBackendClusterArg (BCAN) = intHost $(hashQ ("BCAN" :: String))
 
 inputConstraints :: Label -> Labels -> Constraint NativeOp
 inputConstraints l = foldMap $ \lIn -> 
@@ -423,124 +422,16 @@ inrankifmanifest shr l = ILP.int (rank shr) .+. timesN (manifest l) .>=. ILP.c (
 outrankifmanifest :: ShapeR sh -> Label -> Constraint NativeOp
 outrankifmanifest shr l = ILP.int (rank shr) .+. timesN (manifest l) .>=. ILP.c (OutDims l)
                        <> ILP.int (rank shr) .-. timesN (manifest l) .<=. ILP.c (OutDims l)
-        
-        
 
 defaultBounds :: Label -> Bounds NativeOp
 defaultBounds l = lower (-2) (InDir l) <> lower (-2) (OutDir l) <> lower 0 (InDims l) <> lower 0 (OutDims l)
-
 
 instance NFData' (BackendClusterArg NativeOp) where
   rnf' !_ = ()
 
 instance ShrinkArg (BackendClusterArg NativeOp) where
-  shrinkArg _ (BCAN i) = BCAN i
-  deadArg (BCAN i) = BCAN i
-
-data IndexPermutation env where
-  BP :: ShapeR sh1 -> ShapeR sh2 -> Fun env (sh1 -> sh2) -> GroundVars env sh1 -> IndexPermutation env
-type IterationDepth = Int
-instance Show (BackendClusterArg2 NativeOp env arg) where
-  show (BCAN2 i d) = "{ depth = " <> show d <> ", perm = " <> show i <> " }"
-  show IsUnit = "()"
-instance Show (IndexPermutation env) where
-  show (BP sh1 sh2 f _) = show (rank sh1) <> "->" <> show (rank sh2) <> ": " <> show (prettyFun (infenv 0) f)
-    where
-      infenv i = unsafeCoerce $ infenv (i+1) `Push` (pretty $ "x"<>show i)
-instance StaticClusterAnalysis NativeOp where
-  data BackendClusterArg2 NativeOp env arg where
-    BCAN2 :: Maybe (IndexPermutation env) -> IterationDepth -> BackendClusterArg2 NativeOp env arg -- non-array args just get ths one with '999', should make a new constructor for them
-    IsUnit ::BackendClusterArg2 NativeOp env (m sh ()) -- units don't get backpermuted because they don't exist
-  def (ArgArray _ (ArrayR _ TupRunit) _ TupRunit) _ _ = IsUnit
-  def _ _ (BCAN i) = BCAN2 Nothing i
-  unitToVar    = bcan2id
-  varToUnit    = bcan2id
-  valueToIn    = bcan2id
-  valueToOut   = bcan2id
-  inToValue    = bcan2id
-  outToValue   = bcan2id
-  outToSh      = bcan2id
-  shToOut      = bcan2id
-  shToValue    = bcan2id
-  varToValue   = bcan2id
-  varToSh      = bcan2id
-  shToVar      = bcan2id
-  shrinkOrGrow _ (ArrayR _ TupRunit) _ = IsUnit
-  shrinkOrGrow _ a IsUnit = error "can't grow from unit"
-  shrinkOrGrow _ _ x = bcan2id x
-  addTup       = bcan2id
-  inToVar = bcan2id
-  -- onOp propagates the backpermute information from the outputs to the inputs of each operation
-  onOp NMap (bp :>: ArgsNil) _ _ = BCAN2 Nothing undefined :>: bcan2id bp :>: bp :>: ArgsNil
-  onOp NBackpermute (BCAN2 (Just bp@(BP shr1 shr2 g sh)) d :>: ArgsNil) (ArgFun f :>: ArgArray In (ArrayR shrI _) _ _ :>: ArgArray Out (ArrayR shrO _) _ _ :>: ArgsNil) _
-    | Just Refl <- matchShapeR shrO shr2  = BCAN2 Nothing 999 :>: BCAN2 (Just (BP shr1 shrI (compose f g) sh)) d :>: BCAN2 (Just bp) d :>: ArgsNil
-    | otherwise = error "BP shapeR doesn't match backpermute output shape"
-  onOp NBackpermute (BCAN2 Nothing d           :>: ArgsNil) (ArgFun f :>: ArgArray In (ArrayR shrI _) _ _ :>: ArgArray Out (ArrayR shrO _) sh _ :>: ArgsNil) _
-                                          = BCAN2 Nothing d :>: BCAN2 (Just (BP shrO shrI f sh)) d             :>: BCAN2 Nothing d           :>: ArgsNil    
-  onOp NGenerate (bp :>: ArgsNil) (_:>:ArgArray Out (ArrayR shR _) _ _ :>:ArgsNil) _ = 
-    bcan2id bp :>: bp :>: ArgsNil -- store the bp in the function, because there is no input array
-  onOp NPermute  ArgsNil (_:>:_:>:_:>:ArgArray In (ArrayR shR _) _ _ :>:ArgsNil) _ = 
-    BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing 999 :>: BCAN2 Nothing (rank shR) :>: ArgsNil
-  onOp NPermute' ArgsNil (_:>:ArgArray In (ArrayR shR _) _ _ :>:ArgsNil) _ = 
-    BCAN2 Nothing 999 :>: BCAN2 Nothing (rank shR) :>: ArgsNil
-  -- onOp NFold  (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: fold1bp bp :>: bp :>: ArgsNil
-  onOp NFold1  (bp :>: ArgsNil) (_ :>: ArgArray In _ fs _ :>: _ :>: ArgsNil) _ = BCAN2 Nothing 999 :>: fold2bp bp (case fs of TupRpair _ x -> x) :>: bp :>: ArgsNil
-  onOp (NScan1 _) (bp :>: ArgsNil) _ _ = BCAN2 Nothing 999 :>: bcan2id bp :>: bp :>: ArgsNil
-  onOp _ _ _ _ = error "todo"
-  pairinfo _ IsUnit IsUnit = error "can't yet"
-  pairinfo a@(ArrayR shr (TupRpair l r)) IsUnit x = shrinkOrGrow (ArrayR shr r) a x
-  pairinfo a@(ArrayR shr (TupRpair l r)) x IsUnit = shrinkOrGrow (ArrayR shr l) a x
-  pairinfo _ x y = if bcan2id x == y then bcan2id x else 
-    case (x,y) of
-      -- these two cases test whether the function is id, but it's still possible that one of the arguments got backpermuted to be smaller.
-      -- In that case we 'should' error here, but we can't check it
-      (BCAN2 Nothing xd, BCAN2 (Just (BP _ _ yp _)) yd)
-        | xd == yd
-        , Just Refl <- isIdentity yp
-        -> bcan2id y
-      (BCAN2 (Just (BP _ _ yp _)) yd, BCAN2 Nothing xd)
-        | xd == yd
-        , Just Refl <- isIdentity yp
-        -> bcan2id x
-      _ -> error $ "pairing unequal: " <> show x <> ", " <> show y
-  
-
-
-bcan2id :: BackendClusterArg2 NativeOp env arg -> BackendClusterArg2 NativeOp env arg'
-bcan2id (BCAN2 Nothing i) = BCAN2 Nothing i
-bcan2id (BCAN2 (Just (BP a b c d)) i) = BCAN2 (Just (BP a b c d)) i
-bcan2id IsUnit = unsafeCoerce IsUnit -- error "bcan2id unit"
-
-fold1bp :: BackendClusterArg2 NativeOp env (Out sh e) -> BackendClusterArg2 NativeOp env (In sh e)
-fold1bp (BCAN2 Nothing i) = BCAN2 Nothing i
-fold1bp (BCAN2 (Just (BP shr1 shr2 g sh)) i) = flip BCAN2 i $ Just $ BP shr1 shr2 (error "todo: multiply the innermost (outer constructor) dimension by the workassistsize" g) undefined
-fold1bp IsUnit = error "unit"
-
-fold2bp :: BackendClusterArg2 NativeOp env (Out sh e) -> GroundVars env Int -> BackendClusterArg2 NativeOp env (In (sh,Int) e)
-fold2bp (BCAN2 Nothing i) _ = BCAN2 Nothing (i+1)
-fold2bp (BCAN2 (Just (BP shr1 shr2 g sh)) i) foldsize = flip BCAN2 (i+1) $ Just $ 
-  BP 
-    (ShapeRsnoc shr1) 
-    (ShapeRsnoc shr2) 
-    (case g of
-      Lam lhs (Body e) -> Lam (LeftHandSidePair lhs $ LeftHandSideSingle scalarTypeInt) $ 
-                            Body $ Pair (weakenE (weakenSucc' weakenId) e) (Evar $ Var scalarTypeInt ZeroIdx)
-      _ -> error "function type in body or non-body below lam in sh1 -> sh2")
-    (TupRpair sh foldsize)
-fold2bp IsUnit _ = error "unit"
-
-instance Eq (BackendClusterArg2 NativeOp env arg) where
-  IsUnit == IsUnit = True
-  x@(BCAN2 p i) == y@(BCAN2 p' i') = p == p' && i == i'
-  _ == _ = False
-
-instance Eq (IndexPermutation env) where
-  (BP shr1 shr2 f _) == (BP shr1' shr2' f' _)
-    | Just Refl <- matchShapeR shr1 shr1'
-    , Just Refl <- matchShapeR shr2 shr2'
-    = isJust $ matchOpenFun f f'
-  _ == _ = False
-
+  shrinkArg _ BCAN = BCAN
+  deadArg BCAN = BCAN
 
 shrToTypeR :: ShapeR sh -> TypeR sh
 shrToTypeR ShapeRz = TupRunit

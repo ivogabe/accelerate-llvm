@@ -41,7 +41,7 @@ import Control.Applicative
 import Data.String
 import Prelude
 
-
+{-
 -- Stencil boundary conditions
 --
 data IRBoundary arch t where
@@ -326,4 +326,4 @@ uncons ShapeRz          (OP_Pair OP_Unit v2) = (v2, OP_Unit)
 uncons (ShapeRsnoc shr) (OP_Pair v1 v3)
   = let (i, v1') = uncons shr v1
     in  (i, OP_Pair v1' v3)
-
+-}
