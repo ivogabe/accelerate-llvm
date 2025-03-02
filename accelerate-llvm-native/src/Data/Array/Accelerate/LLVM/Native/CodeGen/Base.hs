@@ -49,12 +49,12 @@ import qualified Data.ByteString.Short.Char8                        as S8
 --  * work_function: ptr
 --  * continuation: ptr, u32 (program, location)
 --  * active_threads: u32,
---  * work_index: u32,
+--  * work_index: u64,
 --  * In the future, perhaps also store a work_size: u32
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = (((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), Word32)
+type Header = (((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), Word64)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
@@ -63,15 +63,14 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
 
-type KernelType env = Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)) -> Word32 -> Ptr Word64 -> Word8
+type KernelType env = Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)) -> Word64 -> Word8
 
 bindHeaderEnv
   :: forall env. Env AccessGroundR env
   -> ( PrimType (Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)))
      , CodeGen Native ()
-     , Operand (Ptr Word32)
-     , Operand (Word32)
-     , Operand (Ptr Word64)
+     , Operand (Ptr Word64) -- Pointer to work index
+     , Operand (Word64) -- First work index index
      , Operand (Ptr (SizedArray Word))
      , Gamma env
      )
@@ -84,7 +83,6 @@ bindHeaderEnv env =
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
   , LocalReference type' nameFirstIndex
-  , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameActivitiesSlot
   , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
   , gamma
   )
@@ -97,7 +95,6 @@ bindHeaderEnv env =
 
     nameIndex = "workassist.index"
     nameFirstIndex = "workassist.first_index"
-    nameActivitiesSlot = "workassist.activities_slot"
     nameKernelMemory = "kernel_memory"
 
     kernelMemTp :: PrimType (SizedArray Word)

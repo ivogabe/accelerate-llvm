@@ -162,13 +162,17 @@ bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
-bindLocalsInTile :: LoopDepth -> Int -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
-bindLocalsInTile depth tileSize = \envs -> foldlM go envs $ envsLocal envs
+bindLocalsInTile
+  :: forall target env idxEnv.
+     (forall t. Idx env (Buffer t) -> Bool)
+  -> LoopDepth -> Int -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
+bindLocalsInTile needsTileArray depth tileSize = \envs -> foldlM go envs $ envsLocal envs
   where
     go :: Envs env idxEnv -> EnvBinding LocalBufferR env -> CodeGen target (Envs env idxEnv)
     go envs (EnvBinding idx (LocalBufferR tp depth'))
       | depth /= depth' = return envs
       | Just _ <- prjPartial idx (envsGround envs) = return envs -- Already bound
+      | not (needsTileArray idx) = return envs
       | otherwise = do
         -- Introduce a new mutable variable on the stack
         ptr <- instr' $ Alloca $ ArrayPrimType (fromIntegral tileSize) (ScalarPrimType tp)

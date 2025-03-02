@@ -132,13 +132,13 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
-typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t first_index, uintptr_t *activities_slot);
+typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t first_index);
 struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;
   uint32_t program_continuation;
   _Atomic int32_t active_threads;
-  _Atomic uint32_t work_index;
+  _Atomic uint64_t work_index;
   // In the future, perhaps also store a uint32_t work_size
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
 };

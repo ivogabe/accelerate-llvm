@@ -86,7 +86,7 @@ codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
-  codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
+  codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index") $ do
     extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -95,7 +95,7 @@ codegen name env cluster args
     initBlock <- newBlock "init"
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
-    _ <- switch (OP_Word32 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
+    _ <- switch (OP_Word64 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
 
     if parallelDepth == 0 && rank shr /= 0 then do
@@ -124,7 +124,7 @@ codegen name env cluster args
           -- Number of tiles
           sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
           OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
-          tileCount <- instr' $ Trunc boundedType boundedType tileCount'
+          tileCount <- instr' $ BitCast scalarType tileCount'
 
           let envs' = envs{
             envsLoopDepth = 0,
@@ -163,9 +163,14 @@ codegen name env cluster args
           tileLoops <- genParallel kernelMem envs' TupleIdxSelf parCodes
 
           -- Declare fused away arrays
-          envs'' <- bindLocalsInTile 1 tileSize envs'
-          workassistLoop workassistIndex workassistFirstIndex workassistActivitiesSlot tileCount $ \seqMode tileIdx' -> do
-            tileIdx <- instr' $ Ext boundedType boundedType tileIdx'
+          -- Declare as a tile array if there are multiple tile loops,
+          -- otherwise as a single value.
+          -- TODO: We can make this more precise by tracking whether arrays are
+          -- only used in one tile loop. These arrays can also be stored as a
+          -- single value.
+          envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
+          workassistLoop workassistIndex workassistFirstIndex tileCount $ \seqMode tileIdx' -> do
+            tileIdx <- instr' $ BitCast scalarType tileIdx'
 
             tileIdxAbsolute <-
               -- For a scanr, convert low-to-high indices to high-to-low indices:
@@ -289,7 +294,7 @@ codegen name env cluster args
 
       setBlock workBlock
       let ann = [if hasPermute then Loop.LoopInterleave else Loop.LoopVectorize]
-      workassistChunked ann parallelShr workassistIndex workassistFirstIndex workassistActivitiesSlot tileSize parSizes $ \idx -> do
+      workassistChunked ann parallelShr workassistIndex workassistFirstIndex tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -303,7 +308,7 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, workassistIndex, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True
