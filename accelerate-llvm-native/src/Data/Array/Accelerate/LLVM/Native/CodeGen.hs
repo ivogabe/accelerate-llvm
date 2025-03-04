@@ -29,9 +29,7 @@
 --
 
 module Data.Array.Accelerate.LLVM.Native.CodeGen
--- (
---   codegen
---   )
+  ( codegen )
   where
 
 -- accelerate

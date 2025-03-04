@@ -157,7 +157,7 @@ bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
       | Just _ <- prjPartial idx (envsGround envs) = return envs -- Already bound
       | otherwise = do
         -- Introduce a new mutable variable on the stack
-        ptr <- instr' $ Alloca $ ScalarPrimType tp
+        ptr <- hoistAlloca $ ScalarPrimType tp
         ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
@@ -175,7 +175,7 @@ bindLocalsInTile needsTileArray depth tileSize = \envs -> foldlM go envs $ envsL
       | not (needsTileArray idx) = return envs
       | otherwise = do
         -- Introduce a new mutable variable on the stack
-        ptr <- instr' $ Alloca $ ArrayPrimType (fromIntegral tileSize) (ScalarPrimType tp)
+        ptr <- hoistAlloca $ ArrayPrimType (fromIntegral tileSize) (ScalarPrimType tp)
         ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeTile Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }

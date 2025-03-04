@@ -380,7 +380,7 @@ tupleAlloca TupRunit = return TupRunit
 tupleAlloca (TupRpair t1 t2) = TupRpair <$> tupleAlloca t1 <*> tupleAlloca t2
 tupleAlloca (TupRsingle tp)
   | Refl <- reprIsSingle @ScalarType @e @Ptr tp
-  = TupRsingle <$> instr' (Alloca $ ScalarPrimType tp)
+  = TupRsingle <$> hoistAlloca (ScalarPrimType tp)
 
 tuplePtrs :: forall full arch. TypeR full -> Operand (Ptr (Struct full)) -> CodeGen arch (TupR Operand (Distribute Ptr full))
 tuplePtrs tp ptr = go TupleIdxSelf tp

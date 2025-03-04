@@ -34,7 +34,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Monad (
 
   -- instructions
   instr, instr', instrMD, instrMD', do_, return_, retval_, br, cbr, cbrMD, switch,
-  phi, phi', phi1,
+  phi, phi', phi1, hoistAlloca,
   instr_,
 
   -- metadata
@@ -53,6 +53,7 @@ import qualified Data.Array.Accelerate.Debug.Internal               as Debug
 import Data.Array.Accelerate.LLVM.Compile.Cache                     ( UID )
 
 import LLVM.AST.Orphans                                             ()
+import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Instruction
@@ -102,6 +103,7 @@ data CodeGenState = CodeGenState
   , intrinsicTable      :: HashMap ShortByteString Label                  -- standard math intrinsic functions
   , local               :: {-# UNPACK #-} !Word                           -- a name supply
   , global              :: {-# UNPACK #-} !Word                           -- a name supply for global variables
+  , allocaIndex         :: {-# UNPACK #-} !Word                           -- a name supply for hoisted allocas
   , blocksAllocated     :: Int                                            -- number of blocks generated
   }
   deriving (Show)
@@ -147,6 +149,7 @@ codeGenFunction name returnTp bind body = do
         , intrinsicTable     = intrinsicForTarget @arch
         , local              = 0
         , global             = 0
+        , allocaIndex        = 0
         , blocksAllocated    = 0
         }
 
@@ -283,6 +286,10 @@ freshLocalName = state $ \s@CodeGenState{..} -> ( UnName local, s { local = loca
 freshGlobalName :: CodeGen arch (Name a)
 freshGlobalName = state $ \s@CodeGenState{..} -> ( UnName global, s { global = global + 1 } )
 
+-- | Generate a fresh local name for a hoisted alloca
+--
+freshAllocaName :: CodeGen arch (Name a)
+freshAllocaName = state $ \s@CodeGenState{..} -> ( Name $ fromString $ "alloca." ++ show allocaIndex, s { allocaIndex = allocaIndex + 1 } )
 
 -- | Add an instruction to the state of the currently active block so that it is
 -- computed, and return the operand (LocalReference) that can be used to later
@@ -397,6 +404,16 @@ phi1 target crit incoming =
       Just i  -> ( LocalReference (PrimType t) crit
                  , s { blockChain = Seq.adjust update i (blockChain s) } )
 
+hoistAlloca :: PrimType t -> CodeGen arch (Operand (Ptr t))
+hoistAlloca tp = do
+  name <- freshAllocaName
+  let update = \b -> b { instructions = downcast (name := Alloca tp) Seq.<| instructions b }
+
+  state $ \s ->
+    case Seq.findIndexR (\b -> blockLabel b == "entry") (blockChain s) of
+      Nothing -> internalError "could not find entry block"
+      Just i  -> ( LocalReference (PrimType $ PtrPrimType tp defaultAddrSpace) name
+                 , s { blockChain = Seq.adjust update i (blockChain s) } )
 
 -- | Add a termination condition to the current instruction stream. Also return
 -- the block that was just terminated.
