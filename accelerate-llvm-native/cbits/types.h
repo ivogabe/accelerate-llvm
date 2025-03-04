@@ -107,6 +107,9 @@ struct Task accelerate_dequeue(struct Workers *workers);
 
 void accelerate_signal_resolve(struct Workers *workers, struct Signal *signal);
 
+void* accelerate_raw_alloc(uint64_t size, uint64_t align);
+void accelerate_raw_free(void *ptr);
+
 void* accelerate_buffer_alloc(uint64_t byte_size);
 void accelerate_buffer_retain(void* interior);
 void accelerate_buffer_retain_by(void* interior, uint64_t amount);

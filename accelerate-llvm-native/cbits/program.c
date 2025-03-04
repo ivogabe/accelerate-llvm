@@ -1,7 +1,7 @@
 #include "types.h"
 
 struct Program* accelerate_program_alloc(uint64_t byte_size, ProgramFunction *function, void *destructor_mvar) {
-  struct Program* program = malloc(byte_size);
+  struct Program* program = accelerate_raw_alloc(byte_size, 8);
   program->reference_count = 1;
   program->run = function;
   program->destructor_mvar = destructor_mvar;
@@ -20,7 +20,7 @@ void accelerate_program_release(struct Program *program) {
     // and any kernels from this program, are not needed by this program any more.
     // The Haskell garbage collector may eventually deallocate them.
     hs_try_putmvar(-1, program->destructor_mvar);
-    free(program);
+    accelerate_raw_free(program);
   }
 }
 
