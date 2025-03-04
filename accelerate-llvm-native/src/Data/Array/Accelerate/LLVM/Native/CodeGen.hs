@@ -242,7 +242,12 @@ codegen name env cluster args
                         -- The first tile loop only does a reduction, others will perform a scan.
                         -- Loops containing permute (not permuteUnique) can
                         -- also not be vectorized.
-                        ++ [ if isFirstTileLoop && not hasPermute then Loop.LoopVectorize else Loop.LoopInterleave ]
+                        -- Reduction cannot always be vectorized. This might in particular fail
+                        -- on reductions of multiple values (tuples/pairs). For now, we thus do
+                        -- not request vectorization, until we can reliably know whether LLVM can
+                        -- vectorize something, or generate our code in a form that LLVM can
+                        -- definitely vectorize.
+                        ++ [ Loop.LoopInterleave ] -- Loop.LoopVectorize
                         -- We can use LoopNonEmpty since we
                         -- know that each tile is non-empty.
                         ++ [ Loop.LoopNonEmpty ]
@@ -293,7 +298,10 @@ codegen name env cluster args
       retval_ $ scalar (scalarType @Word8) 0
 
       setBlock workBlock
-      let ann = [if hasPermute then Loop.LoopInterleave else Loop.LoopVectorize]
+      let ann = 
+            if parallelDepth /= rank shr then []
+            else if hasPermute then [Loop.LoopInterleave]
+            else [Loop.LoopVectorize]
       workassistChunked ann parallelShr workassistIndex workassistFirstIndex tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
