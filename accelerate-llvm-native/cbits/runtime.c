@@ -94,14 +94,14 @@ void* accelerate_worker(void *data_packed) {
       } else {
         // Initialize kernel memory and check if the kernel should be executed in parallel.
         unsigned char parallel =
-          kernel->work_function(kernel, 0xFFFFFFFF, NULL);
+          kernel->work_function(kernel, 0xFFFFFFFF);
 
         // start_task from the Work Assisting paper
         if (parallel == 1) {
           atomic_store_explicit(&workers->scheduler.activities[thread_idx], accelerate_pack(kernel, 0), memory_order_release);
           accelerate_parker_wake_all(&workers->scheduler.parker);
         }
-        kernel->work_function(kernel, 0, (uintptr_t*) &workers->scheduler.activities[thread_idx]);
+        kernel->work_function(kernel, 0);
         // Keep track of whether this was the last thread working on the kernel
         bool is_last;
         if (parallel == 1) {
@@ -151,7 +151,7 @@ void* accelerate_worker(void *data_packed) {
         if (is_last) {
           // The last thread executes the finish function.
           // First, execute the finish procedure of the kernel:
-          kernel->work_function(kernel, 0xFFFFFFFE, NULL);
+          kernel->work_function(kernel, 0xFFFFFFFE);
           // Then continue the program after this kernel, via
           // program_continuation in the KernelLaunch structure.
           task.program = kernel->program;
@@ -187,7 +187,7 @@ void* accelerate_worker(void *data_packed) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
       uint32_t i = atomic_fetch_add_explicit(&kernel->work_index, 1, memory_order_relaxed);
-      kernel->work_function(kernel, i, (uintptr_t*) ptr);
+      kernel->work_function(kernel, i);
       // signal_task_empty from the Work Assisting paper,
       // and end_task
       // Similar to above, signal_task_empty happens here instead of in the work function.
@@ -216,7 +216,7 @@ void* accelerate_worker(void *data_packed) {
       if (is_last) {
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
-        kernel->work_function(kernel, 0xFFFFFFFE, NULL);
+        kernel->work_function(kernel, 0xFFFFFFFE);
         // Then continue the program after this kernel, via
         // program_continuation in the KernelLaunch structure.
         task.program = kernel->program;
