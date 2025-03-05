@@ -39,8 +39,6 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 import qualified LLVM.AST                                           as LLVM
 
-import Data.Array.Accelerate.AST.Environment
-import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.Array.Buffer                           ( ScalarArrayDataR, SingleArrayDict(..), singleArrayDict )
 import Data.Array.Accelerate.Representation.Array
@@ -60,7 +58,7 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 --
 {-# INLINEABLE readArray' #-}
 readArray'
-    :: forall int genv idxEnv m sh e arch.
+    :: forall genv idxEnv m sh e arch.
        Envs genv idxEnv
     -> Arg genv (m sh e) -- m is In or Mut
     -> ExpVars idxEnv sh
@@ -77,7 +75,9 @@ readArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx = do
     read (TupRsingle t)   (TupRsingle buffer)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- envsPrjBuffer buffer env
-      = ir t <$> readBuffer t TypeInt irbuffer linearIdx' (Just $ op TypeInt $ envsTileLocalIndex env)
+      = ir t <$> readBuffer t TypeInt irbuffer linearIdx'
+        (Just $ op TypeInt $ envsTileLocalIndex env)
+        (Just $ op TypeInt $ envsSimdLane env)
     read _ _ = internalError "Tuple mismatch"
   read tp buffers
 
@@ -99,7 +99,7 @@ readArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) = read tp 
     read (TupRsingle t)   (TupRsingle buffer)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- aprjBuffer buffer env
-      = ir t <$> readBuffer t int irbuffer ix Nothing
+      = ir t <$> readBuffer t int irbuffer ix Nothing Nothing
     read _ _ = internalError "Tuple mismatch"
 
 readBuffer
@@ -108,23 +108,27 @@ readBuffer
     -> IRBuffer e
     -> Operand int
     -> Maybe (Operand Int) -- Index within a tile, if in a tile loop
+    -> Maybe (Operand Int) -- Index of a SIMD lane, if in a SIMD loop
     -> CodeGen arch (Operand e)
-readBuffer e i (IRBuffer buffer a v IRBufferScopeArray alias) ix _ = do
+readBuffer e i (IRBuffer buffer a v IRBufferScopeArray alias) ix _ _ = do
   p <- getElementPtr a e i buffer ix
   load a e v p alias
-readBuffer e i (IRBuffer buffer a v IRBufferScopeSingle alias) _ _ = do
+readBuffer e _ (IRBuffer buffer a v IRBufferScopeSingle alias) _ _ _ = do
   p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
   load a e v p alias
-readBuffer e i (IRBuffer buffer a v IRBufferScopeTile alias) _ (Just localIx) = do
+readBuffer e _ (IRBuffer buffer a v IRBufferScopeSIMD alias) _ _ (Just simdLane) = do
+  p <- getElementPtr a e TypeInt buffer simdLane
+  load a e v p alias
+readBuffer e _ (IRBuffer buffer a v IRBufferScopeTile alias) _ (Just localIx) _ = do
   p <- getElementPtr a e TypeInt buffer localIx
   load a e v p alias
-readBuffer _ _ _ _ _ = internalError "Cannot read from buffer in Tile scope"
+readBuffer _ _ _ _ _ _ = internalError "Cannot read from buffer in Tile or SIMD scope"
 
 -- | Write a value into an array at the given index
 --
 {-# INLINEABLE writeArray' #-}
 writeArray'
-    :: forall int genv idxEnv m sh e arch.
+    :: forall genv idxEnv m sh e arch.
        Envs genv idxEnv
     -> Arg genv (m sh e) -- m is Out or Mut
     -> ExpVars idxEnv sh
@@ -142,7 +146,10 @@ writeArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx val = do
     write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- envsPrjBuffer buffer env
-      = writeBuffer t TypeInt irbuffer linearIdx' (Just $ op TypeInt $ envsTileLocalIndex env) value
+      = writeBuffer t TypeInt irbuffer linearIdx'
+          (Just $ op TypeInt $ envsTileLocalIndex env)
+          (Just $ op TypeInt $ envsSimdLane env)
+          value
     write _ _ _ = internalError "Tuple mismatch"
   write tp buffers val
 
@@ -151,7 +158,7 @@ writeArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx val = do
 --
 {-# INLINEABLE writeArrayAt' #-}
 writeArrayAt'
-    :: forall int genv idxEnv m sh e arch.
+    :: forall genv idxEnv m sh e arch.
        Envs genv idxEnv
     -> Arg genv (m (sh, Int) e) -- m is Out or Mut
     -> ExpVars idxEnv sh
@@ -172,7 +179,7 @@ writeArrayAt' env (ArgArray _ (ArrayR shr tp) sh buffers) idx i val = do
       , irbuffer <- envsPrjBuffer buffer env
       -- Note that operations using writeArrayAt' cannot fuse,
       -- hence we can pass Nothing here.
-      = writeBuffer t TypeInt irbuffer linearIdx' Nothing value
+      = writeBuffer t TypeInt irbuffer linearIdx' Nothing Nothing value
     write _ _ _ = internalError "Tuple mismatch"
   write tp buffers val
 
@@ -196,7 +203,7 @@ writeArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) val = wri
     write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- aprjBuffer buffer env
-      = writeBuffer t int irbuffer ix Nothing value
+      = writeBuffer t int irbuffer ix Nothing Nothing value
     write _ _ _ = internalError "Tuple mismatch"
 
 
@@ -206,21 +213,26 @@ writeBuffer
     -> IRBuffer e
     -> Operand int
     -> Maybe (Operand Int) -- The local index within a tile, if in a tile loop
+    -> Maybe (Operand Int) -- Index of a SIMD lane, if in a SIMD loop
     -> Operand e
     -> CodeGen arch ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeArray alias) ix _ x = do
+writeBuffer e i (IRBuffer buffer a v IRBufferScopeArray alias) ix _ _ x = do
   p <- getElementPtr a e i buffer ix
   _ <- store a v e p x alias
   return ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeSingle alias) ix _ x = do
+writeBuffer e _ (IRBuffer buffer a v IRBufferScopeSingle alias) _ _ _ x = do
   p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
   _ <- store a v e p x alias
   return ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeTile alias) _ (Just localIx) x = do
+writeBuffer e _ (IRBuffer buffer a v IRBufferScopeSIMD alias) _ _ (Just simdLane) x = do
+  p <- getElementPtr a e TypeInt buffer simdLane
+  _ <- store a v e p x alias
+  return ()
+writeBuffer e _ (IRBuffer buffer a v IRBufferScopeTile alias) _ (Just localIx) _ x = do
   p <- getElementPtr a e TypeInt buffer localIx
   _ <- store a v e p x alias
   return ()
-writeBuffer _ _ _ _ _ _ = internalError "Cannot write to buffer in Tile scope"
+writeBuffer _ _ _ _ _ _ _ = internalError "Cannot write to buffer in Tile scope"
 
 
 -- | A wrapper around the GetElementPtr instruction, which correctly

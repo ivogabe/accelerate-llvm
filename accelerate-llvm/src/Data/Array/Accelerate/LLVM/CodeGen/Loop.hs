@@ -21,7 +21,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Loop
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
 
-import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic
+import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
@@ -54,6 +54,8 @@ data LoopAnnotation
   -- | Add a vectorization instruction to the generated LLVM code. This is no
   -- guarantee that LLVM will actually vectorize it.
   = LoopVectorize
+  -- | Instruct LLVM to not vectorize this loop.
+  | LoopNoVectorize
   -- | Add an annotation to the generated LLVM code to inform LLVM that is
   -- should interleave iterations of the loop. This might be a good
   -- alternative, if vectorization is not possible.
@@ -213,9 +215,128 @@ while ann tp test body start = do
     placeAnnotation :: LoopAnnotation -> Maybe (CodeGen arch LLVM.MetadataNodeID)
     placeAnnotation LoopVectorize = Just $
       addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.vectorize.enable", Just $ MetadataConstantOperand $ LLVM.Int 1 1])
+    placeAnnotation LoopNoVectorize = Just $
+      addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.vectorize.enable", Just $ MetadataConstantOperand $ LLVM.Int 1 0])
     placeAnnotation LoopInterleave = Just $
       addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.interleave.count", Just $ MetadataConstantOperand $ LLVM.Int 32 32])
     placeAnnotation _ = Nothing
+
+-- | Creates an interleaved loop.
+-- Instead of creating a loop like:
+-- for (i = 0; i < n; i += 1) {
+--   A
+--   B
+--   C
+-- }
+-- This creates a loop of the form:
+-- for (; i < n % 32; i += 1) {
+--   A
+--   B
+--   C
+-- }
+-- for (i = 0; i < n; i += 32) {
+--   for (j in 0 .. 32) A;
+--   for (j in 0 .. 32) B;
+--   for (j in 0 .. 32) C;
+-- }
+-- If the first iteration requires special handling (first argument),
+-- we need to assure the scalar loop does at least one iteration. This is
+-- assured by changing 'n % 32' to '(n + 31) % 32 + 1'.
+-- This is somewhat similar to loop peeling. We do not peel just the first
+-- iteration from the loop, but the first few such that the remainder is a
+-- multiple of 'width'.
+--
+-- The benefit of this transformation is that vectorization might now be easier.
+-- The interleave count should thus generally be set to the preferred SIMD width.
+-- For instance, if C cannot be vectorized, we can still let LLVM vectorize A and B.
+-- Futhermore, if we can manually vectorize C, we can generate special code for
+-- that without the need to also manually vectorize A and B in Accelerate.
+loopInterleaved
+  :: forall arch.
+     Bool -- Whether first iteration requires special handling
+  -> Bool -- Descending
+  -> Int -- Interleave count (~ SIMD width)
+  -> Operands Int -- Inclusive lower bound
+  -> Operands Int -- Exclusive upper bound
+  -> InterleavedBody arch
+  -> CodeGen arch ()
+loopInterleaved firstSpecial desc width lower upper body = do
+  size <- A.sub numType upper lower
+  (start, end, increment, compare') <-
+    if desc then do
+      s <- A.sub numType upper (liftInt 1) -- Convert to inclusive bound
+      e <- A.sub numType lower (liftInt 1) -- Convert to exclusive bound
+      return (s, e, (-1), A.gt singleType)
+    else
+      return (lower, upper, 1, A.lt singleType)
+  
+  -- Scalar loop
+  scalarLoopCount <-
+    if firstSpecial then do
+      a <- A.add numType size (liftInt $ width - 1)
+      r <- A.rem TypeInt a (liftInt width)
+      c <- A.add numType r (liftInt 1)
+      -- Edge case: if the input is empty, then 'c' would now say that we need
+      -- to execute 'width' iterations. In all other cases 'c' is already
+      -- correct.
+      A.min singleType c size
+    else
+      A.rem TypeInt size (liftInt width)
+  scalarLoopEnd <-
+    if desc then
+      A.sub numType start scalarLoopCount
+    else
+      A.add numType start scalarLoopCount
+
+  _ <- while [LoopNoVectorize] (TupRsingle scalarTypeInt)
+    (\i -> compare' i scalarLoopEnd)
+    (\i -> do
+      isFirst <- A.eq singleType i start
+      body False isFirst i (\_ f -> f i (liftInt 0))
+      A.add numType i $ liftInt increment
+    )
+    start
+
+  let (simdStart, simdEnd) = if desc then (width - 1, -1) else (0, width)
+
+  -- After the scalar loop, we can do the bulk of the loop in steps of
+  -- 'width'.
+  _ <- while [] (TupRsingle scalarTypeInt)
+    (\i -> compare' i end)
+    (\i -> do
+      let
+        simdLoop :: [LoopAnnotation] -> (Operands Int -> Operands Int -> CodeGen arch ()) -> CodeGen arch ()
+        simdLoop ann f = do
+          _ <- while ann (TupRsingle scalarTypeInt)
+            (\j -> compare' j $ liftInt simdEnd)
+            (\j -> do
+              i' <- A.add numType i j
+              f i' j
+              A.add numType j $ liftInt increment 
+            )
+            (liftInt simdStart)
+          return ()
+
+      body False (OP_Bool $ boolean False) i simdLoop
+      A.add numType i $ liftInt $ width * increment
+    )
+    scalarLoopEnd
+  return ()
+
+type InterleavedBody arch
+  -- | Whether this is in the interleaved/simd loop (opposed to the scalar
+  -- loop, if the number of iteration doesn't divide the interleave count)
+  = Bool
+  -- | Whether this is the first iteration. This can only be True in the
+  -- scalar loop (i.e. if the first argument is False)
+  -> Operands Bool
+  -- The index of the first (lowest index in case of a descending loop, highest
+  -- index otherwise) element of this group (SIMD vector).
+  -> Operands Int
+  -- | Lifts code into an inner / SIMD loop. The function gets the global index
+  -- and the index in the interleaved loop (e.g. the simd lane index)
+  -> ([LoopAnnotation] -> (Operands Int -> Operands Int -> CodeGen arch ()) -> CodeGen arch ())
+  -> CodeGen arch ()
 
 loopWith
   :: [LoopAnnotation]
@@ -274,6 +395,10 @@ loopWith ann True lower upper body = do
 data LoopPeeling
   -- Do not perform loop peeling.
   = PeelNot
+  -- Do not perform loop peeling. The first iteration performs a dynamic check
+  -- whether this is the first iteration. When vectorizing this loop, the first
+  -- iteration should thus preferably be placed in the scalar loop.
+  | PeelNotCheck
   -- Perform loop peeling, but do not assume that the loop will execute at
   -- least one iteration. The code for the first iteration should thus be
   -- placed in a conditional.
@@ -283,8 +408,13 @@ data LoopPeeling
   | PeelGuaranteed
   deriving (Eq, Ord)
 
+peelNot :: LoopPeeling -> LoopPeeling
+peelNot PeelNot = PeelNot
+peelNot _ = PeelNotCheck
+
 loopPeelingToAnnotation :: LoopPeeling -> [LoopAnnotation]
 loopPeelingToAnnotation = \case
   PeelNot         -> []
+  PeelNotCheck    -> []
   PeelConditional -> [LoopPeel]
   PeelGuaranteed  -> [LoopPeel, LoopNonEmpty]

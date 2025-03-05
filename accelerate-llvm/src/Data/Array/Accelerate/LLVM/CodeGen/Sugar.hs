@@ -82,6 +82,10 @@ data IRBufferScope
   -- buffer.
   = IRBufferScopeSingle
   -- The pointer of the buffer refers to a fixed size chunk of memory,
+  -- corresponding to a SIMD vector. This is used to store data in an interleaved
+  -- loop, i.e. a loop where multiple iterations (the SIMD width) are interleaved.
+  | IRBufferScopeSIMD
+  -- The pointer of the buffer refers to a fixed size chunk of memory,
   -- corresponding to a tile loop. This is used to store data between different
   -- tile loops, when generating the code for a kernel containing scans.
   -- The pointer should be incremented by the iteration variable of the tile

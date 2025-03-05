@@ -144,7 +144,7 @@ codegen name env cluster args
                   -- first tile loop (the reduce step of the chained scan) are
                   -- still in the cache during the second tile loop (the scan
                   -- step of the chained scan).
-                  1024 * 16
+                  1024 * 2
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
@@ -190,7 +190,8 @@ codegen name env cluster args
           tileLoops <- genParallel kernelMem envs' TupleIdxSelf parCodes
 
           -- Declare fused away arrays
-          envs'' <- bindLocalsInTile 1 tileSize envs'
+          let simdWidth = 32
+          envs'' <- bindLocalsInTile 1 tileSize simdWidth (parCodeGenVarsAcrossTileLoops parCodes) envs'
           workassistLoop workassistIndex workassistFirstIndex workassistActivitiesSlot tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ Ext boundedType boundedType tileIdx'
 
@@ -211,7 +212,7 @@ codegen name env cluster args
             -- If there is only a single tile loop (i.e. no parallel scans),
             -- then we don't generate code for a single-threaded mode:
             -- the default mode already is as fast as a single-threaded mode.
-            let seqMode' = if null (ptOtherLoops tileLoops) then boolean False else seqMode
+            let seqMode' = boolean False -- if null (ptOtherLoops tileLoops) then boolean False else seqMode
 
             let envs''' = envs''{
                 envsTileIndex = OP_Int tileIdx
@@ -255,30 +256,41 @@ codegen name env cluster args
                 forM_ ((True, ptFirstLoop tileLoops) : map (False, ) (ptOtherLoops tileLoops)) $ \(isFirstTileLoop, tileLoop) -> do
                   -- All nested loops are placed in the first tile loop by parCodeGens
                   let loops'' = if isFirstTileLoop then loops' else []
-                  let ann =
-                        -- Only do loop peeling if requested and when there are no nested loops.
-                        -- Peeling over nested loops causes a lot of code duplication,
-                        -- and is probably not worth it.
-                        [ Loop.LoopPeel | ptPeel tileLoop && null loops'' ]
-                        -- LLVM cannot vectorize loops containing scans (yet).
-                        -- The first tile loop only does a reduction, others will perform a scan.
-                        -- Loops containing permute (not permuteUnique) can
-                        -- also not be vectorized.
-                        ++ [ if isFirstTileLoop && not hasPermute then Loop.LoopVectorize else Loop.LoopInterleave ]
-                        -- We can use LoopNonEmpty since we
-                        -- know that each tile is non-empty.
-                        ++ [ Loop.LoopNonEmpty ]
 
                   ptBefore tileLoop envs'''
-                  Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
-                    localIdx <- A.sub numType idx lower
-                    let envs'''' = envs'''{
-                        envsLoopDepth = 1,
-                        envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
-                        envsIsFirst = isFirst,
-                        envsTileLocalIndex = localIdx
-                      }
-                    genSequential envs'''' loops'' $ ptIn tileLoop
+                  if True then do
+                    let ann =
+                          -- Only do loop peeling if requested and when there are no nested loops.
+                          -- Peeling over nested loops causes a lot of code duplication,
+                          -- and is probably not worth it.
+                          [ Loop.LoopPeel | ptPeel tileLoop && null loops'' ]
+                          -- LLVM cannot vectorize loops containing scans (yet).
+                          -- The first tile loop only does a reduction, others will perform a scan.
+                          -- Loops containing permute (not permuteUnique) can
+                          -- also not be vectorized.
+                          ++ [ if isFirstTileLoop && not hasPermute then Loop.LoopVectorize else Loop.LoopInterleave ]
+                          -- We can use LoopNonEmpty since we
+                          -- know that each tile is non-empty.
+                          ++ [ Loop.LoopNonEmpty ]
+                    Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
+                      localIdx <- A.sub numType idx lower
+                      let envs'''' = envs'''{
+                          envsLoopDepth = 1,
+                          envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
+                          envsIsFirst = isFirst,
+                          envsTileLocalIndex = localIdx
+                        }
+                      genSequential envs'''' loops'' $ ptIn tileLoop
+                  else
+                    genTileInterleaved
+                      (envs'''{ envsLoopDepth = 1 })
+                      idxVar
+                      (ptPeel tileLoop)
+                      (isDescending direction)
+                      (ptIn tileLoop)
+                      simdWidth
+                      lower
+                      upper
                   ptAfter tileLoop envs'''
                 return OP_Unit
               )
@@ -1164,7 +1176,7 @@ instance EvalOp NativeOp where
     CN -> pure ()
     CJ x
       | Refl <- reprIsSingle @ScalarType @_ @Buffer tp
-      -> lift $ when (sh `isAtDepth` d) $ writeBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) Nothing (op tp x)
+      -> lift $ when (sh `isAtDepth` d) $ writeBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) Nothing Nothing (op tp x)
   writeOutput _ _ _ _ _ = error "not single"
 
   readInput :: forall e env sh. ScalarType e -> GroundVars env sh -> GroundVars env (Buffers e) -> Gamma env -> BackendClusterArg2 NativeOp env (In sh e) -> (Int, Operands Int, [Operands Int]) -> StateT Accumulated (CodeGen Native) (Compose Maybe Operands e)
@@ -1172,7 +1184,7 @@ instance EvalOp NativeOp where
   readInput tp _ (TupRsingle buf) gamma (BCAN2 Nothing d') (d,i, _)
     | d /= d' = pure CN
     | Refl <- reprIsSingle @ScalarType @e @Buffer tp
-    = lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) Nothing
+    = lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) Nothing Nothing
   readInput tp sh (TupRsingle buf) gamma (BCAN2 (Just (BP shr1 (shr2 :: ShapeR sh2) f _ls)) _) (d,_,ix)
     | Just Refl <- varsContainsThisShape sh shr2
     , shr1 `isAtDepth'` d
@@ -1181,7 +1193,7 @@ instance EvalOp NativeOp where
       sh2 <- app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) $ multidim shr1 ix
       let sh' = aprjParameters (groundToExpVar (shapeType shr2) sh) gamma
       i <- intOfIndex shr2 sh' sh2
-      readBuffer tp TypeInt (aprjBuffer (buf) gamma) (op TypeInt i) Nothing
+      readBuffer tp TypeInt (aprjBuffer (buf) gamma) (op TypeInt i) Nothing Nothing
     | otherwise = pure CN
   readInput _ _ (TupRsingle _) _ _ (_,_,_) = error "here"
   -- assuming no bp, and I'll just make a read at every depth?

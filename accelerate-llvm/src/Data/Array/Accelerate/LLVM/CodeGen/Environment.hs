@@ -41,6 +41,8 @@ import Data.Array.Accelerate.AST.Environment                    hiding ( Val, pr
 import Data.Array.Accelerate.AST.Operation
 import Data.Array.Accelerate.AST.Partitioned                    hiding ( Label )
 import Data.Array.Accelerate.AST.Idx                            ( Idx )
+import Data.Array.Accelerate.AST.IdxSet                         (IdxSet)
+import qualified Data.Array.Accelerate.AST.IdxSet               as IdxSet
 import Data.Array.Accelerate.Error                              ( internalError )
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Representation.Type
@@ -95,6 +97,8 @@ data Envs env idxEnv = Envs
   , envsTileIndex :: Operands Int
   -- The index within the tile, if this is in a parallel tiled loop
   , envsTileLocalIndex :: Operands Int
+  -- The index within a SIMD loop, if this is in a SIMD loop
+  , envsSimdLane :: Operands Int
   -- Whether the iteration at the current loop depth is the first iteration of
   -- the loop If this is in a tile loop, this says if this is the first
   -- iteration of that tile loop.
@@ -132,6 +136,7 @@ initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
       , envsIdx = PEnd
       , envsTileIndex = OP_Int $ scalar scalarTypeInt 0
       , envsTileLocalIndex = OP_Int $ scalar scalarTypeInt 0
+      , envsSimdLane = OP_Int $ scalar scalarTypeInt 0
       , envsIsFirst = OP_Bool $ boolean True
       , envsDescending = False
       }
@@ -162,8 +167,8 @@ bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
-bindLocalsInTile :: LoopDepth -> Int -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
-bindLocalsInTile depth tileSize = \envs -> foldlM go envs $ envsLocal envs
+bindLocalsInTile :: forall target env idxEnv. LoopDepth -> Int -> Int -> IdxSet env -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
+bindLocalsInTile depth tileSize interleaveSize acrossTileLoops = \envs -> foldlM go envs $ envsLocal envs
   where
     go :: Envs env idxEnv -> EnvBinding LocalBufferR env -> CodeGen target (Envs env idxEnv)
     go envs (EnvBinding idx (LocalBufferR tp depth'))
@@ -171,9 +176,11 @@ bindLocalsInTile depth tileSize = \envs -> foldlM go envs $ envsLocal envs
       | Just _ <- prjPartial idx (envsGround envs) = return envs -- Already bound
       | otherwise = do
         -- Introduce a new mutable variable on the stack
-        ptr <- instr' $ Alloca $ ArrayPrimType (fromIntegral tileSize) (ScalarPrimType tp)
+        let allocTile = IdxSet.member idx acrossTileLoops
+        let size = if allocTile then tileSize else interleaveSize
+        ptr <- instr' $ Alloca $ ArrayPrimType (fromIntegral size) (ScalarPrimType tp)
         ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
-        let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeTile Nothing
+        let value = IRBuffer ptr' defaultAddrSpace NonVolatile (if allocTile then IRBufferScopeTile else IRBufferScopeSIMD) Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
 envsGamma :: HasCallStack => Envs env idxEnv -> Gamma env
