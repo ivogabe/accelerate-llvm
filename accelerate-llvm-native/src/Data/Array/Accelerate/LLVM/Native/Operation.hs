@@ -297,6 +297,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
         <> ILP.c (InDir l) .==. int i
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
         <> inrankifmanifest shrO l
@@ -316,6 +317,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
         <> ILP.c (InDir  l) .==. ILP.c (OutDir  l)
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
         <> inrankifmanifest shr l)
@@ -324,6 +326,7 @@ instance MakesILP NativeOp where
     Graph.Info
       ( mempty & infusibleEdges .~ Set.map (-?> l) (lTargets <> lLocks)) -- add infusible edges from the producers of target and lock arrays to the permute
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
         <> ILP.c (InDims l) .==. int (rank shr)
         <> ILP.c (InDir  l) .==. int (-2)
         <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
@@ -333,6 +336,7 @@ instance MakesILP NativeOp where
     Graph.Info
       ( mempty & infusibleEdges .~ Set.map (-?> l) lTargets) -- add infusible edges from the producers of target array to the permute
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
         <> ILP.c (InDims l) .==. int (rank shr)
         <> ILP.c (InDir  l) .==. int (-2)
         <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
@@ -343,6 +347,7 @@ instance MakesILP NativeOp where
       -- Scan cannot fuse with its consumer, as the output is one larger than the input
       mempty
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
         <> ILP.c (InDir  l) .==. int dir'
         <> ILP.c (OutDir l) .==. int (-3)
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
@@ -356,6 +361,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
         <> ILP.c (InDir  l) .==. int dir'
         <> ILP.c (OutDir l) .==. int dir'
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
@@ -369,6 +375,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
         <> ILP.c (InDir  l) .==. int dir'
         -- TODO: Does this give a problem for the second output of scan' (the reduced values)?
         -- That array is one dimension lower.
@@ -384,6 +391,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. int (_labelId l)
         <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
         <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
         -- <> foldMap (\lin -> fused lin l .==. int 1) lIns
@@ -393,6 +401,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. int (_labelId l)
         <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
         <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
         -- <> foldMap (\lin -> fused lin l .==. int 1) lIns
@@ -414,6 +423,8 @@ inputConstraints :: Label -> Labels -> Constraint NativeOp
 inputConstraints l = foldMap $ \lIn -> 
                 timesN (fused lIn l) .>=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
     <> (-1) .*. timesN (fused lIn l) .<=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
+    <>          timesN (fused lIn l) .>=. ILP.c (InFoldSize l) .-. ILP.c (OutFoldSize lIn)
+    <> (-1) .*. timesN (fused lIn l) .<=. ILP.c (InFoldSize l) .-. ILP.c (OutFoldSize lIn)
 
 inrankifmanifest :: ShapeR sh -> Label -> Constraint NativeOp
 inrankifmanifest shr l = ILP.int (rank shr) .+. timesN (manifest l) .>=. ILP.c (InDims l)
