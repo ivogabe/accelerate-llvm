@@ -135,7 +135,7 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
-typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t first_index, void *ptr);
+typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t first_index);
 struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;
