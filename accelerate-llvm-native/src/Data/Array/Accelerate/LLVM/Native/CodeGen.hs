@@ -899,6 +899,16 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
           -- It is our turn since we are in the sequential mode,
           -- no need to wait
           return ()
+        else if relaxed then do
+          _ <- Loop.while [] TupRunit
+            (\_ -> do
+              -- While the lock is taken
+              old <- instr $ AtomicRMW numType NonVolatile Exchange idxPtr (scalar scalarType 1) (CrossThread, Acquire)
+              A.neq singleType old (A.liftInt 0)
+            )
+            (\_ -> return OP_Unit)
+            OP_Unit
+          return ()
         else do
           _ <- Loop.while [] TupRunit
             (\_ -> do
@@ -945,9 +955,13 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
         tupleStore tp valuePtrs new
 
         _ <- instr' $ Fence (CrossThread, Release)
-        OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-        _ <- instr' $ Store Volatile idxPtr nextIdx
-        return ()
+        if relaxed then do
+          _ <- instr' $ Store Volatile idxPtr $ scalar scalarType 0
+          return ()
+        else do
+          OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
+          _ <- instr' $ Store Volatile idxPtr nextIdx
+          return ()
   )
   (\_ _ _ -> return ())
   -- Code after the loop
@@ -994,6 +1008,7 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
     )
   )
   where
+    relaxed = False
     memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input
     identity
