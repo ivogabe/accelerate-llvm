@@ -297,8 +297,8 @@ pattern OutDims  l = BackendSpecific (Dims           OutArr l)
 -- TODO: constraints and bounds for the new variable(s)
 instance MakesILP NativeOp where
   type BackendVar NativeOp = NativeILPVar
-  type BackendArg NativeOp = () -- (Int, IterationDepth) -- direction, depth
-  defaultBA = ()
+  type BackendArg NativeOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
+  defaultBA = 0
   data BackendClusterArg NativeOp a = BCAN
 
   mkGraph NBackpermute (_ :>: L (ArgArray In (ArrayR _shrI _) _ _) (_, lIns) :>: L (ArgArray Out (ArrayR shrO _) _ _) _ :>: ArgsNil) l@(Label i _) =
@@ -443,9 +443,10 @@ instance MakesILP NativeOp where
       (defaultBounds l)
 
   labelLabelledArg :: M.Map (Graph.Var NativeOp) Int -> Label -> LabelledArg env a -> LabelledArgOp NativeOp env a
-  labelLabelledArg vars l (L x@(ArgArray In  _ _ _) y) = LOp x y ()
-  labelLabelledArg vars l (L x@(ArgArray Out _ _ _) y) = LOp x y ()
-  labelLabelledArg _ _ (L x y) = LOp x y ()
+  labelLabelledArg vars l (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! InDir  l)
+  labelLabelledArg vars l (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! OutDir l)
+  labelLabelledArg _ _ (L x y) = LOp x y 0
+
   getClusterArg :: LabelledArgOp NativeOp env a -> BackendClusterArg NativeOp a
   getClusterArg (LOp _ _ _) = BCAN
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
