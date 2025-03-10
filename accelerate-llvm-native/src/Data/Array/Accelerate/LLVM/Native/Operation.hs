@@ -77,18 +77,18 @@ data NativeOp t where
   NPermute'    :: NativeOp (Mut sh' e
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
-  NScan        :: Direction
+  NScan        :: Maybe Direction
                -> NativeOp (Fun' (e -> e -> e)
                          -> Exp' e
                          -> In (sh, Int) e
                          -> Out (sh, Int) e
                          -> ())
-  NScan1       :: Direction
+  NScan1       :: Maybe Direction
                -> NativeOp (Fun' (e -> e -> e)
                          -> In (sh, Int) e
                          -> Out (sh, Int) e
                          -> ())
-  NScan'       :: Direction
+  NScan'       :: Maybe Direction
                -> NativeOp (Fun' (e -> e -> e)
                          -> Exp' e
                          -> In (sh, Int) e
@@ -112,14 +112,17 @@ instance PrettyOp NativeOp where
   prettyOp NPermute     = "permute"
   prettyOp NPermute'    = "permuteUnique"
   prettyOp (NScan dir) = case dir of
-    LeftToRight -> "scanl"
-    RightToLeft -> "scanr"
+    Just LeftToRight -> "scanl"
+    Just RightToLeft -> "scanr"
+    Nothing -> "scanUnordered"
   prettyOp (NScan1 dir) = case dir of
-    LeftToRight -> "scanl1"
-    RightToLeft -> "scanr1"
+    Just LeftToRight -> "scanl1"
+    Just RightToLeft -> "scanr1"
+    Nothing -> "scanUnordered1"
   prettyOp (NScan' dir) = case dir of
-    LeftToRight -> "scanl'"
-    RightToLeft -> "scanr'"
+    Just LeftToRight -> "scanl'"
+    Just RightToLeft -> "scanr'"
+    Nothing -> "scanUnordered'"
   prettyOp NFold        = "fold"
   prettyOp NFold1       = "fold1"
 
@@ -172,14 +175,16 @@ instance EncodeOperation NativeOp where
   encodeOperation NGenerate    = intHost $(hashQ ("Generate" :: String))
   encodeOperation NPermute     = intHost $(hashQ ("Permute" :: String))
   encodeOperation NPermute'    = intHost $(hashQ ("Permute'" :: String))
-  encodeOperation (NScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
-  encodeOperation (NScan RightToLeft)  = intHost $(hashQ ("Scanr" :: String))
-  encodeOperation (NScan1 LeftToRight) = intHost $(hashQ ("Scanl1" :: String))
-  encodeOperation (NScan1 RightToLeft) = intHost $(hashQ ("Scanr1" :: String))
-  encodeOperation (NScan' LeftToRight) = intHost $(hashQ ("Scanl'" :: String))
-  encodeOperation (NScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
+  encodeOperation (NScan d)    = intHost $(hashQ ("Scanl" :: String))
+  encodeOperation (NScan1 d)   = intHost $(hashQ ("Scanl1" :: String))
+  encodeOperation (NScan' d)   = intHost $(hashQ ("Scanl'" :: String))
   encodeOperation NFold        = intHost $(hashQ ("Fold" :: String))
   encodeOperation NFold1       = intHost $(hashQ ("Fold1" :: String))
+
+encodeDirection :: Maybe Direction -> Builder
+encodeDirection Nothing = intHost $(hashQ ("Unordered" :: String))
+encodeDirection (Just LeftToRight) = intHost $(hashQ ("l" :: String))
+encodeDirection (Just RightToLeft) = intHost $(hashQ ("r" :: String))
 
 instance SetOpIndices NativeOp where
   setOpIndices _ NGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
@@ -247,20 +252,23 @@ instance SetOpIndices NativeOp where
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
     where
       dir' = case dir of
-        LeftToRight -> LoopAscending
-        RightToLeft -> LoopDescending
+        Just LeftToRight -> LoopAscending
+        Just RightToLeft -> LoopDescending
+        Nothing -> LoopMonotone
   getOpLoopDirections (NScan1 dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
     where
       dir' = case dir of
-        LeftToRight -> LoopAscending
-        RightToLeft -> LoopDescending
+        Just LeftToRight -> LoopAscending
+        Just RightToLeft -> LoopDescending
+        Nothing -> LoopMonotone
   getOpLoopDirections (NScan' dir) _ (_ :>: _ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
     where
       dir' = case dir of
-        LeftToRight -> LoopAscending
-        RightToLeft -> LoopDescending
+        Just LeftToRight -> LoopAscending
+        Just RightToLeft -> LoopDescending
+        Nothing -> LoopMonotone
   getOpLoopDirections NFold _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
   getOpLoopDirections NFold1 _ (_ :>: IdxArgIdx _ i :>: _)
@@ -342,7 +350,7 @@ instance MakesILP NativeOp where
         <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
       ( lower (-2) (InDir l)
       <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). 
-  mkGraph (NScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
+  mkGraph (NScan (Just dir)) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
     Graph.Info
       -- Scan cannot fuse with its consumer, as the output is one larger than the input
       mempty
@@ -357,7 +365,17 @@ instance MakesILP NativeOp where
       dir' = case dir of
         LeftToRight -> -2
         RightToLeft -> -1
-  mkGraph (NScan1 dir) (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
+  mkGraph (NScan Nothing) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
+    Graph.Info
+      -- Scan cannot fuse with its consumer, as the output is one larger than the input
+      mempty
+      (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
+        <> ILP.c (OutDir l) .==. int (-3)
+        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
+        <> ILP.c (InDims l) .==. int (rank shr))
+      ( lower (-2) (InDir l) <> lower (-3) (OutDir l) <> lower 0 (InDims l) <> lower 0 (OutDims l) )
+  mkGraph (NScan1 (Just dir)) (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
     Graph.Info
       mempty
       (    inputConstraints l lIns
@@ -371,7 +389,15 @@ instance MakesILP NativeOp where
       dir' = case dir of
         LeftToRight -> -2
         RightToLeft -> -1
-  mkGraph (NScan' dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: _ :>: ArgsNil) l =
+  mkGraph (NScan1 Nothing) (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
+    Graph.Info
+      mempty
+      (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
+        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
+        <> ILP.c (InDims l) .==. int (rank shr))
+      (defaultBounds l)
+  mkGraph (NScan' (Just dir)) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: _ :>: ArgsNil) l =
     Graph.Info
       mempty
       (    inputConstraints l lIns
@@ -387,6 +413,14 @@ instance MakesILP NativeOp where
       dir' = case dir of
         LeftToRight -> -2
         RightToLeft -> -1
+  mkGraph (NScan' Nothing) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: _ :>: ArgsNil) l =
+    Graph.Info
+      mempty
+      (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
+        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
+        <> ILP.c (InDims l) .==. int (rank shr))
+      (defaultBounds l)
   mkGraph NFold (_ :>: _ :>: L (ArgArray In (ArrayR (ShapeRsnoc shr) _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
     Graph.Info
       mempty

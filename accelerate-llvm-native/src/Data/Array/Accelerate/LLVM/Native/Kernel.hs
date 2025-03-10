@@ -131,17 +131,14 @@ operationName = \case
   NGenerate    -> (2, "generate", "generates")
   NPermute     -> (5, "permute", "permutes")
   NPermute'    -> (5, "permute", "permutes")
-  NScan LeftToRight
-               -> (4, "scanl", "scanls")
-  NScan RightToLeft
-               -> (4, "scanr", "scanrs")
-  NScan1 LeftToRight
-               -> (4, "scanl", "scanls")
-  NScan1 RightToLeft
-               -> (4, "scanr", "scanrs")
-  NScan' LeftToRight
-               -> (4, "scanl", "scanls")
-  NScan' RightToLeft
-               -> (4, "scanr", "scanrs")
+  NScan  dir   -> scanName dir
+  NScan1 dir   -> scanName dir
+  NScan' dir   -> scanName dir
   NFold        -> (3, "fold", "folds")
   NFold1       -> (3, "fold", "folds")
+  where
+    scanName :: Maybe Direction -> (Int, String, String)
+    scanName = \case
+      Just LeftToRight -> (4, "scanl", "scanls")
+      Just RightToLeft -> (4, "scanl", "scanls")
+      Nothing -> (4, "scanUnordered", "scansUnordered")

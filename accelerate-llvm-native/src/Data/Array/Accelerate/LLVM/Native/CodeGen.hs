@@ -501,7 +501,43 @@ opCodeGen flatOp@(FlatOp (NScan' _)
   )
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp (NScan LeftToRight)
+opCodeGen flatOp@(FlatOp (NScan (Just RightToLeft))
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
+    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
+  ( depth - 1
+  , OpCodeGenLoop
+    flatOp
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
+      writeArrayAt' envs output rowIdx n' seed'
+      return var
+    )
+    (\var envs -> do
+      accum <- tupleLoad tp var
+      x <- readArray' envs input inputIdx
+      new <-
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+      writeArray' envs output inputIdx new
+    )
+    (\_ _ -> return ())
+  )
+  where
+    ArgArray _ (ArrayR _ tp) inputSh _ = input
+    n = case inputSh of
+      TupRpair _ (TupRsingle n') -> n'
+      _ -> internalError "Shape impossible"
+    rowIdx = case inputIdx of
+      TupRpair i _ -> i
+      _ -> internalError "Shape impossible"
+opCodeGen flatOp@(FlatOp (NScan _)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
   ( depth - 1
@@ -539,42 +575,6 @@ opCodeGen flatOp@(FlatOp (NScan LeftToRight)
     rowIdx = case inputIdx of
       TupRpair i _ -> i
       _ -> internalError "Shape impossible"
-opCodeGen flatOp@(FlatOp (NScan RightToLeft)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
-    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
-  ( depth - 1
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
-      writeArrayAt' envs output rowIdx n' seed'
-      return var
-    )
-    (\var envs -> do
-      accum <- tupleLoad tp var
-      x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-      writeArray' envs output inputIdx new
-    )
-    (\_ _ -> return ())
-  )
-  where
-    ArgArray _ (ArrayR _ tp) inputSh _ = input
-    n = case inputSh of
-      TupRpair _ (TupRsingle n') -> n'
-      _ -> internalError "Shape impossible"
-    rowIdx = case inputIdx of
-      TupRpair i _ -> i
-      _ -> internalError "Shape impossible"
 opCodeGen _ = internalError "Missing indices when generating code for an operation"
 
 -- Parallel code generation for one-dimensional collective operations (folds and scans).
@@ -588,18 +588,18 @@ parCodeGen descending (FlatOp NFold1
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
   = Just $ parCodeGenFold descending fun Nothing input output inputIdx outputIdx
-parCodeGen descending (FlatOp (NScan1 _)
+parCodeGen descending (FlatOp (NScan1 dir)
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenScan descending False fun Nothing input inputIdx
+  = Just $ parCodeGenScan (isNothing dir) descending False fun Nothing input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
     (\_ _ -> return ())
-parCodeGen descending (FlatOp (NScan' _)
+parCodeGen descending (FlatOp (NScan' dir)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx _ foldOutputIdx :>: _))
-  = Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
+  = Just $ parCodeGenScan (isNothing dir) descending False fun (Just seed) input inputIdx
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
     (\_ _ -> return ())
@@ -608,15 +608,7 @@ parCodeGen descending (FlatOp (NScan dir)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
   = case dir of
-      LeftToRight -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
-        (\_ _ -> return ())
-        (\envs result -> writeArray' envs output inputIdx result)
-        (\_ _ -> return ())
-        (\envs result -> do
-          let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
-          writeArrayAt' envs output rowIdx n' result
-        )
-      RightToLeft -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
+      Just RightToLeft -> Just $ parCodeGenScan False False descending fun (Just seed) input inputIdx
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
         (\envs result -> do
@@ -624,6 +616,14 @@ parCodeGen descending (FlatOp (NScan dir)
           writeArrayAt' envs output rowIdx n' result
         )
         (\_ _ -> return ())
+      _ -> Just $ parCodeGenScan (isNothing dir) False descending fun (Just seed) input inputIdx
+        (\_ _ -> return ())
+        (\envs result -> writeArray' envs output inputIdx result)
+        (\_ _ -> return ())
+        (\envs result -> do
+          let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
+          writeArrayAt' envs output rowIdx n' result
+        )
   where
     ArgArray _ _ inputSh _ = input
     n = case inputSh of
@@ -655,7 +655,7 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
   , Just i <- identity
   = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
   | otherwise
-  = parCodeGenScan descending True fun seed input inputIdx
+  = parCodeGenScan False descending True fun seed input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\_ _ -> return ())
@@ -767,7 +767,8 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
     ArgArray _ (ArrayR _ tp) _ _ = input
 
 parCodeGenScan
-  :: Bool -- Whether the loop is descending
+  :: Bool -- Relaxed
+  -> Bool -- Whether the loop is descending
   -- Whether this is a fold. Folds use similar code generation as scans, hence
   -- it is handled here. Commutative folds are handled separately.
   -> Bool
@@ -786,12 +787,12 @@ parCodeGenScan
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenScan descending isFold fun Nothing input index codeSeed codePre codePost codeEnd
+parCodeGenScan relaxed descending isFold fun Nothing input index codeSeed codePre codePost codeEnd
   | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
-  = parCodeGenScan descending isFold fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
+  = parCodeGenScan relaxed descending isFold fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
+parCodeGenScan relaxed descending isFold fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
   -- If we know an identity value, we can implement this without loop peeling
   (isNothing identity)
   -- In kernel memory, store the index of the block we must now handle and the
@@ -1008,7 +1009,6 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
     )
   )
   where
-    relaxed = False
     memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input
     identity
