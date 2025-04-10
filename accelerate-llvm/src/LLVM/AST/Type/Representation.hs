@@ -21,6 +21,7 @@ module LLVM.AST.Type.Representation (
   module Data.Array.Accelerate.Type,
   Ptr, Struct(..),
   AddrSpace(..),
+  defaultAddrSpace,
 
 ) where
 
@@ -30,11 +31,12 @@ import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.AST.LeftHandSide
 
-import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Name
 
-import qualified LLVM.AST.Type                                      as LLVM
+-- import qualified LLVM.AST.Type                                      as LLVM
+import qualified Text.LLVM                                          as LLVM
+import Text.LLVM                                                    ( AddrSpace(..), defaultAddrSpace )
 
 import Data.List
 import Data.Text.Lazy.Builder
@@ -366,23 +368,20 @@ class TypeOf f where
   typeOf :: f a -> Type a
 
 
--- | Convert to llvm-hs
+-- | Convert to llvm-pretty
 --
 instance Downcast (Type a) LLVM.Type where
-  downcast VoidType     = LLVM.VoidType
+  downcast VoidType     = LLVM.PrimType LLVM.Void
   downcast (PrimType t) = downcast t
 
 instance Downcast (PrimType a) LLVM.Type where
-  downcast BoolPrimType         = LLVM.IntegerType 1
-  downcast (NamedPrimType t _)  = LLVM.NamedTypeReference (downcast t)
+  downcast BoolPrimType         = LLVM.PrimType (LLVM.Integer 1)
+  downcast (NamedPrimType l _)  = LLVM.Alias (labelToPrettyI l)
   downcast (ScalarPrimType t)   = downcast t
-#if MIN_VERSION_llvm_hs_pure(15,0,0)
-  downcast (PtrPrimType _ a)    = LLVM.PointerType a
-#else
-  downcast (PtrPrimType t a)    = LLVM.PointerType (downcast t) a
-#endif
-  downcast (ArrayPrimType n t)  = LLVM.ArrayType n (downcast t)
-  downcast (StructPrimType p t) = LLVM.StructureType p (go t)
+  downcast (PtrPrimType _ a)    = LLVM.PtrOpaque a
+    -- LLVM.PtrTo (downcast t) a
+  downcast (ArrayPrimType n t)  = LLVM.Array n (downcast t)
+  downcast (StructPrimType p t) = (if p then LLVM.PackedStruct else LLVM.Struct) (go t)
     where
       go :: TupR PrimType t -> [LLVM.Type]
       go TupRunit         = []

@@ -20,13 +20,13 @@
 --
 
 module Data.Array.Accelerate.LLVM.Native.Execute.Environment
-  ( module Data.Array.Accelerate.AST.Environment
+  ( {- module Data.Array.Accelerate.AST.Environment
   , NativeEnv, Values(..), ValueR, Value(..), ValuesIOFun
   , prj, prjVars, prjGroundVar, values, groundValue
-  , push
+  , push -}
   ) where
 
-import Data.Array.Accelerate.AST.Environment hiding ( Val, prj, push )
+{- import Data.Array.Accelerate.AST.Environment hiding ( Val, prj, push )
 import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.AST.LeftHandSide
@@ -98,3 +98,4 @@ push env (LeftHandSideWildcard _, _)              = env
 push env (LeftHandSideSingle _  , ValuesSingle a) = env `Push` a
 push env (LeftHandSidePair l1 l2, ValuesPair a b) = push env (l1, a) `push` (l2, b)
 push _ _ = internalError "Tuple mismatch"
+-}

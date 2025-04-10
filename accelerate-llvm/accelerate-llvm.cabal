@@ -93,13 +93,13 @@ Library
     Data.Array.Accelerate.LLVM.Link.Cache
     Data.Array.Accelerate.LLVM.State
     Data.Array.Accelerate.LLVM.Target
+    Data.Array.Accelerate.LLVM.Target.ClangInfo
 
     -- LLVM code generation
-    LLVM.AST.Type.AddrSpace
     LLVM.AST.Type.Constant
     LLVM.AST.Type.Downcast
-    LLVM.AST.Type.Flags
     LLVM.AST.Type.Function
+    LLVM.AST.Type.GetElementPtr
     LLVM.AST.Type.Global
     LLVM.AST.Type.InlineAssembly
     LLVM.AST.Type.Instruction
@@ -115,14 +115,11 @@ Library
     LLVM.AST.Type.Terminator
 
     -- Extras
+    Data.Array.Accelerate.TH.Compat
     Data.ByteString.Short.Char8
     Data.ByteString.Short.Extra
 
-    LLVM.AST.Orphans
-
   other-modules:
-    Language.Haskell.TH.Extra
-
     Paths_accelerate_llvm
 
   build-depends:
@@ -139,10 +136,12 @@ Library
         , filepath                      >= 1.0
         , formatting                    >= 7.0
         , hashable                      >= 1.1
-        , llvm-hs                       >= 4.1 && < 16
-        , llvm-hs-pure                  >= 4.1 && < 16
+        -- , llvm-hs                       >= 4.1 && < 16
+        -- , llvm-hs-pure                  >= 4.1 && < 16
+        , llvm-pretty                   >= 0.12
         , mtl                           >= 2.0
         , primitive                     >= 0.6.4
+        , process
         , template-haskell
         , text                          >= 1.2
         , unordered-containers          >= 0.2

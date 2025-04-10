@@ -14,16 +14,13 @@
 
 module Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice.TH (
 
-  nvvmReflectModule, nvvmReflectBitcode,
+  nvvmReflectModule, -- nvvmReflectBitcode,
   libdeviceBitcode,
 
 ) where
 
-import qualified LLVM.AST                                           as AST
-import qualified LLVM.AST.Attribute                                 as AST
-import qualified LLVM.AST.Global                                    as AST.G
-import qualified LLVM.Context                                       as LLVM
-import qualified LLVM.Module                                        as LLVM
+import qualified Text.LLVM.AST                                      as LP
+import qualified Text.LLVM.Triple.Parse                             as LP
 
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Representation
@@ -46,14 +43,14 @@ import Data.FileEmbed
 import Data.List
 import Data.Maybe
 import Formatting
-import Language.Haskell.TH.Extra                                    ( CodeQ )
+import Data.Array.Accelerate.TH.Compat                              ( CodeQ )
 import System.Directory
 import System.FilePath
 import Text.Printf
-import qualified Data.ByteString.Short                              as BS
+-- import qualified Data.ByteString.Short                              as BS
 import qualified Data.ByteString.Short.Char8                        as S8
 import qualified Data.ByteString.Short.Extra                        as BS
-import qualified Language.Haskell.TH.Extra                          as TH
+import qualified Data.Array.Accelerate.TH.Compat                    as TH
 
 
 -- This is a hacky module that can be linked against in order to provide the
@@ -77,62 +74,46 @@ import qualified Language.Haskell.TH.Extra                          as TH
 -- the list of supported parameters ever changes, we may need to re-evaluate
 -- this implementation.
 --
-nvvmReflectModule :: AST.Module
+nvvmReflectModule :: LP.Module
 nvvmReflectModule =
-  AST.Module
-    { AST.moduleName            = "nvvm-reflect"
-    , AST.moduleSourceFileName  = BS.empty
-    , AST.moduleDataLayout      = targetDataLayout @PTX
-    , AST.moduleTargetTriple    = targetTriple @PTX
-    , AST.moduleDefinitions     = [AST.GlobalDefinition $ AST.G.functionDefaults
-      { AST.G.name                = AST.Name "__nvvm_reflect"
-      , AST.G.returnType          = downcast (integralType :: IntegralType Int32)
-      , AST.G.parameters          = ( [ptrParameter scalarType (UnName 0 :: Name (Ptr Int8))], False )
-      , AST.G.functionAttributes  = map Right [AST.NoUnwind, AST.ReadNone, AST.AlwaysInline]
-      , AST.G.basicBlocks         = []
-      }]
+  LP.Module
+    { LP.modSourceName = Nothing
+    , LP.modTriple     = case targetTriple @PTX of
+                           Just s -> LP.parseTriple (S8.unpack s)
+                           Nothing -> error "TODO: module target triple"
+    , LP.modDataLayout = []  -- TODO: data layout for nvvm reflect module
+    , LP.modTypes      = []
+    , LP.modNamedMd    = []
+    , LP.modUnnamedMd  = []
+    , LP.modComdat     = mempty
+    , LP.modGlobals    = []
+    , LP.modDeclares   = []
+    , LP.modDefines    =
+        [LP.Define
+          { LP.defLinkage    = Nothing
+          , LP.defVisibility = Nothing
+          , LP.defRetType    = downcast (integralType :: IntegralType Int32)
+          , LP.defName       = LP.Symbol "__nvvm_reflect"
+          , LP.defArgs       = [ptrParameter scalarType (UnName 0 :: Name (Ptr Int8))]
+          , LP.defVarArgs    = False
+          , LP.defAttrs      = [LP.Nounwind, LP.Readnone, LP.Alwaysinline]
+          , LP.defSection    = Nothing
+          , LP.defGC         = Nothing
+          , LP.defBody       = []
+          , LP.defMetadata   = mempty
+          , LP.defComdat     = Nothing
+          }]
+    , LP.modInlineAsm  = []
+    , LP.modAliases    = []
     }
 
 
 -- Lower the given NVVM Reflect module into bitcode.
 --
-nvvmReflectBitcode :: AST.Module -> CodeQ (ShortByteString, ByteString)
-nvvmReflectBitcode mdl =
-  let name = "__nvvm_reflect"
-  in
-  TH.runIO (LLVM.withContext $ \ctx -> LLVM.withModuleFromAST ctx mdl LLVM.moduleLLVMAssembly)
-    `TH.bindCode` \bs ->
-      TH.unsafeCodeCoerce $ TH.tupE [ TH.unTypeCode (BS.liftSBS name), bsToExp bs ]
-
-
--- Load the libdevice bitcode file for the given compute architecture. The name
--- of the bitcode files follows the format:
---
---   libdevice.compute_XX.YY.bc
---
--- Where XX represents the compute capability, and YY represents a version(?) We
--- search the libdevice PATH for all files of the appropriate compute capability
--- and load the "most recent" (by sort order).
---
-libdeviceBitcode :: HasCallStack => Compute -> CodeQ (ShortByteString, ByteString)
-libdeviceBitcode compute =
-#if MIN_VERSION_nvvm(0,10,0)
-  let nvvm    = nvvmDeviceLibraryPath
-#else
-  let nvvm    = cudaInstallPath </> "nvvm" </> "libdevice"
-#endif
-  in
-  TH.runIO (getDirectoryContents nvvm)
-  `TH.bindCode` \files ->
-    let basename
-          | CUDA.libraryVersion < 9000
-          , Compute m n <- compute     = printf "libdevice.compute_%d%d" m n
-          | otherwise                  = "libdevice"
-        --
-        err     = internalError ("not found: " % string % ".YY.bc") basename
-        best f  = basename `isPrefixOf` f && takeExtension f == ".bc"
-        name    = fromMaybe err . listToMaybe . sortBy (flip compare) $ filter best files
-        path    = nvvm </> name
-    in
-    TH.unsafeCodeCoerce $ TH.tupE [ TH.unTypeCode (BS.liftSBS (S8.pack name)), embedFile path ]
-
+-- nvvmReflectBitcode :: LP.Module -> CodeQ (ShortByteString, ByteString)
+-- nvvmReflectBitcode mdl =
+--   let name = "__nvvm_reflect"
+--   in
+--   TH.runIO (LLVM.withContext $ \ctx -> LLVM.withModuleFromAST ctx mdl LLVM.moduleLLVMAssembly)
+--     `TH.bindCode` \bs ->
+--       TH.unsafeCodeCoerce $ TH.tupE [ TH.unTypeCode (BS.liftSBS name), bsToExp bs ]

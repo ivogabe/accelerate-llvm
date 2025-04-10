@@ -55,10 +55,10 @@ import qualified LLVM.AST.Type.Function as LLVM
 import LLVM.AST.Type.Instruction
 import qualified LLVM.AST.Type.Instruction.Compare as Compare
 import LLVM.AST.Type.Instruction.Volatile
+import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Name
-import LLVM.AST.Type.AddrSpace
 
 import Data.Bits
 import Control.Monad
@@ -85,7 +85,7 @@ linkSchedule' uid schedule
     let ptrTp = PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace
     let ptrPtrTp = PtrPrimType ptrTp defaultAddrSpace
 
-    let name = fromString $ "schedule_" ++ show uid
+    let name = "schedule_" ++ show uid
     (_, m) <- codeGenFunction name (PrimType ptrTp)
         (LLVM.Lam ptrPtrTp "runtime_lib" . LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Word16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
         body
@@ -93,7 +93,7 @@ linkSchedule' uid schedule
     -- Evaluate all values in the list
     foldl (\b a -> a `seq` b) () lifetimes `seq` return ()
 
-    obj <- compile uid name m
+    obj <- compile uid (fromString name) m
     fun <- link obj
     return $ NativeProgram fun sz lifetimes prepInput offset 
 
@@ -134,7 +134,7 @@ loadRuntime = mapM_ load $ Prelude.zip [0..] runtime
       -- This uses that as of LLVM 15, pointers are opaque.
       -- Pointee types don't match, as we use a Ptr Int8 as a function pointer.
       -- This code thus doesn't work on older version of LLVM.
-      ptr <- instr' $ GetPtrElementPtr operandRuntimeLib idx'
+      ptr <- instr' $ GetElementPtr $ GEP type' operandRuntimeLib idx' $ GEPEmpty primType
       instr_ $ downcast $ name := LoadPtr NonVolatile ptr
     -- Fields of RuntimeLib in cbits/types.h.
     -- Order and names should match.
@@ -172,18 +172,18 @@ codegenSchedule schedule
         -- Add 2 for the initial block and the destructor block
         let blocks = blockCount schedule1 + 2
 
-        typedef "kernel_t" $ Just $ downcast $ StructPrimType False $ TupRsingle $ primType @Int8
+        typedef "kernel_t" $ downcast $ StructPrimType False $ TupRsingle $ primType @Int8
 
         -- Contains pointers of all used kernel functions and constant buffers.
         -- Instead of relying on the linker, we provide pointers to these functions
         -- and buffers via this structure.
-        typedef "imports_t" $ Just $ downcast $ StructPrimType False $ importsType schedule1
+        typedef "imports_t" $ downcast $ StructPrimType False $ importsType schedule1
         let importsTp = NamedPrimType "imports_t" $ StructPrimType False $ importsType schedule1
         let ptrImportsTp = PtrPrimType importsTp defaultAddrSpace
 
         -- Contains the part of the state of this function that needs to be
         -- preserved when the function suspends, and the arguments to kernels.
-        typedef "state_t" $ Just $ downcast $ StructPrimType False $ stateType schedule1
+        typedef "state_t" $ downcast $ StructPrimType False $ stateType schedule1
         let stateTp = NamedPrimType "state_t" $ StructPrimType False $ stateType schedule1
         let ptrStateTp = PtrPrimType stateTp defaultAddrSpace
 
@@ -637,7 +637,11 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
             fullState
             (ArrayPrimType awhileConcurrentStates iterStateType)
             $ tupleLeft stateIdx
-          instr' $ GetArrayElementPtr TypeWord8 awhileState idx
+          instr' $ GetElementPtr $ GEP
+            (PrimType $ ArrayPrimType awhileConcurrentStates iterStateType)
+            awhileState 
+            (scalar scalarTypeInt32 0)
+            (GEPArray idx (GEPEmpty iterStateType))
 
         -- Note: we cannot simply perform GetStructElementPtr now and only
         -- remember the result, as the function may suspend in 'step'.
@@ -1282,7 +1286,7 @@ convertArrayInstr structVars localVars arr arg = case arr of
   Index (Var tp idx)
     | GroundRbuffer tp' <- tp -> do
       (_, ptr) <- getValue structVars localVars tp idx
-      ptr' <- instr' $ GetElementPtr tp' ptr [op scalarTypeInt arg]
+      ptr' <- instr' $ GetElementPtr $ GEP1 tp' ptr $ op scalarTypeInt arg
       instr $ Load tp' NonVolatile ptr'
     | otherwise -> internalError "Buffer impossible"
 

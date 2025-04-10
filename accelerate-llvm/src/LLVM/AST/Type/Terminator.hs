@@ -1,6 +1,9 @@
+{-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeSynonymInstances  #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.Terminator
@@ -20,7 +23,9 @@ import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Downcast
 
-import qualified LLVM.AST.Instruction                               as LLVM
+import qualified Text.LLVM                                          as LLVM
+
+import Data.Bifunctor                                               ( bimap )
 
 
 -- | <http://llvm.org/docs/LangRef.html#terminators>
@@ -63,13 +68,17 @@ data Terminator a where
 
 -- | Convert to llvm-hs
 --
-instance Downcast (Terminator a) LLVM.Terminator where
-  downcast term = downcastTerminator term []
-
-downcastTerminator :: Terminator a -> LLVM.InstructionMetadata -> LLVM.Terminator
-downcastTerminator term md = case term of
-  Ret           -> LLVM.Ret Nothing md
-  RetVal x      -> LLVM.Ret (Just (downcast x)) md
-  Br l          -> LLVM.Br (downcast l) md
-  CondBr p t f  -> LLVM.CondBr (downcast p) (downcast t) (downcast f) md
-  Switch p d a  -> LLVM.Switch (downcast p) (downcast d) (downcast a) md
+instance Downcast (Terminator a) LLVM.Instr where
+  downcast = \case
+    Ret           -> LLVM.RetVoid
+    RetVal x      -> LLVM.Ret (downcast x)
+    Br l          -> LLVM.Jump (LLVM.Named (labelToPrettyI l))
+    CondBr p t f  -> LLVM.Br (downcast p) (LLVM.Named (labelToPrettyI t)) (LLVM.Named (labelToPrettyI f))
+    Switch p d a  -> LLVM.Switch (downcast p)
+                                 (labelToPrettyBL d)
+                                 (map (bimap fromConstant labelToPrettyBL) a)
+      where
+        fromConstant :: Constant a -> Integer
+        fromConstant cnst = case downcast @_ @(LLVM.Typed LLVM.Value) cnst of
+          LLVM.Typed _ (LLVM.ValInteger n) -> n
+          _ -> error "TODO: llvm-pretty supports only integral cases for Switch"

@@ -20,7 +20,7 @@
 --
 
 module Data.Array.Accelerate.LLVM.Native.Execute.Scheduler (
-  Job(..), ThreadIdx, Workers,
+  {- Job(..), ThreadIdx, Workers,
 
   schedule,
   hireWorkers, hireWorkersOn, numWorkers,
@@ -31,7 +31,7 @@ module Data.Array.Accelerate.LLVM.Native.Execute.Scheduler (
   executeKernel,
 
   -- Signals
-  NativeSignal, newSignal, resolveSignal, scheduleAfter, scheduleAfterOrRun
+  NativeSignal, newSignal, resolveSignal, scheduleAfter, scheduleAfterOrRun -}
 ) where
 
 import Data.Array.Accelerate.Error
@@ -50,7 +50,6 @@ import System.Environment
 import System.IO.Unsafe
 import Data.Proxy
 import Data.Atomics
-import Data.Primitive.Array
 import Data.Concurrent.Queue.MichaelScott
 import Data.IORef
 import Data.Int
@@ -75,7 +74,7 @@ instrumentedForkOn name i act =
       hPutStrLn stderr $ "[instrumentedForkIO] Thread '" ++ name ++ show i ++ "' crashed: " ++ show (e :: SomeException)
 
 
-newtype Job = Job { runJob :: ThreadIdx -> IO () }
+{- newtype Job = Job { runJob :: ThreadIdx -> IO () }
 
 data Workers = Workers
   -- Number of worker threads
@@ -589,3 +588,4 @@ appendMVar mvar a =
 {-# INLINE message #-}
 message :: Format (IO ()) a -> a
 message = Debug.traceM Debug.dump_sched
+-}

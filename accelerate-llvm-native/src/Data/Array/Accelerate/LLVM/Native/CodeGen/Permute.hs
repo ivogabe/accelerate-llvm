@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RecordWildCards     #-}
@@ -29,6 +28,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 
+import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW                                as RMW
@@ -174,20 +174,10 @@ mkPermuteP_rmw uid aenv repr shr rmw update project marr =
           _ | TupRsingle (SingleScalarType s)   <- arrayRtype repr
             , adata                             <- irArrayData arrOut
             -> do
-                  addr <- instr' $ GetElementPtr (SingleScalarType s) (asPtr defaultAddrSpace (op s adata)) [op integralType j]
+                  addr <- instr' $ GetElementPtr $ GEP1 (SingleScalarType s) (asPtr defaultAddrSpace (op s adata)) (op integralType j)
                   --
                   case s of
-#if MIN_VERSION_llvm_hs(10,0,0)
                     NumSingleType t             -> void . instr' $ AtomicRMW t NonVolatile rmw addr (op t r) (CrossThread, AcquireRelease)
-#else
-                    NumSingleType t
-                      | IntegralNumType{} <- t  -> void . instr' $ AtomicRMW t NonVolatile rmw addr (op t r) (CrossThread, AcquireRelease)
-                      | RMW.Add <- rmw          -> atomicCAS_rmw s (A.add t r) addr
-                      | RMW.Sub <- rmw          -> atomicCAS_rmw s (A.sub t r) addr
-                    _ | RMW.Min <- rmw          -> atomicCAS_cmp s A.lt addr (op s r)
-                      | RMW.Max <- rmw          -> atomicCAS_cmp s A.gt addr (op s r)
-                    _                           -> internalError "unexpected transition"
-#endif
           --
           _ -> internalError "unexpected transition"
 
@@ -258,7 +248,7 @@ atomically barriers i action = do
   crit <- newBlock "spinlock.critical-section"
   exit <- newBlock "spinlock.exit"
 
-  addr <- instr' $ GetElementPtr scalarTypeWord8 (asPtr defaultAddrSpace (op integralType (irArrayData barriers))) [op integralType i]
+  addr <- instr' $ GetElementPtr $ GEP1 scalarTypeWord8 (asPtr defaultAddrSpace (op integralType (irArrayData barriers))) (op integralType i)
   _    <- br spin
 
   -- Atomically (attempt to) set the lock slot to the locked state. If the slot
@@ -311,7 +301,7 @@ atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
       crit <- newBlock "spinlock.critical-section"
       exit <- newBlock "spinlock.exit"
 
-      addr <- instr' $ GetElementPtr scalarType bufptr [op integralType i]
+      addr <- instr' $ GetElementPtr $ GEP1 scalarType bufptr (op integralType i)
       _    <- br spin
 
       -- Atomically (attempt to) set the lock slot to the locked state. If the slot

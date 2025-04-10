@@ -55,7 +55,6 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 
-import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function                                   as LLVM
 import LLVM.AST.Type.Global
@@ -65,8 +64,6 @@ import LLVM.AST.Type.Metadata
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
-import qualified LLVM.AST.ParameterAttribute as ParameterAttribute
-import qualified LLVM.AST.Operand as LLVM
 
 import GHC.Stack
 import Data.Typeable
@@ -328,7 +325,7 @@ bindEnv environment =
     , do
       -- Declare domain for alias annotations
       domain <- addMetadata (\d -> [Just $ MetadataNodeOperand $ MetadataNodeReference d])
-      when (domain /= LLVM.MetadataNodeID 0) $
+      when (domain /= 0) $
         internalError "bindEnv assumes this is the first place where metadata nodes are created"
 
       -- The metadata nodes are introduced as follows:
@@ -342,7 +339,7 @@ bindEnv environment =
       -- 7 + 3 * k is the list containing all other scopes,
       --   i.e. the noalias list of the kth Out or Mut buffer
       
-      let allScopes = [ LLVM.MetadataNodeID (2 + 3 * fromIntegral k) | k <- [0 .. mutOutCount + 1] ]
+      let allScopes = [ 2 + 3 * fromIntegral k | k <- [0 .. mutOutCount + 1] ]
       _ <- addMetadata (\_ -> map (Just . MetadataNodeOperand . MetadataNodeReference) allScopes)
       forM_ allScopes $ \scope -> do
         -- scope
@@ -427,8 +424,8 @@ bindEnv environment =
           | otherwise = mutOutCount + 1
 
         alias
-          | In <- m = Just (LLVM.MetadataNodeID 3, LLVM.MetadataNodeID 4)
-          | otherwise = Just (LLVM.MetadataNodeID $ fromIntegral mutOutCount' * 3 + 6, LLVM.MetadataNodeID $ fromIntegral mutOutCount' * 3 + 7)
+          | In <- m = Just (3, 4)
+          | otherwise = Just ( fromIntegral mutOutCount' * 3 + 6,  fromIntegral mutOutCount' * 3 + 7)
 
         annotation :: CodeGen arch ()
         annotation
@@ -441,7 +438,7 @@ bindEnv environment =
               -- This is allowed, as LLVM now has a single concrete pointer type,
               -- instead of a parameterized pointer type.
               ( ArgumentsCons (scalar scalarType (-1)) []
-                $ ArgumentsCons (LocalReference type' $ fromString name') [ParameterAttribute.NoCapture] ArgumentsNil)
+                $ ArgumentsCons (LocalReference type' $ fromString name') [{- ParameterAttribute.NoCapture -}] ArgumentsNil)
               []
             return ()
           | otherwise = return ()

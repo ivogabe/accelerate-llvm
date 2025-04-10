@@ -48,7 +48,6 @@ import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Execute.Marshal
-import qualified LLVM.AST                                           as LLVM
 import LLVM.AST.Type.Function
 import Data.ByteString.Short                                        ( ShortByteString, fromShort )
 import qualified Data.ByteString.Char8 as Char8
@@ -96,12 +95,12 @@ instance IsKernel NativeKernel where
 
   compileKernel env cluster args = unsafePerformIO $ evalLLVM defaultTarget $ do
     (sz, module') <- codegen fullName env cluster args
-    obj <- compile uid fullName module'
+    obj <- compile uid (fromString $ fullName) module'
     funPtr <- link obj
-    return $ NativeKernel funPtr fullName uid sz detail brief
+    return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
     where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
-      fullName = fromString $ name ++ "-" ++ show uid
+      fullName = name ++ "-" ++ show uid
       uid = hashOperation cluster args
 
   kernelMetadata kernel = NativeKernelMetadata $ sizeOfEnv kernel

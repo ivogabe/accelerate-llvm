@@ -32,13 +32,14 @@ import Data.Array.Accelerate.LLVM.PTX.Context
 
 import qualified Foreign.CUDA.Driver                                as CUDA
 
+import Control.Monad.IO.Class                                       ( liftIO )
 import Foreign.Ptr
 import GHC.Ptr                                                      ( Ptr(..) )
-import Language.Haskell.TH.Extra                                    ( CodeQ )
+import Data.Array.Accelerate.TH.Compat                              ( CodeQ )
 import System.IO.Unsafe
 import qualified Data.ByteString                                    as B
 import qualified Data.ByteString.Unsafe                             as B
-import qualified Language.Haskell.TH.Extra                          as TH
+import qualified Data.Array.Accelerate.TH.Compat                    as TH
 
 
 instance Embed PTX where
@@ -47,12 +48,15 @@ instance Embed PTX where
 -- Embed the given object code and set up to be reloaded at execution time.
 --
 embed :: PTX -> ObjectR PTX -> CodeQ (ExecutableR PTX)
-embed target (ObjectR _ cfg obj) = do
+embed target (ObjectR _ cfg objFname) = do
   -- Generate the embedded kernel executable. This will load the embedded object
   -- code into the current (at execution time) context.
   loadQ `TH.bindCode` \kmd ->
     [|| unsafePerformIO $ do
-          jit <- CUDA.loadDataFromPtrEx $$( TH.unsafeCodeCoerce [| Ptr $(TH.litE (TH.StringPrimL (B.unpack obj))) |] ) []
+          jit <- CUDA.loadDataFromPtrEx
+                   $$( liftIO (B.readFile objFname) `TH.bindCode` \obj ->
+                       TH.unsafeCodeCoerce [| Ptr $(TH.litE (TH.StringPrimL (B.unpack obj))) |] )
+                   []
           fun <- newLifetime (FunctionTable $$(listE (map (linkQ 'jit) kmd)))
           return $ PTXR fun
      ||]
@@ -62,6 +66,7 @@ embed target (ObjectR _ cfg obj) = do
     -- requiring an active CUDA context.
     loadQ :: TH.Q [(Kernel, CodeQ (Int -> Int))]
     loadQ = TH.runIO $ withContext (ptxContext target) $ do
+      obj <- B.readFile objFname
       jit <- B.unsafeUseAsCString obj $ \p -> CUDA.loadDataFromPtrEx (castPtr p) []
       ks  <- mapM (uncurry (linkFunctionQ (CUDA.jitModule jit))) cfg
       CUDA.unload (CUDA.jitModule jit)

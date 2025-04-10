@@ -25,10 +25,8 @@ import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
+import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Metadata
-
-import qualified LLVM.AST.Operand as LLVM
-import qualified LLVM.AST.Constant as LLVM
 
 import Prelude                                                  hiding ( fst, snd, uncurry )
 import Control.Monad
@@ -202,7 +200,7 @@ while ann tp test body start = do
   setBlock loop
   next <- body prev
   p'   <- test next
-  bot  <- cbrMD p' loop exit [("llvm.loop", LLVM.MDRef annotation)]
+  bot  <- cbrMD p' loop exit [("llvm.loop", MetadataNodeOperand $ MetadataNodeReference annotation)]
 
   _    <- phi' tp loop prev [(start,top), (next,bot)]
 
@@ -210,11 +208,13 @@ while ann tp test body start = do
   setBlock exit
   phi tp [(start,top), (next,bot)]
   where
-    placeAnnotation :: LoopAnnotation -> Maybe (CodeGen arch LLVM.MetadataNodeID)
+    placeAnnotation :: LoopAnnotation -> Maybe (CodeGen arch MetadataNodeID)
     placeAnnotation LoopVectorize = Just $
-      addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.vectorize.enable", Just $ MetadataConstantOperand $ LLVM.Int 1 1])
+      addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.vectorize.enable",
+        Just $ MetadataConstantOperand $ BooleanConstant True])
     placeAnnotation LoopInterleave = Just $
-      addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.interleave.count", Just $ MetadataConstantOperand $ LLVM.Int 32 32])
+      addMetadata (\_ -> [Just $ MetadataStringOperand "llvm.loop.interleave.count",
+        Just $ MetadataConstantOperand $ ScalarConstant scalarTypeInt32 32])
     placeAnnotation _ = Nothing
 
 loopWith

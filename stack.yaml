@@ -29,6 +29,12 @@ extra-deps:
 # - highs-lp-0.0
 # - linear-programming-0.0.1
 # - comfort-array-0.5.5
+
+- github: tomsmeding/llvm-pretty
+  commit: 16fb617f282bde97a090b8b08cbd2dcf5e259ad3
+
+- monadLib-3.10.3@sha256:026ba169762e63f0fe5f5c78829808f522a28730043bc3ad9b7c146baedf709f,637
+
 # Override default flag values for local packages and extra-deps
 # flags:
 

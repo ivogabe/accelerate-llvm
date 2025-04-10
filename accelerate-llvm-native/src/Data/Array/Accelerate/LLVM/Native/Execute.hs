@@ -204,7 +204,7 @@ groundSizeAlignment (GroundRscalar (SingleScalarType tp)) = (s, s)
 groundSizeAlignment (GroundRscalar (VectorScalarType (VectorType n tp))) = (n * s, s)
   where s = bytesElt $ TupRsingle $ SingleScalarType tp
 
-runValuesIOFun
+{- runValuesIOFun
   :: Workers
   -> GFunctionR t
   -> ValuesIOFun (Scheduled UniformScheduleFun t)
@@ -352,6 +352,7 @@ size' ShapeRz _ = 1
 size' (ShapeRsnoc shr) (sh `ValuesPair` ValuesSingle (Value sz))
   | sz <= 0 = 0
   | otherwise = size' shr sh * sz
+-}
 
 {-# NOINLINE defaultRuntimeWorkers #-}
 defaultRuntimeWorkers :: Ptr Int8

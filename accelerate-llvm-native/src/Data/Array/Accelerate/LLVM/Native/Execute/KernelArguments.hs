@@ -21,8 +21,8 @@
 -- Portability : non-portable (GHC extensions)
 --
 
-module Data.Array.Accelerate.LLVM.Native.Execute.KernelArguments (prepareKernel, touchKernel) where
-
+module Data.Array.Accelerate.LLVM.Native.Execute.KernelArguments ({-prepareKernel, touchKernel-}) where
+{-
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.AST.LeftHandSide
@@ -124,3 +124,4 @@ unsafeWriteArg env (KernelArgRscalar (VectorScalarType (VectorType _ (tp :: Sing
 
 cacheLineSize :: Int
 cacheLineSize = 64
+-}
