@@ -109,13 +109,7 @@ Library
     Data.Array.Accelerate.LLVM.Native.Embed
 
     Data.Array.Accelerate.LLVM.Native.Execute
-    Data.Array.Accelerate.LLVM.Native.Execute.Divide
-    Data.Array.Accelerate.LLVM.Native.Execute.Environment
     Data.Array.Accelerate.LLVM.Native.Execute.Marshal
-    Data.Array.Accelerate.LLVM.Native.Execute.Scheduler
-    Data.Array.Accelerate.LLVM.Native.Execute.Sleep
-    Data.Array.Accelerate.LLVM.Native.Execute.Kernel
-    Data.Array.Accelerate.LLVM.Native.Execute.KernelArguments
 
     Data.Array.Accelerate.LLVM.Native.Plugin.Annotation
     Data.Array.Accelerate.LLVM.Native.Plugin.BuildInfo
