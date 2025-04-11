@@ -74,9 +74,9 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameIndex := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ "env" := GetStructElementPtr envTp arg (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameKernelMemory := GetStructElementPtr kernelMemTp arg (TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameIndex := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ "env" := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameKernelMemory := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
   , LocalReference type' nameFirstIndex

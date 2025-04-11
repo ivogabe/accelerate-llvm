@@ -249,12 +249,6 @@ data Instruction a where
   GetElementPtr   :: GetElementPtr Operand (Ptr a) (Ptr b)
                   -> Instruction (Ptr b)
 
-  GetStructElementPtr
-                  :: PrimType t
-                  -> Operand (Ptr (Struct a))
-                  -> TupleIdx a t
-                  -> Instruction (Ptr t)
-
   -- <http://llvm.org/docs/LangRef.html#i-fence>
   --
   Fence           :: Atomicity
@@ -430,12 +424,10 @@ instance Downcast (Instruction a) LP.Instr where
     LoadBool vol p        -> LP.Load (downcast vol) (downcast BoolPrimType) (downcast p) atomicity alignment
     LoadPtr vol p         -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment
     LoadStruct vol p      -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment
-    GetElementPtr (GEP t n i1 path) ->
-      LP.GEP inbounds (downcast t) (downcast n) (downcast i1 : downcast path)
-    GetStructElementPtr _ n i -> case typeOf n of
-      (PrimType (PtrPrimType t@(skipTypeAlias -> StructPrimType _ tp) _)) ->
-        LP.GEP inbounds (downcast t) (downcast n) [constantTyped (0 :: Int), constantTyped (fromIntegral $ tupleIdxToInt tp i :: Int32)]
-      _ -> internalError "Struct ptr impossible"
+    GetElementPtr (GEP n i1 path) -> case typeOf n of
+      PrimType (PtrPrimType t _) ->
+        LP.GEP inbounds (downcast t) (downcast n) (downcast i1 : downcastGEPIndex constantTyped path t)
+      PrimType (ScalarPrimType _) -> internalError "Ptr impossible"
     Fence a               -> LP.Fence (downcast (fst a)) (downcast (snd a))
     -- TODO: this is now a STRONG cmpxchg. Is that what was intended? I think llvm-hs defaulted to strong, but the LLVM source is very obtuse about this.
     CmpXchg _ v p x y a m -> LP.CmpXchg False (downcast v) (downcast p) (downcast x) (downcast y) (downcast (fst a)) (downcast (snd a)) (downcast m)
@@ -639,9 +631,6 @@ instance TypeOf Instruction where
       _ -> internalError "Ptr impossible"
     Store{}               -> VoidType
     GetElementPtr gep     -> typeOf gep
-    GetStructElementPtr t x _ -> case typeOf x of
-      PrimType (PtrPrimType _ addr) -> PrimType $ PtrPrimType t addr
-      _ -> internalError "Ptr impossible"
     Fence{}               -> VoidType
     CmpXchg t _ _ _ _ _ _ -> PrimType . StructPrimType False $ ScalarPrimType (SingleScalarType (NumSingleType (IntegralNumType t))) `pair` primType
     AtomicRMW _ _ _ _ x _ -> typeOf x
@@ -695,3 +684,7 @@ instance TypeOf Instruction where
       fun (Lam _ _ l)  = fun l
       fun (Body t _ _) = t
 
+-- Utility to construct GetElementPtr instructions for accessing a field of a struct.
+-- This function is not in GetElementPtr.hs as that would cause a cycle.
+gepStruct :: PrimType b -> Operand (Ptr (Struct a)) -> TupleIdx a b -> GetElementPtr Operand (Ptr (Struct a)) (Ptr b)
+gepStruct tp struct idx = GEP struct (ConstantOperand $ ScalarConstant scalarTypeInt32 0) $ GEPStruct tp idx GEPEmpty

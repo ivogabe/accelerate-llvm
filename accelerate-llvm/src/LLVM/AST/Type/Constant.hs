@@ -4,6 +4,7 @@
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MagicHash             #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE TemplateHaskell       #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
@@ -23,6 +24,8 @@ import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Representation
+
+import Data.Array.Accelerate.Error
 
 import qualified Text.LLVM                                          as LLVM
 
@@ -70,8 +73,10 @@ instance Downcast (Constant a) (LLVM.Typed LLVM.Value) where
   downcast = \case
     UndefConstant t             -> LLVM.Typed (downcast t) LLVM.ValUndef
     GlobalReference t n         -> LLVM.Typed (downcast t) (LLVM.ValSymbol (nameToPrettyS n))
-    instr@(ConstantGetElementPtr (GEP t n i1 path)) ->
-      LLVM.Typed (downcast (typeOf instr)) (LLVM.ValConstExpr (LLVM.ConstGEP inbounds Nothing (downcast t) (downcast n) (downcast i1 : downcast path)))
+    instr@(ConstantGetElementPtr (GEP n i1 path)) -> case typeOf n of
+      PrimType (PtrPrimType t _) ->
+        LLVM.Typed (downcast (typeOf instr)) (LLVM.ValConstExpr (LLVM.ConstGEP inbounds Nothing (downcast t) (downcast n) (downcast i1 : downcastGEPIndex (num numType) path t)))
+      PrimType (ScalarPrimType _) -> internalError "Ptr impossible"
     BooleanConstant x           -> LLVM.Typed (LLVM.PrimType (LLVM.Integer 1)) (LLVM.ValInteger (toInteger (fromEnum x)))
     NullPtrConstant t           -> LLVM.Typed (downcast t) LLVM.ValNull
     ScalarConstant t x          -> scalar t x

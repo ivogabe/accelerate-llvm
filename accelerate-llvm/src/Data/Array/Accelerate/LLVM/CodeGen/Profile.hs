@@ -85,10 +85,9 @@ derefGlobalString slen sname =
   -- 0) to address the first i8 in the string; GEP then returns a pointer
   -- to this i8.
   ConstantGetElementPtr $ GEP
-    (PrimType (ArrayPrimType slen $ ScalarPrimType scalarType))
     (GlobalReference (PrimType (PtrPrimType (ArrayPrimType slen $ ScalarPrimType scalarType) defaultAddrSpace)) sname)
     (ScalarConstant scalarType 0 :: Constant Int32)
-    (GEPArray (ScalarConstant scalarType 0 :: Constant Int32) (GEPEmpty primType))
+    (GEPArray (ScalarConstant scalarType 0 :: Constant Int32) GEPEmpty)
 
 
 -- struct ___tracy_source_location_data

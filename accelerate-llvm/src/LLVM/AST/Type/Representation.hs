@@ -90,7 +90,7 @@ data PrimType a where
   PtrPrimType     :: PrimType a -> AddrSpace -> PrimType (Ptr a)    -- pointers (XXX: volatility?)
   ArrayPrimType   :: Word64 -> PrimType a    -> PrimType (SizedArray a) -- static arrays
   StructPrimType  :: Bool -> TupR PrimType l -> PrimType (Struct l) -- aggregate structures
-  NamedPrimType   :: Label -> PrimType a     -> PrimType a          -- typedef
+  NamedPrimType   :: Label -> PrimType (Struct a) -> PrimType (Struct a)          -- typedef
 
 skipTypeAlias :: PrimType a -> PrimType a
 skipTypeAlias (NamedPrimType _ t) = skipTypeAlias t

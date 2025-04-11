@@ -31,7 +31,6 @@ import Data.Primitive.Vec
 import Formatting
 
 import qualified Data.ByteString.Short                              as B
-import LLVM.AST.Type.Constant (Constant(..))
 
 
 -- We use a data family to represent sequences of LLVM (scalar) operands

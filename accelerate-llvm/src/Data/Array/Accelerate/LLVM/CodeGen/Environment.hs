@@ -369,7 +369,7 @@ bindEnv environment =
     go toTupleIdx (Push env (AccessGroundRscalar tp))
       | Refl <- marshalScalarArg tp = 
         ( instr_ (downcast $
-            namePtr := GetStructElementPtr (ScalarPrimType tp) operandEnv (toTupleIdx $ TupleIdxRight TupleIdxSelf)
+            namePtr := GetElementPtr (gepStruct (ScalarPrimType tp) operandEnv $ toTupleIdx $ TupleIdxRight TupleIdxSelf)
           )
           >> instr_ (downcast $
             name := Load tp NonVolatile operandPtr
@@ -388,7 +388,7 @@ bindEnv environment =
         namePtr = fromString $ "param." ++ show freshScalar ++ ".ptr"
     go toTupleIdx (Push env (AccessGroundRbuffer m (tp :: ScalarType t))) =
       ( instr_ (downcast $
-          namePtr := GetStructElementPtr ptrType operandEnv (toTupleIdx $ TupleIdxRight TupleIdxSelf)
+          namePtr := GetElementPtr (gepStruct ptrType operandEnv $ toTupleIdx $ TupleIdxRight TupleIdxSelf)
         )
         >> instr_ (downcast $
           name := LoadPtr NonVolatile operandPtr

@@ -301,7 +301,7 @@ atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
       crit <- newBlock "spinlock.critical-section"
       exit <- newBlock "spinlock.exit"
 
-      addr <- instr' $ GetElementPtr $ GEP1 scalarType bufptr (op integralType i)
+      addr <- instr' $ GetElementPtr $ GEP1 bufptr (op integralType i)
       _    <- br spin
 
       -- Atomically (attempt to) set the lock slot to the locked state. If the slot

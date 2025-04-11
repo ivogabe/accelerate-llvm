@@ -1,11 +1,15 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE ViewPatterns #-}
 module LLVM.AST.Type.GetElementPtr where
 
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Representation
+import Data.Array.Accelerate.Representation.Type (TupleIdx, tupleIdxToInt)
+import Data.Array.Accelerate.Error
 
 
 -- | A @getelementptr@ instruction. The @op@ parameter is the type of operands
@@ -23,38 +27,52 @@ import LLVM.AST.Type.Representation
 --
 -- <https://llvm.org/docs/LangRef.html#getelementptr-instruction>
 data GetElementPtr op ptra ptrb where
-  GEP :: Type a
-      -> op (Ptr a)
+  GEP :: op (Ptr a)
       -> op i             -- ^ the offset to the initial pointer (counted in pointees, not in bytes)
       -> GEPIndex op a b  -- ^ field/index selection path
       -> GetElementPtr op (Ptr a) (Ptr b)
 
 -- | A convenience pattern synonym for the common case of a full path of length 1.
-pattern GEP1 :: ScalarType a -> op (Ptr a) -> op i -> GetElementPtr op (Ptr a) (Ptr a)
-pattern GEP1 ty ptr ix <- GEP (PrimType (ScalarPrimType ty)) ptr ix (GEPEmpty (ScalarPrimType _))
-  where GEP1 ty ptr ix = GEP (PrimType (ScalarPrimType ty)) ptr ix (GEPEmpty (ScalarPrimType ty))
+pattern GEP1 :: op (Ptr a) -> op i -> GetElementPtr op (Ptr a) (Ptr a)
+pattern GEP1 ptr ix <- GEP ptr ix GEPEmpty
+  where GEP1 ptr ix = GEP ptr ix GEPEmpty
 
 -- | An index sequence that goes from a 'Ptr a' to a 'Ptr b'. Note that this
 -- data type is indexed with the base types of the pointers, not the pointer
 -- types themselves.
 data GEPIndex op a b where
-  GEPEmpty :: PrimType b -> GEPIndex op b b
-  GEPPtr   :: op i       -> GEPIndex op a b -> GEPIndex op (Ptr a) b
-  GEPArray :: op i       -> GEPIndex op a b -> GEPIndex op (SizedArray a) b
-  -- TODO: structure indexing
+  GEPEmpty  :: GEPIndex op b b
 
-instance (forall i. Downcast (op i) v) => Downcast (GEPIndex op a b) [v] where
-  downcast (GEPEmpty _) = []
-  downcast (GEPPtr i l) = downcast i : downcast l
-  downcast (GEPArray i l) = downcast i : downcast l
+  GEPArray  :: op i              -> GEPIndex op a b -> GEPIndex op (SizedArray a) b
 
-gepIndexOutType :: GEPIndex op a b -> PrimType b
-gepIndexOutType (GEPEmpty t) = t
-gepIndexOutType (GEPPtr _ l) = gepIndexOutType l
-gepIndexOutType (GEPArray _ l) = gepIndexOutType l
+  -- Store a type witness of 'a', to show that 'a' is not unit or a pair.
+  -- The TupleIdx to Int conversion (in tupleIdxToInt) only makes sense
+  -- when we index to singular values in the struct, as these become the
+  -- fields of the struct.
+  GEPStruct :: PrimType a
+            -> TupleIdx struct a -> GEPIndex op a b -> GEPIndex op (Struct struct) b
+
+downcastGEPIndex
+  :: (forall i. Downcast (op i) v)
+  => (Int32 -> v)
+  -> GEPIndex op a b
+  -> PrimType a
+  -> [v]
+downcastGEPIndex _ GEPEmpty _ = []
+downcastGEPIndex lift (GEPArray i l) (ArrayPrimType _ t) =
+  downcast i : downcastGEPIndex lift l t
+downcastGEPIndex lift (GEPStruct tp i l) (skipTypeAlias -> StructPrimType _ tps) =
+  lift (fromIntegral $ tupleIdxToInt tps i) : downcastGEPIndex lift l tp
+downcastGEPIndex _ _ _ = internalError "Array or Struct type impossible"
+
+gepIndexOutType :: GEPIndex op a b -> PrimType a -> PrimType b
+gepIndexOutType GEPEmpty t = t
+gepIndexOutType (GEPArray _ l) (ArrayPrimType _ t) = gepIndexOutType l t
+gepIndexOutType (GEPArray _ _) (ScalarPrimType _) = internalError "Array type impossible"
+gepIndexOutType (GEPStruct t _ l) _ = gepIndexOutType l t
 
 instance TypeOf op => TypeOf (GetElementPtr op ptra) where
-  typeOf (GEP _ p _ path) =
+  typeOf (GEP p _ path) =
     case typeOf p of
-      PrimType (PtrPrimType _ addr) -> PrimType (PtrPrimType (gepIndexOutType path) addr)
-      _ -> error "Pointer type is not a pointer type"
+      PrimType (PtrPrimType tp addr) -> PrimType (PtrPrimType (gepIndexOutType path tp) addr)
+      PrimType (ScalarPrimType _) -> internalError "Pointer type impossible"
