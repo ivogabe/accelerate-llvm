@@ -57,7 +57,6 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW
-import LLVM.AST.Type.AddrSpace
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -65,7 +64,6 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically)
-import Data.ByteString.Short ( ShortByteString )
 import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists))
 import Control.Monad
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
@@ -73,7 +71,7 @@ import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 
-codegen :: ShortByteString
+codegen :: String
         -> Env AccessGroundR env
         -> Clustered NativeOp args
         -> Args env args

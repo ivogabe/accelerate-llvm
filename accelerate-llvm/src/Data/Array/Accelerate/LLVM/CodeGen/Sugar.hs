@@ -26,11 +26,13 @@ module Data.Array.Accelerate.LLVM.CodeGen.Sugar (
 ) where
 
 import Data.Array.Accelerate.Array.Buffer
-import LLVM.AST.Type.AddrSpace
-import LLVM.AST.Type.Instruction.Volatile
-import LLVM.AST.Type.Operand
-import qualified LLVM.AST                                    as LLVM
 import Foreign.Ptr
+import LLVM.AST.Type.Operand
+import LLVM.AST.Type.Instruction.Volatile
+import LLVM.AST.Type.Representation                                 ( AddrSpace )
+import LLVM.AST.Type.Metadata
+
+import Data.Array.Accelerate.Representation.Array
 
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
@@ -73,7 +75,7 @@ data IRBuffer e
       IRBufferScope
       -- If we have metadata for alias annotation, this field stores
       -- the alias.scope list and noalias list.
-      (Maybe (LLVM.MetadataNodeID, LLVM.MetadataNodeID))
+      (Maybe (MetadataNodeID, MetadataNodeID))
 
 data IRBufferScope
   -- The pointer of the buffer refers to a single value.
@@ -93,10 +95,10 @@ data IRBufferScope
   -- element.
   | IRBufferScopeArray
 
-bufferMetadata :: IRBuffer e -> LLVM.InstructionMetadata
+bufferMetadata :: IRBuffer e -> InstructionMetadata
 bufferMetadata (IRBuffer _ _ _ _ a) = bufferMetadata' a
 
-bufferMetadata' :: Maybe (LLVM.MetadataNodeID, LLVM.MetadataNodeID) -> LLVM.InstructionMetadata
+bufferMetadata' :: Maybe (MetadataNodeID, MetadataNodeID) -> InstructionMetadata
 bufferMetadata' (Just (aliasscope, noalias))
-  = [("alias.scope", LLVM.MDRef aliasscope), ("noalias", LLVM.MDRef noalias)]
-bufferMetadata' _ = [("noalias", LLVM.MDRef $ LLVM.MetadataNodeID 1)]
+  = [("alias.scope", MetadataNodeOperand $ MetadataNodeReference aliasscope), ("noalias", MetadataNodeOperand $ MetadataNodeReference  noalias)]
+bufferMetadata' _ = [("noalias", MetadataNodeOperand $ MetadataNodeReference 1)]

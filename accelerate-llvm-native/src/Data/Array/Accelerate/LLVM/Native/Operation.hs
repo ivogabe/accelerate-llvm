@@ -62,7 +62,6 @@ import Data.Array.Accelerate.Trafo.Desugar (desugarAlloc)
 import Data.Array.Accelerate.AST.Idx (Idx(..))
 import Data.Array.Accelerate.Pretty.Operation (prettyFun)
 import Data.Array.Accelerate.Pretty.Exp (Val (Push))
-import Prettyprinter (pretty)
 import Unsafe.Coerce (unsafeCoerce)
 
 data NativeOp t where

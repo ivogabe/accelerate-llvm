@@ -38,9 +38,6 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Module
-import LLVM.AST.Type.AddrSpace
-import qualified LLVM.AST.Global                                    as LLVM
-import qualified LLVM.AST.Type                                      as LLVM
 
 import Data.String
 import qualified Data.ByteString.Short.Char8                        as S8
@@ -77,9 +74,9 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameIndex := GetStructElementPtr primType arg (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ "env" := GetStructElementPtr envTp arg (TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameKernelMemory := GetStructElementPtr kernelMemTp arg (TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameIndex := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ "env" := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameKernelMemory := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
   , LocalReference type' nameFirstIndex
@@ -99,5 +96,5 @@ bindHeaderEnv env =
 
     kernelMemTp :: PrimType (SizedArray Word)
     kernelMemTp = ArrayPrimType 0 primType
-
     arg = LocalReference (PrimType argTp) "arg"
+

@@ -99,7 +99,6 @@ Library
 
     Data.Array.Accelerate.LLVM.Native.Compile
     Data.Array.Accelerate.LLVM.Native.Compile.Cache
-    Data.Array.Accelerate.LLVM.Native.Compile.Optimise
 
     Data.Array.Accelerate.LLVM.Native.Link
     Data.Array.Accelerate.LLVM.Native.Link.Cache
@@ -110,19 +109,12 @@ Library
     Data.Array.Accelerate.LLVM.Native.Embed
 
     Data.Array.Accelerate.LLVM.Native.Execute
-    Data.Array.Accelerate.LLVM.Native.Execute.Divide
-    Data.Array.Accelerate.LLVM.Native.Execute.Environment
     Data.Array.Accelerate.LLVM.Native.Execute.Marshal
-    Data.Array.Accelerate.LLVM.Native.Execute.Scheduler
-    Data.Array.Accelerate.LLVM.Native.Execute.Sleep
-    Data.Array.Accelerate.LLVM.Native.Execute.Kernel
-    Data.Array.Accelerate.LLVM.Native.Execute.KernelArguments
 
     Data.Array.Accelerate.LLVM.Native.Plugin.Annotation
     Data.Array.Accelerate.LLVM.Native.Plugin.BuildInfo
 
     Control.Concurrent.Extra
-    Language.Haskell.TH.Extra
 
     Paths_accelerate_llvm_native
 
@@ -141,18 +133,21 @@ Library
         , formatting                    >= 7.0
         , ghc
         , hashable                      >= 1.0
-        , llvm-hs                       >= 4.1 && < 16
-        , llvm-hs-pure                  >= 4.1 && < 16
+        -- , llvm-hs                       >= 4.1 && < 16
+        -- , llvm-hs-pure                  >= 4.1 && < 16
+        , llvm-pretty                   >= 0.12
         , lockfree-queue                >= 0.2
         , microlens                     >= 0.4
         , mtl                           >= 2.2.1
+          -- only used to render llvm-pretty output
+        , pretty
+        -- used to pretty print intermediate representations of the compiler
         , prettyprinter                 >= 1.7
-        , primitive                     >= 0.7
+        , process
           -- TODO: These are only used for lifting ByteStrings. bytestring
           --       0.11.2.0 include its own, better lifting instances. Once
           --       that's stable, we can remove this dependency and bump
           --       bytestring's version bound.
-        , process
         , th-lift-instances
         , template-haskell
         , text                          >= 1.2

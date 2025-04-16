@@ -419,7 +419,7 @@ parCodeGenInitMemory ptr envs tupleIdx = \case
   ParGenTileLoopBoundary next -> parCodeGenInitMemory ptr envs tupleIdx next
   ParGenPar (ParLoopCodeGen _ tp init _ _ _ _ _ _ _) next -> do
     -- Pointer to the kernel memory of this operation
-    thisPtr <- instr' $ GetStructElementPtr (StructPrimType False tp) ptr (tupleLeft tupleIdx)
+    thisPtr <- instr' $ GetElementPtr $ gepStruct (StructPrimType False tp) ptr $ tupleLeft tupleIdx
     init thisPtr envs
     parCodeGenInitMemory ptr envs (tupleRight tupleIdx) next
   where
@@ -449,7 +449,7 @@ parCodeGenFinish ptr envs tupleIdx = \case
   ParGenTileLoopBoundary next -> parCodeGenFinish ptr envs tupleIdx next
   ParGenPar (ParLoopCodeGen _ tp _ _ _ _ _ _ finish _) next -> do
     -- Pointer to the kernel memory of this operation
-    thisPtr <- instr' $ GetStructElementPtr (StructPrimType False tp) ptr (tupleLeft tupleIdx)
+    thisPtr <- instr' $ GetElementPtr $ gepStruct (StructPrimType False tp) ptr $ tupleLeft tupleIdx
     finish thisPtr envs
     parCodeGenFinish ptr envs (tupleRight tupleIdx) next
   where
@@ -512,7 +512,7 @@ genParallel ptr envs tupleIdx = \case
 
   ParGenPar (ParLoopCodeGen peel tp _ init before body after exit _ nextLoop) next -> do
     -- Pointer to the kernel memory of this operation
-    thisPtr <- instr' $ GetStructElementPtr (StructPrimType False tp) ptr (tupleLeft tupleIdx)
+    thisPtr <- instr' $ GetElementPtr $ gepStruct (StructPrimType False tp) ptr $ tupleLeft tupleIdx
     -- Initialize the thread state of this operation (type variable 'a' in ParLoopCodeGen)
     a <- init thisPtr envs
     -- Initialize later operations

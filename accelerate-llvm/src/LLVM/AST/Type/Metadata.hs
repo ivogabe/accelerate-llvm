@@ -16,13 +16,16 @@
 module LLVM.AST.Type.Metadata
   where
 
+import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Downcast
 
-import qualified LLVM.AST.Constant                        as LLVM
-import qualified LLVM.AST.Operand                         as LLVM
+import qualified Text.LLVM                                as LLVM
 
 import Data.ByteString.Short                              ( ShortByteString )
+import qualified Data.ByteString.Short.Char8              as SBS8
 
+type InstructionMetadata = [(String, Metadata)]
+type MetadataNodeID = Int
 
 -- | Metadata does not have a type, and is not a value.
 --
@@ -30,32 +33,26 @@ import Data.ByteString.Short                              ( ShortByteString )
 --
 data MetadataNode
   = MetadataNode ![Maybe Metadata]
-  | MetadataNodeReference {-# UNPACK #-} !LLVM.MetadataNodeID
-  deriving Show
+  | MetadataNodeReference {-# UNPACK #-} !Int
 
-data Metadata
-  = MetadataStringOperand {-# UNPACK #-} !ShortByteString
-  | MetadataConstantOperand !LLVM.Constant
-  | MetadataNodeOperand !MetadataNode
-  deriving Show
+data Metadata where
+  MetadataStringOperand   :: {-# UNPACK #-} !ShortByteString -> Metadata
+  MetadataConstantOperand :: !(Constant t) -> Metadata
+  MetadataNodeOperand     :: !MetadataNode -> Metadata
 
--- | Convert to llvm-hs
+-- | Convert to llvm-pretty
 --
-instance Downcast Metadata LLVM.Metadata where
-  downcast (MetadataStringOperand s)   = LLVM.MDString s
-  downcast (MetadataConstantOperand o) = LLVM.MDValue (LLVM.ConstantOperand o)
-  downcast (MetadataNodeOperand n)     = LLVM.MDNode (downcast n)
+instance Downcast [Maybe Metadata] LLVM.ValMd where
+  downcast mds = LLVM.ValMdNode $ map (fmap downcast) mds
 
-#if MIN_VERSION_llvm_hs_pure(6,1,0)
-instance Downcast MetadataNode (LLVM.MDRef LLVM.MDNode) where
-  downcast (MetadataNode n)            = LLVM.MDInline (downcast n)
-  downcast (MetadataNodeReference r)   = LLVM.MDRef r
+instance Downcast Metadata LLVM.ValMd where
+  downcast (MetadataStringOperand s)   = LLVM.ValMdString (SBS8.unpack s)
+  downcast (MetadataConstantOperand o) = LLVM.ValMdValue (downcast o)
+  downcast (MetadataNodeOperand n)     = downcast n
 
-instance Downcast [Maybe Metadata] LLVM.MDNode where
-  downcast = LLVM.MDTuple . map downcast
-#else
-instance Downcast MetadataNode LLVM.MetadataNode where
-  downcast (MetadataNode n)            = LLVM.MetadataNode (downcast n)
-  downcast (MetadataNodeReference r)   = LLVM.MetadataNodeReference r
-#endif
+instance Downcast MetadataNode LLVM.ValMd where
+  downcast (MetadataNode n)            = LLVM.ValMdNode (downcast n)
+  downcast (MetadataNodeReference r)   = LLVM.ValMdRef r
 
+downcastInstructionMetadata :: InstructionMetadata -> [(String, LLVM.ValMd)]
+downcastInstructionMetadata = map (fmap downcast)

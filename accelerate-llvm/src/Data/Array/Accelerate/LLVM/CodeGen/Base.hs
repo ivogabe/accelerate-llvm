@@ -32,7 +32,6 @@ module Data.Array.Accelerate.LLVM.CodeGen.Base (
 
 ) where
 
-import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function                                       as LLVMType
@@ -51,7 +50,7 @@ import Data.Array.Accelerate.Representation.Array                   ( Array, Arr
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 
-import qualified LLVM.AST.Global                                    as LLVM
+import qualified Text.LLVM                                          as LP
 
 import Data.Monoid
 import Data.String
@@ -163,38 +162,40 @@ shapeOperandsToList = \shr ops -> reverse $ go shr ops
 --
 call :: GlobalFunction t -> Arguments t -> [FunctionAttribute] -> CodeGen arch (Operands (Result t))
 call f args attrs = do
-  let decl      = (downcast f) { LLVM.functionAttributes = downcast attrs' }
-      attrs'    = map Right attrs
+  let decl      = (downcast f) { LP.decAttrs = downcast attrs }
       --
       go :: GlobalFunction t -> Function Callable t
       go (Body t k l) = Body t k (CallGlobal l)
       go (Lam t x l)  = Lam t x (go l)
   --
-  declare decl
-  instr (Call (go f) args attrs')
+  declareExternFunc decl
+  -- TODO: this only puts the attributes on the external function declaration,
+  -- not on the call instruction. The original llvm-hs code also put them on
+  -- the call instruction. Should compare LLVM IR / benchmark to see if this is
+  -- an issue (llvm-pretty does not yet support function attributes on call
+  -- instructions).
+  instr (Call (go f) args)
 
 call' :: GlobalFunction t -> Arguments t -> [FunctionAttribute] -> CodeGen arch (Operand (Result t))
 call' f args attrs = do
-  let decl      = (downcast f) { LLVM.functionAttributes = downcast attrs' }
-      attrs'    = map Right attrs
+  let decl      = (downcast f) { LP.decAttrs = downcast attrs }
       --
       go :: GlobalFunction t -> Function Callable t
       go (Body t k l) = Body t k (CallGlobal l)
       go (Lam t x l)  = Lam t x (go l)
   --
-  declare decl
-  instr' (Call (go f) args attrs')
+  declareExternFunc decl
+  instr' (Call (go f) args)
 
 callLocal :: Function Label t -> Arguments t -> [FunctionAttribute] -> CodeGen arch (Operand (Result t))
-callLocal f args attrs = do
+callLocal f args _attrs = do
   let
-      attrs'    = map Right attrs
       --
       go :: Function Label t -> Function Callable t
       go (Body t k l) = Body t k (CallLocal l)
       go (Lam t x l)  = Lam t x (go l)
   --
-  instr' (Call (go f) args attrs')
+  instr' (Call (go f) args)
 
 -- | Converts a tuple of scalars to a function type
 type family MarshalScalars a res where
@@ -214,7 +215,7 @@ bindScalars' prefix fresh (TupRpair t1 t2)
   = (fresh2, case (eq1, eq2) of (Refl, Refl) -> Refl, f1 . f2, OP_Pair o1 o2)
 bindScalars' prefix fresh (TupRsingle tp)
   | Refl <- marshalScalar @t @f tp = (fresh + 1, Refl, LLVMType.Lam (ScalarPrimType tp) name, ir tp operand)
-  where
+    where
     operand = LocalReference (PrimType $ ScalarPrimType tp) name
     name = fromString $ prefix ++ show fresh
 bindScalars' _      fresh (TupRunit) = (fresh, Refl, id, OP_Unit)
