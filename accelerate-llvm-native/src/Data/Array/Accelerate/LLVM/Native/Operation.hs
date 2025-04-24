@@ -10,6 +10,7 @@
 {-# LANGUAGE TypeFamilies      #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE DataKinds #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Accelerate
@@ -137,18 +138,18 @@ instance DesugarAcc NativeOp where
     = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
   mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
     | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord8
-    = aletUnique lhs 
+    = aletUnique lhs
         (Alloc shr scalarTypeWord8 $ groundToExpVar (shapeType shr) sh)
         $ alet LeftHandSideUnit
           (Exec NGenerate ( -- TODO: The old pipeline used a 'memset 0' instead, which sounds faster...
                 ArgFun (Lam (LeftHandSideWildcard (shapeType shr)) $ Body $ Const scalarTypeWord8 0)
-            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId) 
+            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId)
             :>: ArgsNil))
           (Exec NPermute (
-                weaken w a 
-            :>: weaken w b 
-            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId) 
-            :>: weaken w c 
+                weaken w a
+            :>: weaken w b
+            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId)
+            :>: weaken w c
             :>: ArgsNil))
   mkPermute Nothing a b = Exec NPermute' (a :>: b :>: ArgsNil)
   mkFold a (Just seed) b c = Exec NFold (a :>: seed :>: b :>: c :>: ArgsNil)
@@ -274,10 +275,10 @@ instance SetOpIndices NativeOp where
                   -- 4 is 2 dimensions per thread, etc
                   -- note that this is about _logical_ threads; if there are less physical ones present then they will perform work stealing, so this is really the (minimum) size of each bucket in the work stealing queue
                 -- ^^^^ old ^^^
-data NativeILPVar = Dims InOut Label
+data NativeILPVar = Dims InOut (Label Comp)
                   -- | DepthPerThread InOut Label
   deriving (Eq, Ord, Show)
-pattern InDims, OutDims {- InDepth, OutDepth -}:: Label -> Graph.Var NativeOp
+pattern InDims, OutDims {- InDepth, OutDepth -}:: Label Comp -> Graph.Var NativeOp
 pattern InDims   l = BackendSpecific (Dims            InArr l)
 pattern OutDims  l = BackendSpecific (Dims           OutArr l)
 -- pattern InDepth  l = BackendSpecific (DepthPerThread  InArr l)
@@ -300,7 +301,7 @@ instance MakesILP NativeOp where
         <> ILP.c (InDir l) .==. int i
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
         <> inrankifmanifest shrO l
-          -- .+. timesN (int 3 .+. c (OutDir l)) 
+          -- .+. timesN (int 3 .+. c (OutDir l))
           -- When we switch to gather, like in the paper, we need to add this term.
           -- 4 + dir is always positive, and this is exactly why we (elsewhere) define `n` as `5+(size nodes)`
           -- problem: this clashes with the assumption in 'inputConstraints' and 'finalise' that orders are at most n,
@@ -330,7 +331,7 @@ instance MakesILP NativeOp where
         <> ILP.c (InDir  l) .==. int (-2)
         <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
       ( lower (-2) (InDir l)
-      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). 
+      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3).
   mkGraph NPermute' (L _ (_, lTargets) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
     Graph.Info
       ( mempty & infusibleEdges .~ Set.map (-?> l) lTargets) -- add infusible edges from the producers of target array to the permute
@@ -340,7 +341,7 @@ instance MakesILP NativeOp where
         <> ILP.c (InDir  l) .==. int (-2)
         <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
       ( lower (-2) (InDir l)
-      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). 
+      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3).
   mkGraph (NScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
     Graph.Info
       -- Scan cannot fuse with its consumer, as the output is one larger than the input
@@ -407,7 +408,7 @@ instance MakesILP NativeOp where
         <> inrankifmanifest (ShapeRsnoc shr) l)
       (defaultBounds l)
 
-  labelLabelledArg :: M.Map (Graph.Var NativeOp) Int -> Label -> LabelledArg env a -> LabelledArgOp NativeOp env a
+  labelLabelledArg :: M.Map (Graph.Var NativeOp) Int -> Label Comp -> LabelledArg env a -> LabelledArgOp NativeOp env a
   labelLabelledArg vars l (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! InDir  l)
   labelLabelledArg vars l (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! OutDir l)
   labelLabelledArg _ _ (L x y) = LOp x y 0
@@ -419,22 +420,22 @@ instance MakesILP NativeOp where
 
   encodeBackendClusterArg (BCAN) = intHost $(hashQ ("BCAN" :: String))
 
-inputConstraints :: Label -> Labels -> Constraint NativeOp
-inputConstraints l = foldMap $ \lIn -> 
+inputConstraints :: Label Comp -> Labels Comp -> Constraint NativeOp
+inputConstraints l = foldMap $ \lIn ->
                 timesN (fused lIn l) .>=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
     <> (-1) .*. timesN (fused lIn l) .<=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
     <>          timesN (fused lIn l) .>=. ILP.c (InFoldSize l) .-. ILP.c (OutFoldSize lIn)
     <> (-1) .*. timesN (fused lIn l) .<=. ILP.c (InFoldSize l) .-. ILP.c (OutFoldSize lIn)
 
-inrankifmanifest :: ShapeR sh -> Label -> Constraint NativeOp
+inrankifmanifest :: ShapeR sh -> Label Comp -> Constraint NativeOp
 inrankifmanifest shr l = ILP.int (rank shr) .+. timesN (manifest l) .>=. ILP.c (InDims l)
                       <> ILP.int (rank shr) .-. timesN (manifest l) .<=. ILP.c (InDims l)
 
-outrankifmanifest :: ShapeR sh -> Label -> Constraint NativeOp
+outrankifmanifest :: ShapeR sh -> Label Comp -> Constraint NativeOp
 outrankifmanifest shr l = ILP.int (rank shr) .+. timesN (manifest l) .>=. ILP.c (OutDims l)
                        <> ILP.int (rank shr) .-. timesN (manifest l) .<=. ILP.c (OutDims l)
 
-defaultBounds :: Label -> Bounds NativeOp
+defaultBounds :: Label Comp -> Bounds NativeOp
 defaultBounds l = lower (-2) (InDir l) <> lower (-2) (OutDir l) <> lower 0 (InDims l) <> lower 0 (OutDims l)
 
 instance NFData' (BackendClusterArg NativeOp) where
