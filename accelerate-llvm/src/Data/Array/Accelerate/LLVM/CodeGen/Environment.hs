@@ -155,7 +155,7 @@ bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
       | otherwise = do
         -- Introduce a new mutable variable on the stack
         ptr <- hoistAlloca $ ScalarPrimType tp
-        ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
+        ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType tp) defaultAddrSpace) ptr
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
@@ -173,7 +173,7 @@ bindLocalsInTile needsTileArray depth tileSize = \envs -> foldlM go envs $ envsL
       | otherwise = do
         -- Introduce a new mutable variable on the stack
         ptr <- hoistAlloca $ ArrayPrimType (fromIntegral tileSize) (ScalarPrimType tp)
-        ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType $ SingleScalarType $ scalarArrayDataR tp) defaultAddrSpace) ptr
+        ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType tp) defaultAddrSpace) ptr
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeTile Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
@@ -285,7 +285,7 @@ arraySize :: HasCallStack => Arg genv (m sh e) -> Envs genv idxEnv -> Operands s
 arraySize (ArgArray _ (ArrayR shr _) sh _) = envsPrjParameters $ shapeExpVars shr sh
 
 type family MarshalArg a where
-  MarshalArg (Buffer e) = Ptr (ScalarArrayDataR e)
+  MarshalArg (Buffer e) = Ptr e
   MarshalArg e = e
 
 -- | Converts a typed environment into a function type.
@@ -306,11 +306,8 @@ envType :: Env AccessGroundR env -> TupR PrimType (MarshalEnv env)
 envType Empty = TupRunit
 envType (Push env (AccessGroundRscalar tp))
   | Refl <- marshalScalarArg tp = envType env `TupRpair` TupRsingle (ScalarPrimType tp)
-envType (Push env (AccessGroundRbuffer _ (SingleScalarType tp)))
-  | SingleArrayDict <- singleArrayDict tp 
-  = envType env `TupRpair` TupRsingle (PtrPrimType (ScalarPrimType $ SingleScalarType tp) defaultAddrSpace)
-envType (Push env (AccessGroundRbuffer _ (VectorScalarType (VectorType n tp))))
-  = envType env `TupRpair` TupRsingle (PtrPrimType (ScalarPrimType $ SingleScalarType tp) defaultAddrSpace)
+envType (Push env (AccessGroundRbuffer _ tp))
+  = envType env `TupRpair` TupRsingle (PtrPrimType (ScalarPrimType tp) defaultAddrSpace)
 
 bindEnv
   :: forall arch env. Env AccessGroundR env
@@ -414,10 +411,7 @@ bindEnv environment =
         irbuffer :: IRBuffer t
         irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray alias
         ptrType :: PrimType (MarshalArg (Buffer t))
-        ptrType = case tp of
-          SingleScalarType t
-            | SingleArrayDict <- singleArrayDict t -> PtrPrimType (ScalarPrimType tp) defaultAddrSpace
-          VectorScalarType (VectorType _ t) -> PtrPrimType (ScalarPrimType $ SingleScalarType t) defaultAddrSpace
+        ptrType = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
 
         mutOutCount'
           | In <- m = mutOutCount
