@@ -24,9 +24,7 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Target.ClangInfo                  ( hostLLVMVersion, llvmverFromTuple, clangExePath )
 import Data.Array.Accelerate.LLVM.CodeGen.Environment               ( Gamma )
 
-import Data.Array.Accelerate.LLVM.Native.CodeGen                    ( )
 import Data.Array.Accelerate.LLVM.Native.Compile.Cache
-import Data.Array.Accelerate.LLVM.Native.Foreign                    ( )
 import Data.Array.Accelerate.LLVM.Native.Target
 import qualified Data.Array.Accelerate.LLVM.Native.Debug            as Debug
 

@@ -70,6 +70,7 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
+import qualified Text.LLVM as LP
 
 codegen :: String
         -> Env AccessGroundR env
@@ -82,7 +83,7 @@ codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
-  codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index") $ do
+  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index") $ do
     extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -317,6 +318,9 @@ codegen name env cluster args
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True
     isDescending _ = False
+
+linkage :: Maybe LP.Linkage
+linkage = Just LP.DLLExport
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
 opCodeGen (FlatOp NGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
