@@ -56,7 +56,7 @@ import Lens.Micro.Mtl
 
 import qualified Data.Map as M
 import Data.Array.Accelerate.Trafo.Exp.Substitution
-import Control.Monad.State
+import Control.Monad.State.Strict
 
 data NativeOp t where
   NMap         :: NativeOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
