@@ -295,7 +295,7 @@ instance MakesILP NativeOp where
           -> NativeOp args
           -> LabelledArgs env args
           -> State (BackendGraphState NativeOp env) ()
-  mkGraph c@(Label i _) NBackpermute (_fun :>: L _ (_, bsIn) :>: _out :>: ArgsNil) = do
+  mkGraph c@(Label i _) NBackpermute (_fun :>: L _ (_, bsIn, _) :>: _out :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
@@ -328,7 +328,7 @@ instance MakesILP NativeOp where
   --     (outrankifmanifest shr l)
   --     (defaultBounds l)
 
-  mkGraph c NMap (_fun :>: L _ (_, bsIn) :>: _out :>: ArgsNil) = do
+  mkGraph c NMap (_fun :>: L _ (_, bsIn, _) :>: _out :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
@@ -346,7 +346,7 @@ instance MakesILP NativeOp where
   --       <> inrankifmanifest shr l)
   --     (defaultBounds l)
 
-  mkGraph c NPermute (_fun :>: L _ (_, bsTargets) :>: L _ (_, bsLocks) :>: L _ (_, bsIn) :>: ArgsNil) = do
+  mkGraph c NPermute (_fun :>: L _ (_, bsTargets, _) :>: L _ (_, bsLocks, _) :>: L _ (_, bsIn, _) :>: ArgsNil) = do
     useInOutDir c
     wsTargets <- use $ allWriters bsTargets
     wsLocks   <- use $ allWriters bsLocks
@@ -369,7 +369,7 @@ instance MakesILP NativeOp where
   --     ( lower (-2) (InDir l)
   --     <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3).
 
-  mkGraph c NPermute' (L _ (_, bsTargets) :>: L _ (_, bsIn) :>: ArgsNil) = do
+  mkGraph c NPermute' (L _ (_, bsTargets, _) :>: L _ (_, bsIn, _) :>: ArgsNil) = do
     useInOutDir c
     wsTargets <- use $ allWriters bsTargets
     wsIn      <- use $ allWriters bsIn
@@ -391,7 +391,7 @@ instance MakesILP NativeOp where
   --     ( lower (-2) (InDir l)
   --     <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3).
 
-  mkGraph c (NScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ (_, bsIn) :>: _out :>: ArgsNil) = do
+  mkGraph c (NScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ (_, bsIn, _) :>: _out :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
@@ -416,7 +416,7 @@ instance MakesILP NativeOp where
   --       LeftToRight -> -2
   --       RightToLeft -> -1
 
-  mkGraph c (NScan1 (dirToInt -> dir)) (_fun :>: L _ (_, bsIn) :>: _out :>: ArgsNil) = do
+  mkGraph c (NScan1 (dirToInt -> dir)) (_fun :>: L _ (_, bsIn, _) :>: _out :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
@@ -440,7 +440,7 @@ instance MakesILP NativeOp where
   --       LeftToRight -> -2
   --       RightToLeft -> -1
 
-  mkGraph c (NScan' (dirToInt -> dir)) (_fun :>: _exp :>: L _ (_, bsIn) :>: _out1 :>: _out2 :>: ArgsNil) = do
+  mkGraph c (NScan' (dirToInt -> dir)) (_fun :>: _exp :>: L _ (_, bsIn, _) :>: _out1 :>: _out2 :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
@@ -466,7 +466,7 @@ instance MakesILP NativeOp where
   --       LeftToRight -> -2
   --       RightToLeft -> -1
 
-  mkGraph c NFold (_fun :>: _exp :>: L _ (_, bsIn) :>: _out :>: ArgsNil) = do
+  mkGraph c NFold (_fun :>: _exp :>: L _ (_, bsIn, _) :>: _out :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
@@ -485,7 +485,7 @@ instance MakesILP NativeOp where
   --       <> inrankifmanifest (ShapeRsnoc shr) l)
   --     (defaultBounds l)
 
-  mkGraph c NFold1 (_fun :>: L _ (_, bsIn) :>: _out :>: ArgsNil) = do
+  mkGraph c NFold1 (_fun :>: L _ (_, bsIn, _) :>: _out :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
