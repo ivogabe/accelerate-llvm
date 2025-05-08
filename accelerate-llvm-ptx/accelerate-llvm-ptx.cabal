@@ -74,56 +74,57 @@ Flag nvvm
 Library
   exposed-modules:
     Data.Array.Accelerate.LLVM.PTX
-    Data.Array.Accelerate.LLVM.PTX.Foreign
+    -- Data.Array.Accelerate.LLVM.PTX.Foreign
 
   other-modules:
+    Data.Array.Accelerate.LLVM.PTX.Operation
     Data.Array.Accelerate.LLVM.PTX.Analysis.Device
     Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
-    Data.Array.Accelerate.LLVM.PTX.Array.Data
-    Data.Array.Accelerate.LLVM.PTX.Array.Prim
-    Data.Array.Accelerate.LLVM.PTX.Array.Remote
-    Data.Array.Accelerate.LLVM.PTX.Array.Table
+    -- Data.Array.Accelerate.LLVM.PTX.Array.Data
+    -- Data.Array.Accelerate.LLVM.PTX.Array.Prim
+    -- Data.Array.Accelerate.LLVM.PTX.Array.Remote
+    -- Data.Array.Accelerate.LLVM.PTX.Array.Table
     Data.Array.Accelerate.LLVM.PTX.Context
     Data.Array.Accelerate.LLVM.PTX.Debug
     Data.Array.Accelerate.LLVM.PTX.Pool
-    Data.Array.Accelerate.LLVM.PTX.State
+    -- Data.Array.Accelerate.LLVM.PTX.State
     Data.Array.Accelerate.LLVM.PTX.Target
 
-    Data.Array.Accelerate.LLVM.PTX.Execute
-    Data.Array.Accelerate.LLVM.PTX.Execute.Async
-    Data.Array.Accelerate.LLVM.PTX.Execute.Environment
-    Data.Array.Accelerate.LLVM.PTX.Execute.Event
-    Data.Array.Accelerate.LLVM.PTX.Execute.Marshal
-    Data.Array.Accelerate.LLVM.PTX.Execute.Stream
-    Data.Array.Accelerate.LLVM.PTX.Execute.Stream.Reservoir
+    -- Data.Array.Accelerate.LLVM.PTX.Execute
+    -- Data.Array.Accelerate.LLVM.PTX.Execute.Async
+    -- Data.Array.Accelerate.LLVM.PTX.Execute.Environment
+    -- Data.Array.Accelerate.LLVM.PTX.Execute.Event
+    -- Data.Array.Accelerate.LLVM.PTX.Execute.Marshal
+    -- Data.Array.Accelerate.LLVM.PTX.Execute.Stream
+    -- Data.Array.Accelerate.LLVM.PTX.Execute.Stream.Reservoir
 
-    Data.Array.Accelerate.LLVM.PTX.CodeGen
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen
     Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
-    Data.Array.Accelerate.LLVM.PTX.CodeGen.Fold
-    Data.Array.Accelerate.LLVM.PTX.CodeGen.FoldSeg
-    Data.Array.Accelerate.LLVM.PTX.CodeGen.Generate
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen.Fold
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen.FoldSeg
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen.Generate
     Data.Array.Accelerate.LLVM.PTX.CodeGen.Intrinsic
     Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
-    Data.Array.Accelerate.LLVM.PTX.CodeGen.Map
-    Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute
-    Data.Array.Accelerate.LLVM.PTX.CodeGen.Scan
-    Data.Array.Accelerate.LLVM.PTX.CodeGen.Stencil
-    Data.Array.Accelerate.LLVM.PTX.CodeGen.Transform
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen.Map
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen.Scan
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen.Stencil
+    -- Data.Array.Accelerate.LLVM.PTX.CodeGen.Transform
 
     Data.Array.Accelerate.LLVM.PTX.Compile
     Data.Array.Accelerate.LLVM.PTX.Compile.Cache
     -- Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice
     Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice.Load
-    -- Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice.TH
+    Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice.TH
 
-    Data.Array.Accelerate.LLVM.PTX.Link
+    -- Data.Array.Accelerate.LLVM.PTX.Link
     Data.Array.Accelerate.LLVM.PTX.Link.Cache
     Data.Array.Accelerate.LLVM.PTX.Link.Object
 
-    Data.Array.Accelerate.LLVM.PTX.Embed
+    -- Data.Array.Accelerate.LLVM.PTX.Embed
 
-    System.Process.Extra
-    GHC.Heap.NormalForm
+    -- System.Process.Extra
+    -- GHC.Heap.NormalForm
 
     Paths_accelerate_llvm_ptx
 
@@ -142,6 +143,7 @@ Library
         , formatting                    >= 7.0
         , hashable                      >= 1.2
         , llvm-pretty                   >= 0.12
+        , microlens                     >= 0.4
         , mtl                           >= 2.2.1
         , nvvm                          >= 0.9
           -- only used to render llvm-pretty output

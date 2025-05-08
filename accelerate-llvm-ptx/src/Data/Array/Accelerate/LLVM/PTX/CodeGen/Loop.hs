@@ -44,5 +44,5 @@ imapFromTo start end body = do
   tid   <- A.fromIntegral integralType numType =<< globalThreadIdx
   i0    <- add numType tid start
   --
-  Loop.imapFromStepTo i0 step end body
+  Loop.imapFromStepTo [] i0 step end body
 
