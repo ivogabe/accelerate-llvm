@@ -51,13 +51,14 @@ import qualified Data.ByteString.Short.Char8                        as S8
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = (((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), Word64)
+type Header = ((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), SizedArray Word64), Word64)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle (ArrayPrimType 32 primType) -- Multiply by cache line width / word64
   `TupRpair` TupRsingle primType
 
 type KernelType env = Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)) -> Word64 -> Word8

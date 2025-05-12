@@ -46,6 +46,7 @@ import Foreign.Storable
 import Formatting
 import Text.Printf
 import qualified Data.ByteString.Short.Char8                        as S8
+import Data.Text.Internal.Fusion.Size (Size)
 
 
 -- Witnesses to observe the LLVM type hierarchy:
