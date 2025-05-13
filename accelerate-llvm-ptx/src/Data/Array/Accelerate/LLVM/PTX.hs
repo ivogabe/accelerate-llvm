@@ -85,9 +85,11 @@ module Data.Array.Accelerate.LLVM.PTX (
   -- * Controlling host-side allocation
   registerPinnedAllocatorWith,
 -}
+  PTXOp, PTXKernel
 ) where
 
 import Data.Array.Accelerate.LLVM.PTX.Operation
+import Data.Array.Accelerate.LLVM.PTX.Kernel
 
 {- import Data.Array.Accelerate.AST                                    ( PreOpenAfun(..), arraysR, liftALeftHandSide )
 import Data.Array.Accelerate.AST.LeftHandSide                       ( lhsToTupR )

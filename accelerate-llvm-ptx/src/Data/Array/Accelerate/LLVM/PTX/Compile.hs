@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns      #-}
 {-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
@@ -21,6 +22,7 @@ module Data.Array.Accelerate.LLVM.PTX.Compile (
 ) where
 
 import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.AST.Operation (NFData'(..))
 
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Target.ClangInfo                  ( hostLLVMVersion, llvmverFromTuple, clangExePath, clangExePathEnvironment )
@@ -40,6 +42,7 @@ import qualified Foreign.CUDA.Analysis                              as CUDA
 import qualified Text.LLVM.PP                                       as LP
 import qualified Text.PrettyPrint                                   as LP ( render )
 
+import Control.DeepSeq
 import Control.Monad.State
 import Data.ByteString.Short                                        ( ShortByteString )
 import Data.List                                                    ( intercalate )
@@ -51,7 +54,7 @@ import System.IO                                                    ( hPutStrLn,
 import System.IO.Unsafe
 import System.Process
 import Text.Printf                                                  ( printf )
-  
+
 data ObjectR f = ObjectR
   { objId         :: {-# UNPACK #-} !UID
   , objSym        :: !ShortByteString
@@ -65,7 +68,7 @@ data ObjectR f = ObjectR
 -- defined in the module paired with its occupancy information.
 --
 
-compile :: HasCallStack => UID -> ShortByteString -> LaunchConfig -> Module f -> LLVM PTX (ObjectR PTX)
+compile :: HasCallStack => UID -> ShortByteString -> LaunchConfig -> Module f -> LLVM PTX (ObjectR f)
 compile uid name config module' = do
   cacheFile <- cacheOfUID uid
   -- Generate code for this Acc operation
@@ -198,3 +201,6 @@ exported (I think), which is what we want.
 [1]: https://releases.llvm.org/19.1.0/docs/NVPTXUsage.html#linking-with-libdevice
 [2]: https://clang.llvm.org/docs/OffloadingDesign.html#offload-device-compilation
 -}
+
+instance NFData' ObjectR where
+  rnf' (ObjectR !_ !_ !_ path) = rnf path

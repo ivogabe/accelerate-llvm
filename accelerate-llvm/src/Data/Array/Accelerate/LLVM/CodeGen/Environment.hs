@@ -1,4 +1,7 @@
+{-# LANGUAGE AllowAmbiguousTypes  #-}
 {-# LANGUAGE GADTs                #-}
+{-# LANGUAGE ImpredicativeTypes   #-}
+{-# LANGUAGE LambdaCase           #-}
 {-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE PatternSynonyms      #-}
 {-# LANGUAGE RankNTypes           #-}
@@ -24,14 +27,16 @@ module Data.Array.Accelerate.LLVM.CodeGen.Environment
   , Gamma, GroundOperand(..), AccessGroundR(..)
   , aprjParameter, aprjParameters, aprjBuffer
   , arraySize
-  , MarshalArg, MarshalFun, MarshalFun', MarshalEnv
+  , MarshalArg, MarshalFun, MarshalEnv
   , marshalScalarArg
   -- , scalarParameter, ptrParameter
-  , bindEnv, envType
+  , marshalFunResultUnit
+  , bindEnvFromStruct, bindEnvArgs, envStructType
   , Envs(..), initEnv, bindLocals, bindLocalsInTile
   , envsGamma, envsPrjBuffer, envsPrjParameter
   , envsPrjParameters, envsPrjSh, envsPrjIndex, envsPrjIndices
   , parallelIterSize
+  , sizeOfEnv
   )
   where
 
@@ -41,6 +46,7 @@ import Data.Array.Accelerate.AST.Environment                    hiding ( Val, pr
 import Data.Array.Accelerate.AST.Operation
 import Data.Array.Accelerate.AST.Partitioned                    hiding ( Label )
 import Data.Array.Accelerate.AST.Idx                            ( Idx )
+import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.Error                              ( internalError )
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Representation.Type
@@ -66,10 +72,11 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
 import GHC.Stack
+import Data.Bits
 import Data.Typeable
 import Data.Foldable
-import Data.ByteString.Short                                    ( ShortByteString(..) )
 import Control.Monad
+import Foreign.Storable
 
 data Envs env idxEnv = Envs
   -- The current loop depth
@@ -102,7 +109,7 @@ data Envs env idxEnv = Envs
   }
 
 initEnv
-  :: forall target env env' idxEnv sh local.
+  :: forall env env' idxEnv sh local.
      Gamma env
   -- Fields from FlatCluster
   -- Info on the index environment
@@ -144,6 +151,7 @@ initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
       (varIdx ix, dir, szOperand) : loops shr' ixs sh' dirs'
       where
         szOperand = OP_Int $ aprjParameter (Var scalarTypeInt $ varIdx sz) gamma
+    loops _ _ _ _ = internalError "Tuple mismatch"
 
 bindLocals :: LoopDepth -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
 bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
@@ -289,70 +297,158 @@ type family MarshalArg a where
   MarshalArg e = e
 
 -- | Converts a typed environment into a function type.
--- For instance, (((), Int), Float) is converted to Int -> Float -> ().
--- The accumulating parameter 'r' is needed as the type would be in reverse
--- order without such accumulator.
+-- For instance, (((), Int), Float) is converted to Float -> Int -> ().
+-- This is in reverse order to make it easier to work with this type family.
+-- Otherwise we would need an accumulating type argument.
 --
-type MarshalFun env = MarshalFun' env ()
-type family MarshalFun' env r where
-  MarshalFun' () r = r
-  MarshalFun' (env, t) r = MarshalFun' env (MarshalArg t -> r)
+type family MarshalFun env where
+  MarshalFun () = ()
+  MarshalFun (env, t) = MarshalArg t -> MarshalFun env
 
 type family MarshalEnv env where
   MarshalEnv (env, t) = (MarshalEnv env, MarshalArg t)
   MarshalEnv ()       = ()
 
-envType :: Env AccessGroundR env -> TupR PrimType (MarshalEnv env)
-envType Empty = TupRunit
-envType (Push env (AccessGroundRscalar tp))
-  | Refl <- marshalScalarArg tp = envType env `TupRpair` TupRsingle (ScalarPrimType tp)
-envType (Push env (AccessGroundRbuffer _ tp))
-  = envType env `TupRpair` TupRsingle (PtrPrimType (ScalarPrimType tp) defaultAddrSpace)
+marshalFunResultUnit :: Env AccessGroundR env -> Result (MarshalFun env) :~: ()
+marshalFunResultUnit Empty = Refl
+marshalFunResultUnit (Push env _) = marshalFunResultUnit env
 
-bindEnv
+bindEnvArgs
+  :: forall arch env. Env AccessGroundR env
+  -> ( forall k. (LLVM.Function k () -> LLVM.Function k (MarshalFun env))
+     , CodeGen arch ()
+     , Gamma env
+     )
+bindEnvArgs environment =
+  let
+    (args, gen, gamma, _, _, mutOutCount) = go environment
+  in
+    ( args
+    , do
+      declareAliasScopes mutOutCount
+      gen
+    , gamma)
+  where
+    go
+      :: Env AccessGroundR env'
+      ->
+        ( forall k. LLVM.Function k () -> LLVM.Function k (MarshalFun env')
+        , CodeGen arch ()
+        , Gamma env'
+        , Int -- Next fresh scalar variable index
+        , Int -- Next fresh buffer variable index
+        , Int -- Next fresh index for an Out or Mut argument (i.e. the number of Out and Mut arguments so far)
+        )
+    go Empty = (id, return (), Empty, 0, 0, 0)
+    go (Push env (AccessGroundRscalar tp))
+      | Refl <- marshalScalarArg tp
+      , (bnd, codegen, gamma, freshScalar, freshBuffer, mutOutCount) <- go env
+      , name <- fromString $ "param." ++ show freshScalar
+      , operand <- LocalReference (PrimType $ ScalarPrimType tp) name
+      = ( LLVM.Lam (ScalarPrimType tp) name . bnd
+        , codegen
+        , gamma `Push` GroundOperandParam operand
+        , freshScalar + 1
+        , freshBuffer
+        , mutOutCount)
+    go (Push env (AccessGroundRbuffer m tp)) =
+      ( LLVM.Lam ptrType name . bnd
+      , annotation >> codegen
+      , gamma `Push` GroundOperandBuffer irbuffer
+      , freshScalar
+      , freshBuffer + 1
+      , mutOutCount'
+      )
+      where
+        (bnd, codegen, gamma, freshScalar, freshBuffer, mutOutCount) = go env
+        operand = LocalReference (PrimType ptrType) name
+        prefix = case m of
+          In  -> "in."
+          Out -> "out."
+          Mut -> "mut."
+        name' = prefix ++ show freshBuffer
+        name = fromString name'
+        irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray alias
+        ptrType = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+
+        mutOutCount'
+          | In <- m = mutOutCount
+          | otherwise = mutOutCount + 1
+
+        alias
+          | In <- m = Just (3, 4)
+          | otherwise = Just ( fromIntegral mutOutCount' * 3 + 6,  fromIntegral mutOutCount' * 3 + 7)
+
+        annotation :: CodeGen arch ()
+        annotation
+          | In <- m = do
+            _ <- call'
+              (lamUnnamed (primType @Int64)
+                $ lamUnnamed (primType @(Ptr Word8))
+                $ LLVM.Body (PrimType (primType @(Ptr Word8))) Nothing (Label "llvm.invariant.start.p0")) 
+              -- Note: we use 'name' as a Word8 pointer here, instead of a pointer to 'tp'.
+              -- This is allowed, as LLVM now has a single concrete pointer type,
+              -- instead of a parameterized pointer type.
+              ( ArgumentsCons (scalar scalarType (-1)) []
+                $ ArgumentsCons (LocalReference type' $ fromString name') [{- ParameterAttribute.NoCapture -}] ArgumentsNil)
+              []
+            return ()
+          | otherwise = return ()
+
+declareAliasScopes :: Int -> CodeGen arch ()
+declareAliasScopes mutOutCount = do
+  -- Declare domain for alias annotations
+  domain <- addMetadata (\d -> [Just $ MetadataNodeOperand $ MetadataNodeReference d])
+  when (domain /= 0) $
+    internalError "bindEnvFromStruct assumes this is the first place where metadata nodes are created"
+
+  -- The metadata nodes are introduced as follows:
+  -- 0 is the domain
+  -- 1 is the list with all scopes we define here
+  -- 2 is the scope for all inputs (which share one domain)
+  -- 3 is the list containing only the scope for all inputs (i.e. the alias.scope)
+  -- 4 is the list containing all scopes but the input scope (i.e. the noalias)
+  -- 5 + 3 * k is the scope of the kth Out or Mut buffer
+  -- 6 + 3 * k is the list containing only this scope
+  -- 7 + 3 * k is the list containing all other scopes,
+  --   i.e. the noalias list of the kth Out or Mut buffer
+  
+  let allScopes = [ 2 + 3 * fromIntegral k | k <- [0 .. mutOutCount + 1] ]
+  _ <- addMetadata (\_ -> map (Just . MetadataNodeOperand . MetadataNodeReference) allScopes)
+  forM_ allScopes $ \scope -> do
+    -- scope
+    scope' <- addMetadata (\s -> [Just $ MetadataNodeOperand $ MetadataNodeReference s, Just $ MetadataNodeOperand $ MetadataNodeReference domain])
+    when (scope /= scope') $
+      internalError "Index of scope does not match"
+    -- alias.scope
+    _ <- addMetadata (\_ -> [Just $ MetadataNodeOperand $ MetadataNodeReference scope])
+    -- noalias list
+    _ <- addMetadata (\_ -> map (Just . MetadataNodeOperand . MetadataNodeReference) $ filter (/= scope) allScopes)
+    return ()
+
+envStructType :: Env AccessGroundR env -> TupR PrimType (MarshalEnv env)
+envStructType Empty = TupRunit
+envStructType (Push env (AccessGroundRscalar tp))
+  | Refl <- marshalScalarArg tp = envStructType env `TupRpair` TupRsingle (ScalarPrimType tp)
+envStructType (Push env (AccessGroundRbuffer _ tp))
+  = envStructType env `TupRpair` TupRsingle (PtrPrimType (ScalarPrimType tp) defaultAddrSpace)
+
+bindEnvFromStruct
   :: forall arch env. Env AccessGroundR env
   -> ( PrimType (Struct (MarshalEnv env))
      , CodeGen arch ()
      , Gamma env
      )
-bindEnv environment =
+bindEnvFromStruct environment =
   let (gen, gamma, _, _, mutOutCount) = go id environment
   in
     ( envTp
     , do
-      -- Declare domain for alias annotations
-      domain <- addMetadata (\d -> [Just $ MetadataNodeOperand $ MetadataNodeReference d])
-      when (domain /= 0) $
-        internalError "bindEnv assumes this is the first place where metadata nodes are created"
-
-      -- The metadata nodes are introduced as follows:
-      -- 0 is the domain
-      -- 1 is the list with all scopes we define here
-      -- 2 is the scope for all inputs (which share one domain)
-      -- 3 is the list containing only the scope for all inputs (i.e. the alias.scope)
-      -- 4 is the list containing all scopes but the input scope (i.e. the noalias)
-      -- 5 + 3 * k is the scope of the kth Out or Mut buffer
-      -- 6 + 3 * k is the list containing only this scope
-      -- 7 + 3 * k is the list containing all other scopes,
-      --   i.e. the noalias list of the kth Out or Mut buffer
-      
-      let allScopes = [ 2 + 3 * fromIntegral k | k <- [0 .. mutOutCount + 1] ]
-      _ <- addMetadata (\_ -> map (Just . MetadataNodeOperand . MetadataNodeReference) allScopes)
-      forM_ allScopes $ \scope -> do
-        -- scope
-        scope' <- addMetadata (\s -> [Just $ MetadataNodeOperand $ MetadataNodeReference s, Just $ MetadataNodeOperand $ MetadataNodeReference domain])
-        when (scope /= scope') $
-          internalError "Index of scope does not match"
-        -- alias.scope
-        _ <- addMetadata (\_ -> [Just $ MetadataNodeOperand $ MetadataNodeReference scope])
-        -- noalias list
-        _ <- addMetadata (\_ -> map (Just . MetadataNodeOperand . MetadataNodeReference) $ filter (/= scope) allScopes)
-        return ()
-
+      declareAliasScopes mutOutCount
       gen
     , gamma)
   where
-    envTp = StructPrimType False $ envType environment
+    envTp = StructPrimType False $ envStructType environment
     operandEnv = LocalReference (PrimType (PtrPrimType envTp defaultAddrSpace)) "env"
     go :: (forall t. TupleIdx (MarshalEnv env') t -> TupleIdx (MarshalEnv env) t)
        -> Env AccessGroundR env'
@@ -436,6 +532,37 @@ bindEnv environment =
               []
             return ()
           | otherwise = return ()
+
+sizeOfEnv :: KernelFun kernel f -> Int
+sizeOfEnv = sizeOfEnv' 0
+
+sizeOfEnv' :: Int -> OpenKernelFun kernel env f -> Int
+sizeOfEnv' cursor (KernelFunLam argR fun)
+  | (align, size) <- alignmentAndSizeOfArgument argR
+  = sizeOfEnv' (makeIntAligned cursor align + size) fun
+sizeOfEnv' cursor (KernelFunBody _) = cursor
+
+alignmentAndSizeOfArgument :: forall s t. KernelArgR s t -> (Int, Int)
+alignmentAndSizeOfArgument = \case
+  KernelArgRbuffer _ _ -> go @(Ptr ())
+  KernelArgRscalar (SingleScalarType tp)
+    | SingleDict <- singleDict tp -> go @t
+  KernelArgRscalar (VectorScalarType (VectorType n (tp :: SingleType u)))
+    | SingleDict <- singleDict tp
+    , (align, size) <- go @u
+    -> (align, n * size)
+  where
+    go :: forall a. Storable a => (Int, Int)
+    go = (alignment (undefined :: a), sizeOf (undefined :: a))
+
+makeIntAligned :: Int -> Int -> Int
+makeIntAligned cursor align = cursor + m
+  where
+    m = (-cursor) `mod` align
+
+-- Rounds a number up to the next power of 2
+nextPowerOfTwo :: Int -> Int
+nextPowerOfTwo x = 1 `shiftL` (finiteBitSize (0 :: Int) - countLeadingZeros (x - 1))
 
 marshalScalarArg :: ScalarType t -> t :~: MarshalArg t
 -- Pattern match to prove that 't' is not a buffer

@@ -88,7 +88,7 @@ bindHeaderEnv env =
     -- Note that the array here has size 0, but it may be larger.
     -- LLVM allows this, since we only use pointer casts here and the allocation does not happen here.
     argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp `TupRpair` TupRsingle kernelMemTp)) defaultAddrSpace
-    (envTp, extractEnv, gamma) = bindEnv env
+    (envTp, extractEnv, gamma) = bindEnvFromStruct env
 
     nameIndex = "workassist.index"
     nameFirstIndex = "workassist.first_index"
