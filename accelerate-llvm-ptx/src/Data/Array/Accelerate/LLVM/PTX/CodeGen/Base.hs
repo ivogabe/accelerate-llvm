@@ -49,7 +49,9 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
   sharedMemAddrSpace, sharedMemVolatility,
 
   -- Kernel definitions
-  codeGenKernel
+  codeGenKernel,
+
+  KernelType
 ) where
 
 import Data.Primitive.Vec
@@ -57,6 +59,7 @@ import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Base
+import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
@@ -784,64 +787,4 @@ codeGenKernel name args body =
     declare :: GlobalFunction f
     declare = args $ Body VoidType (Just Tail) (fromString name)
 
-{- -- | Create a single kernel program with the default launch configuration.
---
-makeOpenAcc
-    :: UID
-    -> Label
-    -> [LP.Typed LP.Ident]
-    -> CodeGen PTX ()
-    -> CodeGen PTX (IROpenAcc PTX aenv a)
-makeOpenAcc uid name param kernel = do
-  dev <- liftCodeGen $ gets ptxDeviceProperties
-  makeOpenAccWith (simpleLaunchConfig dev) uid name param kernel
-
--- | Create a single kernel program with the given launch analysis information.
---
-makeOpenAccWith
-    :: LaunchConfig
-    -> UID
-    -> Label
-    -> [LP.Typed LP.Ident]
-    -> CodeGen PTX ()
-    -> CodeGen PTX (IROpenAcc PTX aenv a)
-makeOpenAccWith config uid name param kernel = do
-  body  <- makeKernel config (name <> fromString ('_' : show uid)) param kernel
-  return $ IROpenAcc [body]
-
--- | Create a complete kernel function by running the code generation process
--- specified in the final parameter.
---
-makeKernel
-    :: LaunchConfig
-    -> Label
-    -> [LP.Typed LP.Ident]
-    -> CodeGen PTX ()
-    -> CodeGen PTX (Kernel PTX aenv a)
-makeKernel config name param kernel = do
-  _    <- kernel
-  code <- createBlocks
-  let define = LP.Define
-        { LP.defLinkage    = Nothing
-        , LP.defVisibility = Nothing
-        , LP.defRetType    = LP.PrimType LP.Void
-        , LP.defName       = labelToPrettyS name
-        , LP.defArgs       = param
-        , LP.defVarArgs    = False
-        , LP.defAttrs      = []
-        , LP.defSection    = Nothing
-        , LP.defGC         = Nothing
-        , LP.defBody       = code
-        , LP.defMetadata   = mempty
-        , LP.defComdat     = Nothing
-        }
-  addNamedMetadata "nvvm.annotations"
-    [ Just . MetadataConstantOperand
-      $ LP.Typed (LP.defFunType define) (LP.ValSymbol (labelToPrettyS name))
-    , Just . MetadataStringOperand   $ "kernel"
-    , Just . MetadataConstantOperand $ LP.Typed (LP.PrimType (LP.Integer 32)) (LP.ValInteger 1)
-    ]
-  return $ Kernel
-    { kernelMetadata = KM_PTX config
-    , unKernel       = define
-    } -}
+type KernelType env = Ptr (SizedArray Word) -> MarshalFun env

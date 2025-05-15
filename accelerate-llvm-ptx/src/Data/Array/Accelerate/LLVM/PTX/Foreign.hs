@@ -17,7 +17,7 @@
 module Data.Array.Accelerate.LLVM.PTX.Foreign (
 
   -- Foreign functions
-  ForeignAcc(..),
+  -- ForeignAcc(..),
   ForeignExp(..),
 
   -- useful re-exports
@@ -25,11 +25,11 @@ module Data.Array.Accelerate.LLVM.PTX.Foreign (
   PTX(..),
   Context(..),
   liftIO,
-  withDevicePtr,
-  module Data.Array.Accelerate.LLVM.PTX.Array.Data,
-  module Data.Array.Accelerate.LLVM.PTX.Execute.Async,
-  module Data.Array.Accelerate.LLVM.PTX.Execute.Event,
-  module Data.Array.Accelerate.LLVM.PTX.Execute.Stream,
+  -- withDevicePtr,
+  -- module Data.Array.Accelerate.LLVM.PTX.Array.Data,
+  -- module Data.Array.Accelerate.LLVM.PTX.Execute.Async,
+  -- module Data.Array.Accelerate.LLVM.PTX.Execute.Event,
+  -- module Data.Array.Accelerate.LLVM.PTX.Execute.Stream,
 
 ) where
 
@@ -39,31 +39,31 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 
 import Data.Array.Accelerate.LLVM.Foreign
-import Data.Array.Accelerate.LLVM.PTX.Array.Data
-import Data.Array.Accelerate.LLVM.PTX.Array.Prim
+-- import Data.Array.Accelerate.LLVM.PTX.Array.Data
+-- import Data.Array.Accelerate.LLVM.PTX.Array.Prim
 import Data.Array.Accelerate.LLVM.PTX.Context
-import Data.Array.Accelerate.LLVM.PTX.Execute.Async
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Async
 import Data.Array.Accelerate.LLVM.PTX.Target
-import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
-import Data.Array.Accelerate.LLVM.PTX.Execute.Event                 ( Event, waypoint, query )
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Event                 ( Event, waypoint, query )
 
 import Control.Monad.State
 import Data.Typeable
 
 
-instance Foreign PTX where
-  foreignAcc (ff :: asm (a -> b))
+instance CompileForeignExp PTX where
+  {- foreignAcc (ff :: asm (a -> b))
     | Just Refl        <- eqT @asm @ForeignAcc
     , ForeignAcc _ asm <- ff = Just asm
-    | otherwise              = Nothing
+    | otherwise              = Nothing -}
 
   foreignExp (ff :: asm (x -> y))
     | Just Refl        <- eqT @asm @ForeignExp
     , ForeignExp _ asm <- ff = Just asm
     | otherwise              = Nothing
 
-instance S.Foreign ForeignAcc where
-  strForeign (ForeignAcc s _) = s
+{- instance S.Foreign ForeignAcc where
+  strForeign (ForeignAcc s _) = s -}
 
 instance S.Foreign ForeignExp where
   strForeign (ForeignExp s _) = s
@@ -71,18 +71,18 @@ instance S.Foreign ForeignExp where
 
 -- Foreign functions in the PTX backend.
 --
-data ForeignAcc f where
+{- data ForeignAcc f where
   ForeignAcc :: String
              -> (a -> Par PTX (Future b))
-             -> ForeignAcc (a -> b)
+             -> ForeignAcc (a -> b) -}
 
 -- Foreign expressions in the PTX backend.
 --
 data ForeignExp f where
   ForeignExp :: String
-             -> IRFun1 PTX () (x -> y)
+             -> IRFun1 PTX (x -> y)
              -> ForeignExp (x -> y)
 
-deriving instance Typeable ForeignAcc
+-- deriving instance Typeable ForeignAcc
 deriving instance Typeable ForeignExp
 
