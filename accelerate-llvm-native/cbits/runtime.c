@@ -186,8 +186,7 @@ void* accelerate_worker(void *data_packed) {
       if (attempts_remaining == 0) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
-      uint32_t i = atomic_fetch_add_explicit(&kernel->work_index, 1, memory_order_relaxed);
-      kernel->work_function(kernel, i);
+      kernel->work_function(kernel, 0);
       // signal_task_empty from the Work Assisting paper,
       // and end_task
       // Similar to above, signal_task_empty happens here instead of in the work function.

@@ -180,16 +180,17 @@ iterFromTo tp start end seed body =
 
 workassistLoop
     :: Operand (Ptr Word64)                 -- index into work
-    -> Operand Word64                       -- index of the first block to work on
     -> Operand Word64                       -- size of total work
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-workassistLoop counter firstIndex size doWork = do
+workassistLoop counter size doWork = do
   entry    <- getBlock
   work     <- newBlock "workassist.loop.work"
   claimed  <- newBlock "workassist.all.claimed"
   exit     <- newBlock "workassist.exit"
   finished <- newBlock "workassist.finished"
+
+  firstIndex <- atomicRead Monotonic counter
 
   initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 size)
   initialSeq <- eq singleType (OP_Word64 firstIndex) (liftWord64 0)
@@ -225,13 +226,13 @@ workassistLoop counter firstIndex size doWork = do
   setBlock exit
   retval_ $ scalar (scalarType @Word8) 0
 
-workassistChunked :: [Loop.LoopAnnotation] -> ShapeR sh -> Operand (Ptr Word64) -> Operand Word64 -> sh -> Operands sh -> (Operands sh -> CodeGen Native ()) -> CodeGen Native ()
-workassistChunked ann shr counter firstIndex chunkSz' sh doWork = do
+workassistChunked :: [Loop.LoopAnnotation] -> ShapeR sh -> Operand (Ptr Word64) -> sh -> Operands sh -> (Operands sh -> CodeGen Native ()) -> CodeGen Native ()
+workassistChunked ann shr counter chunkSz' sh doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
   chunkCounts <- chunkCount shr sh chunkSz
   chunkCnt <- shapeSize shr chunkCounts
   chunkCnt' :: Operand Word64 <- instr' $ BitCast scalarType $ op TypeInt chunkCnt
-  workassistLoop counter firstIndex chunkCnt' $ \_ chunkLinearIndex -> do
+  workassistLoop counter chunkCnt' $ \_ chunkLinearIndex -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex
@@ -285,6 +286,10 @@ chunkEnd (ShapeRsnoc shr) (OP_Pair sh0 sz0) (OP_Pair sh1 sz1) (OP_Pair sh2 sz2) 
 atomicAdd :: MemoryOrdering -> Operand (Ptr Word64) -> Operand Word64 -> CodeGen Native (Operand Word64)
 atomicAdd ordering ptr increment = do
   instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)
+
+atomicRead :: MemoryOrdering -> Operand (Ptr Word64) -> CodeGen Native (Operand Word64)
+-- TODO: actually use load
+atomicRead ordering ptr = atomicAdd ordering ptr (integral TypeWord64 0)
 
 ---- debugging tools ----
 putchar :: Operands Int -> CodeGen Native (Operands Int)

@@ -166,7 +166,7 @@ codegen name env cluster args
           -- only used in one tile loop. These arrays can also be stored as a
           -- single value.
           envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
-          workassistLoop workassistIndex workassistFirstIndex tileCount $ \seqMode tileIdx' -> do
+          workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
 
             tileIdxAbsolute <-
@@ -299,7 +299,7 @@ codegen name env cluster args
             if parallelDepth /= rank shr then []
             else if hasPermute then [Loop.LoopInterleave]
             else [Loop.LoopVectorize]
-      workassistChunked ann parallelShr workassistIndex workassistFirstIndex tileSize parSizes $ \idx -> do
+      workassistChunked ann parallelShr workassistIndex tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
