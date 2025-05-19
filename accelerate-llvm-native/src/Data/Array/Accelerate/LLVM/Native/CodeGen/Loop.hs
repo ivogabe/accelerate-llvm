@@ -190,7 +190,7 @@ workassistLoop counter size doWork = do
   exit     <- newBlock "workassist.exit"
   finished <- newBlock "workassist.finished"
 
-  firstIndex <- atomicRead Monotonic counter
+  firstIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
 
   initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 size)
   initialSeq <- eq singleType (OP_Word64 firstIndex) (liftWord64 0)
