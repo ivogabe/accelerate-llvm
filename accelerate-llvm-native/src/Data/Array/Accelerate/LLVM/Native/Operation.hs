@@ -333,7 +333,7 @@ instance MakesILP NativeOp where
   --     (outrankifmanifest shr l)
   --     (defaultBounds l)
 
-  mkGraph c NMap (_fun :>: L _ lIn :>: L _ _lOut :>: ArgsNil) = do
+  mkGraph c NMap (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
@@ -341,6 +341,7 @@ instance MakesILP NativeOp where
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
       <> ILP.var (InDir c)      .==. ILP.var (OutDir c))
     fusionILP.bounds %= (<> defaultBounds c)
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths c lIn lOut)
 
   -- mkGraph l NMap (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) =
   --   Graph.Info
@@ -364,6 +365,8 @@ instance MakesILP NativeOp where
       <> ILP.var (InDir  c)     .==. ILP.int (-2)
       <> ILP.var (OutDir c)     .==. ILP.int (-3))
     fusionILP.bounds %= (<> lower (-2) (InDir c) <> upper (InDir c) (-1))
+    -- No output, so no in-place paths.
+
   -- mkGraph l NPermute (_ :>: L _ (_, lTargets) :>: L _ (_, lLocks) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) =
   --   Graph.Info
   --     ( mempty & infusibleEdges .~ Set.map (-?> l) (lTargets <> lLocks)) -- add infusible edges from the producers of target and lock arrays to the permute
@@ -386,6 +389,8 @@ instance MakesILP NativeOp where
       <> ILP.var (InDir  c)     .==. ILP.int (-2)
       <> ILP.var (OutDir c)     .==. ILP.int (-3))
     fusionILP.bounds %= (<> lower (-2) (InDir c) <> upper (InDir c) (-1))
+    -- No output, so no in-place paths.
+
   -- mkGraph l NPermute' (L _ (_, lTargets) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) =
   --   Graph.Info
   --     ( mempty & infusibleEdges .~ Set.map (-?> l) lTargets) -- add infusible edges from the producers of target array to the permute
@@ -397,7 +402,7 @@ instance MakesILP NativeOp where
   --     ( lower (-2) (InDir l)
   --     <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3).
 
-  mkGraph c (NScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: _out :>: ArgsNil) = do
+  mkGraph c (NScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
@@ -406,6 +411,8 @@ instance MakesILP NativeOp where
       <> ILP.var (InDir  c)     .==. ILP.int dir
       <> ILP.var (OutDir c)     .==. ILP.int (-3))
     fusionILP.bounds %= (<> lower (-2) (InDir c) <> lower (-3) (OutDir c))
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths c lIn lOut)
+
   -- mkGraph l (NScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) =
   --   Graph.Info
   --     -- Scan cannot fuse with its consumer, as the output is one larger than the input
@@ -422,7 +429,7 @@ instance MakesILP NativeOp where
   --       LeftToRight -> -2
   --       RightToLeft -> -1
 
-  mkGraph c (NScan1 (dirToInt -> dir)) (_fun :>: L _ lIn :>: _out :>: ArgsNil) = do
+  mkGraph c (NScan1 (dirToInt -> dir)) (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
@@ -431,6 +438,8 @@ instance MakesILP NativeOp where
       <> ILP.var (InDir  c)     .==. ILP.int dir
       <> ILP.var (OutDir c)     .==. ILP.int dir)
     fusionILP.bounds %= (<> defaultBounds c)
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths c lIn lOut)
+
   -- mkGraph l (NScan1 dir) (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) =
   --   Graph.Info
   --     mempty
@@ -446,7 +455,7 @@ instance MakesILP NativeOp where
   --       LeftToRight -> -2
   --       RightToLeft -> -1
 
-  mkGraph c (NScan' (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: _out1 :>: _out2 :>: ArgsNil) = do
+  mkGraph c (NScan' (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut1 :>: _out2 :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
@@ -455,6 +464,8 @@ instance MakesILP NativeOp where
       <> ILP.var (InDir  c)     .==. ILP.int dir
       <> ILP.var (OutDir c)     .==. ILP.int dir)
     fusionILP.bounds %= (<> defaultBounds c)
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths c lIn lOut1)
+
   -- mkGraph l (NScan' dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: _ :>: ArgsNil) =
   --   Graph.Info
   --     mempty
@@ -480,6 +491,8 @@ instance MakesILP NativeOp where
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
       <> ILP.var (InDir  c)     .==. ILP.var (OutDir c))
     fusionILP.bounds %= (<> defaultBounds c)
+  -- Not the same shape, so no in-place paths.
+
   -- mkGraph l NFold (_ :>: _ :>: L (ArgArray In (ArrayR (ShapeRsnoc shr) _) _ _) (_, lIns) :>: _ :>: ArgsNil) =
   --   Graph.Info
   --     mempty
@@ -499,6 +512,8 @@ instance MakesILP NativeOp where
       <> ILP.var (InFoldSize c) .==. ILP.int (c^.labelId)
       <> ILP.var (InDir  c)     .==. ILP.var (OutDir c))
     fusionILP.bounds %= (<> defaultBounds c)
+  -- Not the same shape, so no in-place paths.
+
   -- mkGraph l NFold1 (_ :>: L (ArgArray In (ArrayR (ShapeRsnoc shr) _) _ _) (_, lIns) :>: _ :>: ArgsNil) =
   --   Graph.Info
   --     mempty
