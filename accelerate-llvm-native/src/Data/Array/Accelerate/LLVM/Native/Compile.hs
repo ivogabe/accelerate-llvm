@@ -171,7 +171,7 @@ compile uid name module' = do
   -- function, in which case it will be found in the linker cache.
   --
   o_file <- liftIO . unsafeInterleaveIO $ do
-    force_recomp  <- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
+    force_recomp  <- return True --if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
     o_file_exists <- doesFileExist staticObjFile
     if o_file_exists && not force_recomp
       then
@@ -191,6 +191,7 @@ compile uid name module' = do
 
         -- Convert module to llvm-pretty format so that we can print it
         let unoptimisedText = P.render (P.ppLLVM llvmver (P.ppModule ast))
+        putStrLn unoptimisedText
         Debug.when Debug.verbose $ do
           Debug.traceM Debug.dump_cc ("Unoptimised LLVM IR:\n" % string) unoptimisedText
 
@@ -241,7 +242,7 @@ compile uid name module' = do
   -- a different function.
   --
   so_file <- liftIO . unsafeInterleaveIO $ do
-    force_recomp   <- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
+    force_recomp   <- return True --if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
     so_file_exists <- doesFileExist sharedObjFile
     if so_file_exists && not force_recomp
       then

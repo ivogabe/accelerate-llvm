@@ -190,6 +190,8 @@ workassistLoop counter size doWork = do
   exit     <- newBlock "workassist.exit"
   finished <- newBlock "workassist.finished"
 
+  putcharC
+
   firstIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
 
   initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 size)
@@ -296,12 +298,12 @@ putchar :: Operands Int -> CodeGen Native (Operands Int)
 putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar")) 
                  (ArgumentsCons (op TypeInt x) [] ArgumentsNil) 
                  []
-putcharA, putcharB, putcharC, putcharD, putcharE, putcharF, putcharG, putcharH :: StateT s (CodeGen Native) ()
-putcharA = void $ lift $ putchar $ liftInt 65
-putcharB = void $ lift $ putchar $ liftInt 66
-putcharC = void $ lift $ putchar $ liftInt 67
-putcharD = void $ lift $ putchar $ liftInt 68
-putcharE = void $ lift $ putchar $ liftInt 69
-putcharF = void $ lift $ putchar $ liftInt 70
-putcharG = void $ lift $ putchar $ liftInt 71
-putcharH = void $ lift $ putchar $ liftInt 72
+putcharA, putcharB, putcharC, putcharD, putcharE, putcharF, putcharG, putcharH :: CodeGen Native ()
+putcharA = void $ putchar $ liftInt 65
+putcharB = void $ putchar $ liftInt 66
+putcharC = void $ putchar $ liftInt 67
+putcharD = void $ putchar $ liftInt 68
+putcharE = void $ putchar $ liftInt 69
+putcharF = void $ putchar $ liftInt 70
+putcharG = void $ putchar $ liftInt 71
+putcharH = void $ putchar $ liftInt 72
