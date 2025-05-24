@@ -91,13 +91,14 @@ Library
     Data.Array.Accelerate.LLVM.PTX.State
     Data.Array.Accelerate.LLVM.PTX.Target
 
-    -- Data.Array.Accelerate.LLVM.PTX.Execute
-    -- Data.Array.Accelerate.LLVM.PTX.Execute.Async
-    -- Data.Array.Accelerate.LLVM.PTX.Execute.Environment
-    -- Data.Array.Accelerate.LLVM.PTX.Execute.Event
+    Data.Array.Accelerate.LLVM.PTX.Execute
+    Data.Array.Accelerate.LLVM.PTX.Execute.Buffer
+    Data.Array.Accelerate.LLVM.PTX.Execute.Par
+    Data.Array.Accelerate.LLVM.PTX.Execute.Environment
+    Data.Array.Accelerate.LLVM.PTX.Execute.Event
     -- Data.Array.Accelerate.LLVM.PTX.Execute.Marshal
-    -- Data.Array.Accelerate.LLVM.PTX.Execute.Stream
-    -- Data.Array.Accelerate.LLVM.PTX.Execute.Stream.Reservoir
+    Data.Array.Accelerate.LLVM.PTX.Execute.Stream
+    Data.Array.Accelerate.LLVM.PTX.Execute.Stream.Reservoir
 
     Data.Array.Accelerate.LLVM.PTX.CodeGen
     Data.Array.Accelerate.LLVM.PTX.CodeGen.Base

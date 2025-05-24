@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeSynonymInstances       #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
--- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Async
+-- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Par
 -- Copyright   : [2014..2020] The Accelerate Team
 -- License     : BSD3
 --
@@ -16,62 +16,54 @@
 -- Portability : non-portable (GHC extensions)
 --
 
-module Data.Array.Accelerate.LLVM.PTX.Execute.Async (
-
-  module Data.Array.Accelerate.LLVM.Execute.Async,
-  module Data.Array.Accelerate.LLVM.PTX.Execute.Async,
-
+module Data.Array.Accelerate.LLVM.PTX.Execute.Par (
+  Par, evalPar, ptxStream, liftPar, spawnPar
 ) where
 
-import Data.Array.Accelerate.Error
-import Data.Array.Accelerate.Lifetime
-
--- import Data.Array.Accelerate.LLVM.Execute.Async
 import Data.Array.Accelerate.LLVM.State
 
+import Data.Array.Accelerate.LLVM.PTX.State
 import Data.Array.Accelerate.LLVM.PTX.Target
-import Data.Array.Accelerate.LLVM.PTX.Execute.Event                 ( Event )
 import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
-import Data.Array.Accelerate.LLVM.PTX.Link.Object                   ( FunctionTable )
 import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Event       as Event
 import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Stream      as Stream
 
 import Control.Monad.Reader
 import Control.Monad.State
-import Data.IORef
+import Control.Concurrent
 
+newtype Par a = Par { runPar :: ReaderT Stream (LLVM PTX) a }
+    deriving ( Functor, Applicative, Monad, MonadIO, MonadReader Stream, MonadState PTX )
 
 -- | Evaluate a parallel computation
 --
 {-# INLINE evalPar #-}
-evalPar :: Par PTX a -> LLVM PTX a
-evalPar p = do
-  s <- Stream.create
-  r <- runReaderT (runPar p) (s, Nothing)
-  return r
+evalPar :: Par a -> LLVM PTX a
+evalPar p =
+  Stream.withStream $ \s -> runReaderT (runPar p) s
 
+ptxStream :: Stream -> Stream
+ptxStream = id
 
-type ParState = (Stream, Maybe (Lifetime FunctionTable))
+liftPar :: LLVM PTX a -> Par a
+liftPar = Par . lift
 
-ptxStream :: ParState -> Stream
-ptxStream = fst
-
-ptxKernel :: ParState -> Maybe (Lifetime FunctionTable)
-ptxKernel = snd
-
+spawnPar :: Par () -> Par ()
+spawnPar spawned = do
+  target <- gets llvmTarget
+  stream <- asks ptxStream
+  event <- liftPar $ Event.waypoint stream
+  _ <- liftIO $ forkIO $ evalPTX target $ evalPar $ do
+    spawnedStream <- asks ptxStream
+    liftIO $ Event.after event spawnedStream
+    spawned
+  return ()
 
 -- Implementation
 -- --------------
 
-data Future a = Future {-# UNPACK #-} !(IORef (IVar a))
 
-data IVar a
-    = Full !a
-    | Pending {-# UNPACK #-} !Event !(Maybe (Lifetime FunctionTable)) !a
-    | Empty
-
-
-instance Async PTX where
+{-instance Async PTX where
   type FutureR PTX = Future
 
   newtype Par PTX a = Par { runPar :: ReaderT ParState (LLVM PTX) a }
@@ -159,4 +151,4 @@ wait (Future ref) = do
         Nothing -> return ()
       return v
     Empty           -> internalError "blocked on an IVar"
-
+-}

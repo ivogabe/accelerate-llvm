@@ -37,7 +37,7 @@ import Data.Array.Accelerate.LLVM.Target
 
 -- import Data.Array.Accelerate.LLVM.PTX.Array.Table                   ( MemoryTable )
 import Data.Array.Accelerate.LLVM.PTX.Context                       ( Context, deviceProperties, deviceName )
--- import Data.Array.Accelerate.LLVM.PTX.Execute.Stream.Reservoir      ( Reservoir )
+import Data.Array.Accelerate.LLVM.PTX.Execute.Stream.Reservoir      ( Reservoir )
 import Data.Array.Accelerate.LLVM.PTX.Link.Cache                    ( KernelTable )
 
 -- CUDA
@@ -70,7 +70,7 @@ data PTX = PTX {
     ptxContext                  :: {-# UNPACK #-} !Context
   -- , ptxMemoryTable              :: {-# UNPACK #-} !MemoryTable
   , ptxKernelTable              :: {-# UNPACK #-} !KernelTable
-  -- , ptxStreamReservoir          :: {-# UNPACK #-} !Reservoir
+  , ptxStreamReservoir          :: {-# UNPACK #-} !Reservoir
   }
 
 instance Target PTX where
