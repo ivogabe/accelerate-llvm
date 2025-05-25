@@ -853,7 +853,7 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) -- active_threads
       workIdxPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 1) -- work_index
+      _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 0) -- work_index
       -- Arguments
       args' <- instr' $ GetElementPtr $ gepStruct argsTp' args $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
       storeKernelArgs structVars localVars kargs args' TupleIdxSelf
