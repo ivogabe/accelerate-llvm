@@ -22,7 +22,7 @@ import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.LLVM.PTX.Target                        ( PTX(..) )
 import Data.Array.Accelerate.LLVM.State
 import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
-import Data.Array.Accelerate.LLVM.PTX.Execute.Stream
+import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
 
 import Foreign.CUDA.Driver.Error
 import qualified Foreign.CUDA.Driver.Event                          as Event

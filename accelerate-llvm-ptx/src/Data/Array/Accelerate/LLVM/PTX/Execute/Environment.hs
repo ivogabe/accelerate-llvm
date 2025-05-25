@@ -112,7 +112,9 @@ baseToValues (TupRsingle BaseRsignalResolver `TupRpair` TupRsingle (BaseRrefWrit
   ref <- liftIO $ newEmptyMVar
 
   spawnPar $ do
-    -- We don't wait on the signal/event here, since the ref is constructed as an MVar.
+    stream <- asks ptxStream
+    liftIO $ Event.after event stream
+    block
     v <- liftIO $ readMVar ref
     let value = case v of
           ValueScalar _ x -> x
@@ -127,7 +129,9 @@ baseToValues (TupRsingle BaseRsignalResolver `TupRpair` TupRsingle (BaseRrefWrit
   ref <- liftIO $ newEmptyMVar
 
   spawnPar $ do
-    -- We don't wait on the signal/event here, since the ref is constructed as an MVar.
+    stream <- asks ptxStream
+    liftIO $ Event.after event stream
+    block
     b <- liftIO $ readMVar ref
     let ptxBuffer = case b of
           ValueBuffer x -> x

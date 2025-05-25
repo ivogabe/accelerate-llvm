@@ -144,7 +144,9 @@ executeEffect env = \case
       let n = 1024 * 64 -- TODO
       let (lifetimes, args') = kernelArgs env args
       liftIO $ launch kernel stream n args'
-      liftIO $ mapM_ (\(Exists l) -> touchLifetime l) lifetimes
+      -- Ensure 'touchLifetime' is called when we next synchronise.
+      cleanUpTouchLifetime $ kernelLinked kernel
+      mapM_ (\(Exists l) -> cleanUpTouchLifetime l) lifetimes
   SignalAwait signals -> do
     stream <- asks ptxStream
     forM_ signals $ \signal -> case prj' signal env of
@@ -172,16 +174,13 @@ size' (ShapeRsnoc shr) (sh, ValueScalar _ sz)
 -- parameters.
 --
 launch :: HasCallStack => PTXKernel f -> Stream -> Int -> [CUDA.FunParam] -> IO ()
-launch kernel stream n args = withLifetime (kernelLinked kernel) $ \obj -> do
+launch kernel stream n args = do
+  let obj = unsafeGetValue $ kernelLinked kernel
   let cta = (kernelObjThreadBlockSize obj, 1, 1)
   let grid = (kernelObjThreadBlocks obj n, 1, 1)
   let smem = kernelObjSharedMemBytes obj
   let kernelData = CUDA.nullDevPtr :: CUDA.DevicePtr Word8
   CUDA.launchKernel (kernelObjFun obj) grid cta smem (Just stream) (CUDA.VArg kernelData : reverse args)
-  -- TODO: Currently we block after launching a kernel, to let the touchLifetimes be effective.
-  -- Ideally we should have another solution for this, such that we can let a kernel run async,
-  -- and later touch all resources to keep them live.
-  CUDA.block stream
 
 kernelArgs :: Gamma env -> SArgs env f -> ([Exists Lifetime], [CUDA.FunParam])
 kernelArgs _ ArgsNil = ([], [])

@@ -15,7 +15,7 @@
 module Data.Array.Accelerate.LLVM.PTX.Execute.Stream (
 
   Reservoir, new,
-  Stream, withStream,
+  Stream, create, destroy,
 
 ) where
 
@@ -58,14 +58,6 @@ streaming !action !after = do
     destroy stream
     Event.destroy end
   return final -}
-
-withStream :: (Stream -> LLVM PTX a) -> LLVM PTX a
-withStream f = do
-  stream <- create
-  result <- f stream
-  liftIO $ Stream.block stream
-  destroy stream
-  return result
 
 -- Primitive operations
 -- --------------------
