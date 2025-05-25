@@ -191,7 +191,6 @@ compile uid name module' = do
 
         -- Convert module to llvm-pretty format so that we can print it
         let unoptimisedText = P.render (P.ppLLVM llvmver (P.ppModule ast))
-        putStrLn unoptimisedText
         Debug.when Debug.verbose $ do
           Debug.traceM Debug.dump_cc ("Unoptimised LLVM IR:\n" % string) unoptimisedText
 
