@@ -179,60 +179,78 @@ iterFromTo tp start end seed body =
   Loop.iterFromStepTo [] tp start (liftInt 1) end seed body
 
 workassistLoop
-    :: Operand (Ptr Word64)                 -- index into work
+    :: Operand (Ptr (SizedArray Word64))    -- work indexes of shards
+    -> Operand (Ptr Word64)                 -- next shard to work on
+    -> Operand (Ptr Word64)                 -- finished shards
     -> Operand Word64                       -- size of total work
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-workassistLoop counter size doWork = do
+workassistLoop shardIndexes nextShard finishedShards size doWork = do
   entry    <- getBlock
+  outer    <- newBlock "workassist.loop.outer"
+  inner    <- newBlock "workassist.loop.inner"
   work     <- newBlock "workassist.loop.work"
   claimed  <- newBlock "workassist.all.claimed"
   exit     <- newBlock "workassist.exit"
   finished <- newBlock "workassist.finished"
 
-  firstIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
+  _ <- setBlock outer
 
-  initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 size)
-  initialSeq <- eq singleType (OP_Word64 firstIndex) (liftWord64 0)
-  _ <- cbr initialCondition work exit
+  
 
-  _ <- setBlock work
-  let indexName = "block_index"
-  -- Whether the thread should operate in the single threaded mode of
-  -- zero-overhead parallel scans.
-  let seqName = "sequential_mode"
-  let seqMode = LocalReference type' seqName
-  let index = LocalReference type' indexName
 
-  doWork seqMode index
+  -- firstIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
 
-  nextIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
-  condition <- lt singleType (OP_Word64 nextIndex) (OP_Word64 size)
-  indexPlusOne <- add numType (OP_Word64 index) (liftWord64 1)
-  nextSeq' <- eq singleType indexPlusOne (OP_Word64 nextIndex)
-  -- Continue in sequential mode if the newly claimed block directly follows
-  -- the previous block, and we were still in the sequential mode.
-  nextSeq <- land nextSeq' (OP_Bool seqMode)
+  -- initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 size)
+  -- initialSeq <- eq singleType (OP_Word64 firstIndex) (liftWord64 0)
+  -- _ <- cbr initialCondition work exit
 
-  -- Append the phi node to the start of the 'work' block.
-  -- We can only do this now, as we need to have 'nextIndex', and know the
-  -- exit block of 'doWork'.
-  currentBlock <- getBlock
-  phi1 work indexName [(firstIndex, entry), (nextIndex, currentBlock)]
-  phi1 work seqName [(op BoolPrimType initialSeq, entry), (op BoolPrimType nextSeq, currentBlock)]
+  -- _ <- setBlock work
+  -- let indexName = "block_index"
+  -- -- Whether the thread should operate in the single threaded mode of
+  -- -- zero-overhead parallel scans.
+  -- let seqName = "sequential_mode"
+  -- let seqMode = LocalReference type' seqName
+  -- let index = LocalReference type' indexName
 
-  cbr condition work exit
+  -- doWork seqMode index
+
+  -- nextIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
+  -- condition <- lt singleType (OP_Word64 nextIndex) (OP_Word64 size)
+  -- indexPlusOne <- add numType (OP_Word64 index) (liftWord64 1)
+  -- nextSeq' <- eq singleType indexPlusOne (OP_Word64 nextIndex)
+  -- -- Continue in sequential mode if the newly claimed block directly follows
+  -- -- the previous block, and we were still in the sequential mode.
+  -- nextSeq <- land nextSeq' (OP_Bool seqMode)
+
+  -- -- Append the phi node to the start of the 'work' block.
+  -- -- We can only do this now, as we need to have 'nextIndex', and know the
+  -- -- exit block of 'doWork'.
+  -- currentBlock <- getBlock
+  -- phi1 work indexName [(firstIndex, entry), (nextIndex, currentBlock)]
+  -- phi1 work seqName [(op BoolPrimType initialSeq, entry), (op BoolPrimType nextSeq, currentBlock)]
+
+  -- cbr condition work exit
 
   setBlock exit
   retval_ $ scalar (scalarType @Word8) 0
 
-workassistChunked :: [Loop.LoopAnnotation] -> ShapeR sh -> Operand (Ptr Word64) -> sh -> Operands sh -> (Operands sh -> CodeGen Native ()) -> CodeGen Native ()
-workassistChunked ann shr counter chunkSz' sh doWork = do
+workassistChunked 
+    :: [Loop.LoopAnnotation] 
+    -> ShapeR sh 
+    -> Operand (Ptr (SizedArray Word64))    -- work indexes of shards
+    -> Operand (Ptr Word64)                 -- next shard to work on
+    -> Operand (Ptr Word64)                 -- finished shards
+    -> sh 
+    -> Operands sh 
+    -> (Operands sh -> CodeGen Native ()) 
+    -> CodeGen Native ()
+workassistChunked ann shr shardIndexes nextShard finishedShards chunkSz' sh doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
   chunkCounts <- chunkCount shr sh chunkSz
   chunkCnt <- shapeSize shr chunkCounts
   chunkCnt' :: Operand Word64 <- instr' $ BitCast scalarType $ op TypeInt chunkCnt
-  workassistLoop counter chunkCnt' $ \_ chunkLinearIndex -> do
+  workassistLoop shardIndexes nextShard finishedShards chunkCnt' $ \_ chunkLinearIndex -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex
