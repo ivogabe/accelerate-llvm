@@ -12,6 +12,7 @@
 module Data.Array.Accelerate.LLVM.PTX.Execute.Buffer where
 
 import Data.Array.Accelerate.Array.Buffer
+import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Type
@@ -36,7 +37,7 @@ import Formatting
 import Foreign.Ptr
 import Foreign.ForeignPtr
 
-data PTXBuffer t = PTXBuffer !Int !(Lifetime (CUDA.DevicePtr (ScalarArrayDataR t)))
+data PTXBuffer t = PTXBuffer !Int !(Lifetime (CUDA.DevicePtr t))
 
 mallocDevice :: ScalarType t -> Int -> Par (PTXBuffer t)
 mallocDevice tp size = do
@@ -66,10 +67,32 @@ copyToDevice tp buffer@(Buffer hostPtr) = do
   return $ PTXBuffer size lifetime
 
 copyToHost :: ScalarType t -> PTXBuffer t -> Par (Buffer t)
-copyToHost tp (PTXBuffer size lifetime) =
-  withLifetime lifetime $ \devicePtr1 -> do
+copyToHost tp (PTXBuffer size lifetime) = do
+  let devicePtr1 = unsafeGetValue lifetime
+  let devicePtr2 = CUDA.castDevPtr devicePtr1 :: CUDA.DevicePtr Word8
+  let byteSize = bytesElt (TupRsingle tp) * size
+  buffer@(Buffer hostPtr) <- unsafeFreezeBuffer <$> liftIO (newBuffer tp size)
+  hostPtr1 <- liftIO $ withForeignPtr hostPtr (return . castPtr)
+  hostPtr2 <- liftIO $ CUDA.registerArray [] (fromIntegral byteSize) hostPtr1
+  stream <- asks ptxStream
+  liftIO $ CUDA.peekArrayAsync (fromIntegral byteSize) devicePtr2 hostPtr2 (Just stream)
+
+  -- Call 'CUDA.unregisterArray hostPtr2' when we next block (sync CPU with GPU)
+  cleanUpUnregisterHostPtr hostPtr2
+  -- Same for touchForeignPtr hostPtr
+  cleanUpTouchForeignPtr hostPtr
+  -- And touchLifetime lifetime
+  cleanUpTouchLifetime lifetime
+
+  return buffer
+
+readFromDevice :: ScalarType t -> PTXBuffer t -> Int -> Par t
+readFromDevice tp (PTXBuffer size lifetime) idx
+  | idx >= size || idx < 0 = boundsError "Index outside of bounds, when evaluating a host-side expression (for instance a condition in an array-level if-then-else or the size of an array)"
+  | ScalarDict <- scalarDict tp = do
+    let devicePtr1 = unsafeGetValue lifetime `CUDA.advanceDevPtr` idx
     let devicePtr2 = CUDA.castDevPtr devicePtr1 :: CUDA.DevicePtr Word8
-    let byteSize = bytesElt (TupRsingle tp) * size
+    let byteSize = bytesElt (TupRsingle tp)
     buffer@(Buffer hostPtr) <- unsafeFreezeBuffer <$> liftIO (newBuffer tp size)
     hostPtr1 <- liftIO $ withForeignPtr hostPtr (return . castPtr)
     hostPtr2 <- liftIO $ CUDA.registerArray [] (fromIntegral byteSize) hostPtr1
@@ -80,5 +103,7 @@ copyToHost tp (PTXBuffer size lifetime) =
     cleanUpUnregisterHostPtr hostPtr2
     -- Same for touchForeignPtr hostPtr
     cleanUpTouchForeignPtr hostPtr
+    -- And touchLifetime lifetime
+    cleanUpTouchLifetime lifetime
 
-    return buffer
+    return $! indexBuffer tp buffer 0

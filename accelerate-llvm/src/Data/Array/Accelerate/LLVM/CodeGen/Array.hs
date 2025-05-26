@@ -42,7 +42,6 @@ import LLVM.AST.Type.Metadata
 import Data.Array.Accelerate.AST.Environment
 import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.AST.Partitioned
-import Data.Array.Accelerate.Array.Buffer                           ( ScalarArrayDataR, SingleArrayDict(..), singleArrayDict )
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape

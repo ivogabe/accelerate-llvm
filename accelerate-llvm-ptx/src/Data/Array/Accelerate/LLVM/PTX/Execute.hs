@@ -38,6 +38,7 @@ import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
+import Data.Array.Accelerate.Interpreter                            ( evalExp, EvalArrayInstr(..) )
 
 import Data.Array.Accelerate.LLVM.State
 
@@ -93,7 +94,7 @@ execute :: Gamma env -> UniformSchedule PTXKernel env -> Par ()
 execute env = \case
   Return -> return ()
   Alet lhs bnd next -> do
-    bnd' <- executeBinding env bnd
+    bnd' <- executeBinding env (lhsToTupR lhs) bnd
     let env' = push' env (lhs, bnd')
     execute env' next
   Effect effect next -> do
@@ -113,9 +114,11 @@ execute env = \case
     spawnPar (execute env a)
     execute env b
 
-executeBinding :: Gamma env -> Binding env t -> Par (Distribute Value t)
-executeBinding env = \case
-  Compute _ -> error "TODO: Compute"
+executeBinding :: Gamma env -> BasesR t -> Binding env t -> Par (Distribute Value t)
+executeBinding env baseTp = \case
+  Compute expr -> do
+    result <- evalExp expr $ evalArrayInstr env
+    return $ scalarToValues (mapTupR expectScalarType baseTp) result
   NewSignal _ -> do
     event <- liftPar $ Event.create
     let signal = PTXSignal event
@@ -135,6 +138,10 @@ executeBinding env = \case
       value <- liftIO $ readMVar mvar
       case reprIsSingle @Value @_ @Value value of
         Refl -> return value
+  where
+    expectScalarType :: BaseR tp -> ScalarType tp
+    expectScalarType (BaseRground (GroundRscalar tp)) = tp
+    expectScalarType _ = internalError "Expected scalar type"
 
 executeEffect :: Gamma env -> Effect PTXKernel env -> Par ()
 executeEffect env = \case
@@ -184,20 +191,30 @@ launch kernel stream n args = do
 
 kernelArgs :: Gamma env -> SArgs env f -> ([Exists Lifetime], [CUDA.FunParam])
 kernelArgs _ ArgsNil = ([], [])
-kernelArgs env (SArgScalar (Var (SingleScalarType tp) idx) :>: args) = case prj' idx env of
+kernelArgs env (SArgScalar (Var tp idx) :>: args) = case prj' idx env of
   ValueScalar _ value
-    | SingleDict <- singleDict tp ->
+    | ScalarDict <- scalarDict tp ->
       (lifetimes, CUDA.VArg value : args')
   _ -> internalError "Scalar impossible"
   where
     (lifetimes, args') = kernelArgs env args
-kernelArgs _ (SArgScalar (Var (VectorScalarType _) _) :>: _) = internalError "TODO: Support Vec arguments to kernels"
 kernelArgs env (SArgBuffer _ (Var _ idx) :>: args) = case prj' idx env of
   ValueBuffer (PTXBuffer _ lifetime) ->
     (Exists lifetime : lifetimes, CUDA.VArg (unsafeGetValue lifetime) : args')
   ValueScalar _ _ -> internalError "Scalar impossible"
   where
     (lifetimes, args') = kernelArgs env args
+
+evalArrayInstr :: Gamma env -> EvalArrayInstr Par (ArrayInstr env)
+evalArrayInstr env = EvalArrayInstr $ \instr arg -> case instr of
+  Index (Var gtp bufferIdx)
+    | GroundRbuffer tp <- gtp
+    , ValueBuffer buffer <- prj' bufferIdx env ->
+      readFromDevice tp buffer arg
+    | otherwise -> internalError "Buffer impossible"
+  Parameter (Var _ idx) -> case prj' idx env of
+    ValueScalar _ value -> return value
+    _ -> internalError "Scalar impossible"
 
 {- -- Skeleton implementation
 -- -----------------------

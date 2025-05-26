@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Environment
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -74,6 +75,7 @@ instance Distributes Value where
 -- Applies to PTXSignal and PTXBuffer
 newtype PTXSignal = PTXSignal Event
 
+-- Partial function, only works on Input and Output of an Acc function.
 baseToValues :: BasesR t -> t -> Par (Distribute Value t)
 -- Unit
 baseToValues TupRunit _ = return ()
@@ -147,3 +149,10 @@ baseToValues (TupRpair t1 t2) (v1, v2) = do
   x2 <- baseToValues t2 v2
   return (x1, x2)
 baseToValues _ _ = internalError "Unexpected types in the input or output of an Acc function"
+
+scalarToValues :: TypeR tp -> tp -> Distribute Value tp
+scalarToValues TupRunit _ = ()
+scalarToValues (TupRpair t1 t2) (v1, v2) = (scalarToValues t1 v1, scalarToValues t2 v2)
+scalarToValues (TupRsingle tp) value
+  | Refl <- reprIsSingle @ScalarType @_ @Value tp
+  = ValueScalar tp value
