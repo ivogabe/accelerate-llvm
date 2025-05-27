@@ -304,7 +304,7 @@ instance MakesILP NativeOp where
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
       <> ILP.var (InDir c)      .==. ILP.int i)
     fusionILP.bounds %= (<> defaultBounds c)
-    -- Can't be done in-place, so no in-place paths.
+    -- Different order, so no in-place paths.
 
   -- mkGraph l@(Label i _) NBackpermute (_ :>: L (ArgArray In (ArrayR _shrI _) _ _) (_, lIns) :>: L (ArgArray Out (ArrayR shrO _) _ _) _ :>: ArgsNil) =
   --   Graph.Info
@@ -402,7 +402,7 @@ instance MakesILP NativeOp where
   --     ( lower (-2) (InDir l)
   --     <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3).
 
-  mkGraph c (NScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c (NScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ _lOut :>: ArgsNil) = do
     useInOutDir c
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
@@ -411,7 +411,7 @@ instance MakesILP NativeOp where
       <> ILP.var (InDir  c)     .==. ILP.int dir
       <> ILP.var (OutDir c)     .==. ILP.int (-3))
     fusionILP.bounds %= (<> lower (-2) (InDir c) <> lower (-3) (OutDir c))
-    fusionILP.inplacePaths %= (<> mkUnitInplacePaths c lIn lOut)
+    -- Output size is one larger, so no in-place paths.
 
   -- mkGraph l (NScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) =
   --   Graph.Info
