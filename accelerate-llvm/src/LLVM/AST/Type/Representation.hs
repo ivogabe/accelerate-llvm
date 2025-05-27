@@ -39,6 +39,7 @@ import qualified Text.LLVM                                          as LLVM
 import Text.LLVM                                                    ( AddrSpace(..), defaultAddrSpace )
 
 import Data.List
+import Data.Bits
 import Data.Text.Lazy.Builder
 import Foreign.Ptr
 import Foreign.Storable
@@ -397,7 +398,9 @@ primSizeAlignment :: PrimType a -> (Int, Int)
 primSizeAlignment BoolPrimType = (1, 1)
 primSizeAlignment (ScalarPrimType (SingleScalarType tp)) = (sz, sz)
   where sz = bytesElt $ TupRsingle $ SingleScalarType tp
-primSizeAlignment (ScalarPrimType (VectorScalarType (VectorType n tp))) = (sz * n, sz)
+primSizeAlignment (ScalarPrimType (VectorScalarType (VectorType n tp)))
+  | popCount n == 1 = (sz * n, sz * n)
+  | otherwise = (sz * n, sz)
   where sz = bytesElt $ TupRsingle $ SingleScalarType tp
 primSizeAlignment (PtrPrimType _ _) = (sz, sz)
   where sz = sizeOf (undefined :: Ptr ())

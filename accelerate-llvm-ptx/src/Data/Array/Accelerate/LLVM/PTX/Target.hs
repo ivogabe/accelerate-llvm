@@ -35,7 +35,7 @@ import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.LLVM.Extra
 import Data.Array.Accelerate.LLVM.Target
 
-import Data.Array.Accelerate.LLVM.PTX.Array.Table                   ( MemoryTable )
+-- import Data.Array.Accelerate.LLVM.PTX.Array.Table                   ( MemoryTable )
 import Data.Array.Accelerate.LLVM.PTX.Context                       ( Context, deviceProperties, deviceName )
 import Data.Array.Accelerate.LLVM.PTX.Execute.Stream.Reservoir      ( Reservoir )
 import Data.Array.Accelerate.LLVM.PTX.Link.Cache                    ( KernelTable )
@@ -68,7 +68,7 @@ import qualified Data.Set                                           as Set
 --
 data PTX = PTX {
     ptxContext                  :: {-# UNPACK #-} !Context
-  , ptxMemoryTable              :: {-# UNPACK #-} !MemoryTable
+  -- , ptxMemoryTable              :: {-# UNPACK #-} !MemoryTable
   , ptxKernelTable              :: {-# UNPACK #-} !KernelTable
   , ptxStreamReservoir          :: {-# UNPACK #-} !Reservoir
   }

@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns      #-}
 {-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
@@ -16,37 +17,32 @@
 
 module Data.Array.Accelerate.LLVM.PTX.Compile (
 
-  module Data.Array.Accelerate.LLVM.Compile,
-  ObjectR(..),
+  ObjectR(..), compile
 
 ) where
 
-import Data.Array.Accelerate.AST                                    ( PreOpenAcc )
 import Data.Array.Accelerate.Error
--- import Data.Array.Accelerate.Trafo.Delayed
+import Data.Array.Accelerate.AST.Operation (NFData'(..))
 
-import Data.Array.Accelerate.LLVM.CodeGen                           ( llvmOfPreOpenAcc )
-import Data.Array.Accelerate.LLVM.CodeGen.Environment               ( Gamma )
-import Data.Array.Accelerate.LLVM.CodeGen.Module                    ( Module(..) )
-import Data.Array.Accelerate.LLVM.Compile
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Target.ClangInfo                  ( hostLLVMVersion, llvmverFromTuple, clangExePath, clangExePathEnvironment )
 
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
-import Data.Array.Accelerate.LLVM.PTX.CodeGen
 import Data.Array.Accelerate.LLVM.PTX.Compile.Cache
 import Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice.Load
-import Data.Array.Accelerate.LLVM.PTX.Foreign                       ( )
 import Data.Array.Accelerate.LLVM.PTX.Target
 import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
+
+import LLVM.AST.Type.Module                                         ( Module(..) )
+import LLVM.AST.Type.Downcast
 
 import Foreign.CUDA.Path                                            ( cudaInstallPath )
 import qualified Foreign.CUDA.Analysis                              as CUDA
 
-import qualified Text.LLVM                                          as LP
 import qualified Text.LLVM.PP                                       as LP
 import qualified Text.PrettyPrint                                   as LP ( render )
 
+import Control.DeepSeq
 import Control.Monad.State
 import Data.ByteString.Short                                        ( ShortByteString )
 import Data.List                                                    ( intercalate )
@@ -58,35 +54,29 @@ import System.IO                                                    ( hPutStrLn,
 import System.IO.Unsafe
 import System.Process
 import Text.Printf                                                  ( printf )
-import qualified Data.ByteString.Short.Char8                        as SBS8
-import qualified Data.Map.Strict                                    as Map
 
-
-instance Compile PTX where
-  data ObjectR PTX = ObjectR { objId     :: {-# UNPACK #-} !UID
-                             , -- | Config for each exported kernel (symbol)
-                               ptxConfig :: ![(ShortByteString, LaunchConfig)]
-                             , objPath   :: {- LAZY -} FilePath
-                             }
-  compileForTarget = compile
-
+data ObjectR f = ObjectR
+  { objId         :: {-# UNPACK #-} !UID
+  , objSym        :: !ShortByteString
+  , objConfig     :: !LaunchConfig
+  , objPath :: {- LAZY -} FilePath
+  }
 
 -- | Compile an Accelerate expression to object code.
 --
 -- This generates the target code together with a list of each kernel function
 -- defined in the module paired with its occupancy information.
 --
-compile :: HasCallStack => PreOpenAcc DelayedOpenAcc aenv a -> Gamma aenv -> LLVM PTX (ObjectR PTX)
-compile pacc aenv = do
 
+compile :: HasCallStack => UID -> ShortByteString -> LaunchConfig -> Module f -> LLVM PTX (ObjectR f)
+compile uid name config module' = do
+  cacheFile <- cacheOfUID uid
   -- Generate code for this Acc operation
   --
   dev                  <- gets ptxDeviceProperties
   let CUDA.Compute m n = CUDA.computeCapability dev
   let arch             = printf "sm_%d%d" m n
-  (uid, cacheFile)     <- cacheOfPreOpenAcc pacc
-  Module ast md        <- llvmOfPreOpenAcc uid pacc aenv
-  let config           = [ (SBS8.pack f, x) | (LP.Symbol f, KM_PTX x) <- Map.toList md ]
+  let ast              = downcast module'
 
   libdevice_bc <- liftIO libdeviceBitcodePath
 
@@ -98,7 +88,7 @@ compile pacc aenv = do
   --
   cubin <- liftIO . unsafeInterleaveIO $ do
     exists <- doesFileExist cacheFile
-    recomp <- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
+    recomp <- return True -- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
     if exists && not recomp
       then do
         Debug.traceM Debug.dump_cc ("cc: found cached object code " % shown) uid
@@ -153,7 +143,7 @@ compile pacc aenv = do
 
     return cacheFile
 
-  return $! ObjectR uid config cubin
+  return $! ObjectR uid name config cubin
 
 
 {- Note [Internalizing Libdevice]
@@ -211,3 +201,6 @@ exported (I think), which is what we want.
 [1]: https://releases.llvm.org/19.1.0/docs/NVPTXUsage.html#linking-with-libdevice
 [2]: https://clang.llvm.org/docs/OffloadingDesign.html#offload-device-compilation
 -}
+
+instance NFData' ObjectR where
+  rnf' (ObjectR !_ !_ !_ path) = rnf path

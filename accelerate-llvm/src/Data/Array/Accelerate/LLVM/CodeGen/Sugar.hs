@@ -66,7 +66,7 @@ data IROpenFun2 arch env t where
 data IRBuffer e
   = IRBuffer
       -- The pointer to the value or values of the buffer
-      (Operand (Ptr (ScalarArrayDataR e)))
+      (Operand (Ptr e))
       AddrSpace
       Volatility
       -- The scope of this pointer: whether it refers to a single value (of a

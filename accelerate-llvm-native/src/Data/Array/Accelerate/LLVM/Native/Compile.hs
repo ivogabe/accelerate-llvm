@@ -24,9 +24,7 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Target.ClangInfo                  ( hostLLVMVersion, llvmverFromTuple, clangExePath )
 import Data.Array.Accelerate.LLVM.CodeGen.Environment               ( Gamma )
 
-import Data.Array.Accelerate.LLVM.Native.CodeGen                    ( )
 import Data.Array.Accelerate.LLVM.Native.Compile.Cache
-import Data.Array.Accelerate.LLVM.Native.Foreign                    ( )
 import Data.Array.Accelerate.LLVM.Native.Target
 import qualified Data.Array.Accelerate.LLVM.Native.Debug            as Debug
 
@@ -173,7 +171,7 @@ compile uid name module' = do
   -- function, in which case it will be found in the linker cache.
   --
   o_file <- liftIO . unsafeInterleaveIO $ do
-    force_recomp  <- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
+    force_recomp  <- return True -- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
     o_file_exists <- doesFileExist staticObjFile
     if o_file_exists && not force_recomp
       then
@@ -243,7 +241,7 @@ compile uid name module' = do
   -- a different function.
   --
   so_file <- liftIO . unsafeInterleaveIO $ do
-    force_recomp   <- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
+    force_recomp   <- return True -- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
     so_file_exists <- doesFileExist sharedObjFile
     if so_file_exists && not force_recomp
       then

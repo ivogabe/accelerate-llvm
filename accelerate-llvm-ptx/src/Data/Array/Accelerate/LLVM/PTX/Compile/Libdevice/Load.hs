@@ -25,8 +25,8 @@ module Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice.Load (
 import qualified Text.LLVM                                          as LP
 
 import Data.Array.Accelerate.Error
-import Data.Array.Accelerate.LLVM.PTX.Execute.Event                 ( ) -- GHC#1012
-import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( ) -- GHC#1012
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Event                 ( ) -- GHC#1012
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( ) -- GHC#1012
 
 import Foreign.CUDA.Analysis
 import qualified Foreign.CUDA.Driver                                as CUDA

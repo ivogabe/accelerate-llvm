@@ -52,7 +52,6 @@ import Prelude                                            hiding ( Ordering(..),
 import Data.Bifunctor                                     ( bimap )
 import Data.Maybe                                         ( fromMaybe )
 
-
 -- | Non-terminating instructions
 --
 --  * <http://llvm.org/docs/LangRef.html#binary-operations>
@@ -415,8 +414,12 @@ instance Downcast (Instruction a) LP.Instr where
     LOr x y               -> LP.Bit LP.Or (downcast x) (LP.typedValue (downcast y))
     BXor _ x y            -> LP.Bit LP.Xor (downcast x) (LP.typedValue (downcast y))
     LNot x                -> LP.Bit LP.Xor (downcast x) (LP.ValInteger 1)
-    InsertElement i v x   -> LP.InsertElt (downcast v) (downcast x) (constant i)
-    ExtractElement i v    -> LP.ExtractElt (downcast v) (constant i)
+    -- If we decide to compile power-of-two Vecs to LLVM Vectors (instead of Arrays),
+    -- then we must use InsertElt and ExtractElt instead of InsertValue and ExtractValue.
+    InsertElement i v x   -> LP.InsertValue (downcast v) (downcast x) [i]
+      -- | vecIsPowerOfTwo v -> LP.InsertElt (downcast v) (downcast x) (constant i)
+    ExtractElement i v    -> LP.ExtractValue (downcast v) [i]
+      -- | vecIsPowerOfTwo v -> LP.ExtractElt (downcast v) (constant i)
     ExtractValue _ i s    -> extractStruct i s
     Alloca tp             -> LP.Alloca (downcast tp) Nothing Nothing
     Store vol p x         -> LP.Store (downcast vol) (downcast x) (downcast p) atomicity alignment
@@ -506,6 +509,11 @@ instance Downcast (Instruction a) LP.Instr where
       rem t x (LP.Typed _ y)
         | signed t  = LP.Arith LP.SRem x y
         | otherwise = LP.Arith LP.URem x y
+
+      -- vecIsPowerOfTwo :: Operand (Vec n a1) -> Bool
+      -- vecIsPowerOfTwo v = case typeOf v of
+      --   PrimType (ScalarPrimType (VectorScalarType (VectorType n _))) -> popCount n == 1
+      --   _ -> internalError "Vector impossible"
 
       extractStruct :: TupleIdx s t -> Operand (Struct s) -> LP.Instr
       extractStruct ix s = LP.ExtractValue (downcast s) [fromIntegral int]

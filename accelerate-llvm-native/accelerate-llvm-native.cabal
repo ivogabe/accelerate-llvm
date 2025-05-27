@@ -109,8 +109,6 @@ Library
     Data.Array.Accelerate.LLVM.Native.Embed
 
     Data.Array.Accelerate.LLVM.Native.Execute
-    Data.Array.Accelerate.LLVM.Native.Execute.Marshal
-
     Data.Array.Accelerate.LLVM.Native.Plugin.Annotation
     Data.Array.Accelerate.LLVM.Native.Plugin.BuildInfo
 

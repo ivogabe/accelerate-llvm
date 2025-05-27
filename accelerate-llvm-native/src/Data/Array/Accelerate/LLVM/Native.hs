@@ -58,6 +58,7 @@ module Data.Array.Accelerate.LLVM.Native (
 import Data.Array.Accelerate
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Sharing
+import Data.Array.Accelerate.Trafo.Schedule.Uniform ()
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Pretty.Schedule.Uniform ()
 import Data.Array.Accelerate.LLVM.Native.Target
