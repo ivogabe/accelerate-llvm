@@ -94,7 +94,8 @@ runCleanUp :: Par ()
 runCleanUp = do
   list <- get
   put []
-  liftIO $ forM_ list $ \case
+  -- Run oldest clean up instruction first
+  liftIO $ forM_ (reverse list) $ \case
     TouchLifetime lifetime -> touchLifetime lifetime
     TouchForeignPtr ptr -> touchForeignPtr ptr
     Unregister hostPtr -> void $ CUDA.unregisterArray hostPtr
