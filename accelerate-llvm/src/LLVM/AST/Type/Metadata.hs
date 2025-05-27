@@ -39,6 +39,8 @@ data Metadata where
   MetadataStringOperand   :: {-# UNPACK #-} !ShortByteString -> Metadata
   MetadataConstantOperand :: !(Constant t) -> Metadata
   MetadataNodeOperand     :: !MetadataNode -> Metadata
+  -- metadata of llvm-pretty
+  MetadataPretty          :: LLVM.ValMd -> Metadata
 
 -- | Convert to llvm-pretty
 --
@@ -49,6 +51,7 @@ instance Downcast Metadata LLVM.ValMd where
   downcast (MetadataStringOperand s)   = LLVM.ValMdString (SBS8.unpack s)
   downcast (MetadataConstantOperand o) = LLVM.ValMdValue (downcast o)
   downcast (MetadataNodeOperand n)     = downcast n
+  downcast (MetadataPretty m)          = m
 
 instance Downcast MetadataNode LLVM.ValMd where
   downcast (MetadataNode n)            = LLVM.ValMdNode (downcast n)

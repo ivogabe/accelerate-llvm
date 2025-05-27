@@ -31,7 +31,7 @@ import qualified Text.LLVM                                          as LLVM
 type GlobalFunction t = Function Label t -- Function without implementation
 type GlobalFunctionDefinition t = Function GlobalFunctionBody t -- Function with implementation
 
-data GlobalFunctionBody = GlobalFunctionBody Label [LLVM.BasicBlock]
+data GlobalFunctionBody = GlobalFunctionBody (Maybe LLVM.Linkage) Label [LLVM.BasicBlock]
 
 instance Downcast (GlobalFunction t) LLVM.Declare where
   downcast f = LLVM.Declare
@@ -49,11 +49,11 @@ instance Downcast (GlobalFunction t) LLVM.Declare where
       trav (Lam a _ l)  = let (as, r, n) = trav l
                           in  (downcast a : as, r, n)
       --
-      (args, res, nm)  = trav f
+      (args, res, nm) = trav f
 
 instance Downcast (GlobalFunctionDefinition t) LLVM.Define where
   downcast f = LLVM.Define
-    { LLVM.defLinkage = Just LLVM.External
+    { LLVM.defLinkage = linkage'
     , LLVM.defVisibility = Nothing
     , LLVM.defRetType = res
     , LLVM.defName = nm
@@ -66,10 +66,10 @@ instance Downcast (GlobalFunctionDefinition t) LLVM.Define where
     , LLVM.defMetadata = Map.empty
     , LLVM.defComdat = Nothing }
     where
-      trav :: GlobalFunctionDefinition t -> ([LLVM.Typed LLVM.Ident], LLVM.Type, LLVM.Symbol, [LLVM.BasicBlock])
-      trav (Body t _ (GlobalFunctionBody n blocks)) = ([], downcast t, labelToPrettyS n, blocks)
+      trav :: GlobalFunctionDefinition t -> ((Maybe LLVM.Linkage), [LLVM.Typed LLVM.Ident], LLVM.Type, LLVM.Symbol, [LLVM.BasicBlock])
+      trav (Body t _ (GlobalFunctionBody linkage n blocks)) = (linkage, [], downcast t, labelToPrettyS n, blocks)
       trav (Lam t p l)
-        = (LLVM.Typed (downcast t) (nameToPrettyI p) : ps, r, n, blocks)
-        where (ps, r, n, blocks) = trav l
+        = (linkage, LLVM.Typed (downcast t) (nameToPrettyI p) : ps, r, n, blocks)
+        where (linkage, ps, r, n, blocks) = trav l
       --
-      (args, res, nm, bs)  = trav f
+      (linkage', args, res, nm, bs) = trav f

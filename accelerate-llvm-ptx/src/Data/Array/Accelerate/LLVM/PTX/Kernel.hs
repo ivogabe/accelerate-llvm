@@ -6,7 +6,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- |
--- Module      : Data.Array.Accelerate.LLVM.Native.Kernel
+-- Module      : Data.Array.Accelerate.LLVM.PTX.Kernel
 -- Copyright   : [2014..2022] The Accelerate Team
 -- License     : BSD3
 --
@@ -15,9 +15,9 @@
 -- Portability : non-portable (GHC extensions)
 --
 
-module Data.Array.Accelerate.LLVM.Native.Kernel (
-  NativeKernel(..),
-  NativeKernelMetadata(..),
+module Data.Array.Accelerate.LLVM.PTX.Kernel (
+  PTXKernel(..),
+  PTXKernelMetadata(..),
   KernelType
 ) where
 
@@ -38,21 +38,24 @@ import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Pretty.Schedule
 
 import Data.Array.Accelerate.LLVM.State
-import Data.Array.Accelerate.LLVM.Native.State
-import Data.Array.Accelerate.LLVM.Native.Operation
-import Data.Array.Accelerate.LLVM.Native.Compile.Cache
-import Data.Array.Accelerate.LLVM.Native.CodeGen
-import Data.Array.Accelerate.LLVM.Native.Compile
-import Data.Array.Accelerate.LLVM.Native.Link
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.Base
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
+import Data.Array.Accelerate.LLVM.PTX.Operation
+import Data.Array.Accelerate.LLVM.PTX.Compile.Cache
+import Data.Array.Accelerate.LLVM.PTX.CodeGen
+import Data.Array.Accelerate.LLVM.PTX.Compile
+import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
+import Data.Array.Accelerate.LLVM.PTX.State
+import Data.Array.Accelerate.LLVM.PTX.Target
+import Data.Array.Accelerate.LLVM.PTX.Link
+import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
 import LLVM.AST.Type.Function
 import Data.ByteString.Short                                        ( ShortByteString, fromShort )
 import qualified Data.ByteString.Char8 as Char8
 import System.FilePath                                              ( FilePath, (<.>) )
 import System.IO.Unsafe
 import Control.DeepSeq
+import Control.Monad.State
 import Data.Typeable
 import Foreign.Ptr
 import Prettyprinter
@@ -60,9 +63,10 @@ import Data.String
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Representation
 
-data NativeKernel env where
-  NativeKernel
-    :: { kernelFunction   :: !(Lifetime (FunPtr (KernelType env)))
+data PTXKernel env where
+  PTXKernel
+    :: { kernelObject     :: ObjectR (KernelType env)
+       , kernelLinked     :: Lifetime KernelObject
        , kernelId         :: {-# UNPACK #-} !ShortByteString
        , kernelUID        :: {-# UNPACK #-} !UID
        -- Note: [Kernel Memory]
@@ -76,44 +80,47 @@ data NativeKernel env where
        , kernelDescDetail :: String
        , kernelDescBrief  :: String
        }
-    -> NativeKernel env
+    -> PTXKernel env
 
-instance NFData' NativeKernel where
-  rnf' (NativeKernel fn !_ !_ !_ s l) = unsafeGetValue fn `seq` rnf s `seq` rnf l
+instance NFData' PTXKernel where
+  rnf' (PTXKernel obj !_ !_ !_ !_ s l) = rnf' obj `seq` rnf s `seq` rnf l
 
-newtype NativeKernelMetadata f =
-  NativeKernelMetadata { kernelArgsSize :: Int }
+newtype PTXKernelMetadata f =
+  PTXKernelMetadata { kernelArgsSize :: Int }
     deriving Show
 
-instance NFData' NativeKernelMetadata where
-  rnf' (NativeKernelMetadata sz) = rnf sz
+instance NFData' PTXKernelMetadata where
+  rnf' (PTXKernelMetadata sz) = rnf sz
 
-instance IsKernel NativeKernel where
-  type KernelOperation NativeKernel = NativeOp
-  type KernelMetadata  NativeKernel = NativeKernelMetadata
+instance IsKernel PTXKernel where
+  type KernelOperation PTXKernel = PTXOp
+  type KernelMetadata  PTXKernel = PTXKernelMetadata
 
-  compileKernel env cluster args = unsafePerformIO $ evalLLVM defaultTarget $ do
+  compileKernel env cluster args = unsafePerformIO $ evalPTX defaultTarget $ do
     (sz, module') <- codegen fullName env cluster args
-    obj <- compile uid (fromString $ fullName) module'
-    funPtr <- link obj
-    return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
+    dev <- gets ptxDeviceProperties
+    -- TODO: Change simpleLaunchConfig to launchConfig when we use shared memory
+    obj <- compile uid (fromString $ fullName) (simpleLaunchConfig dev) module'
+    obj `seq` return ()
+    linked <- link obj
+    return $ PTXKernel obj linked (fromString $ fullName) uid sz detail brief
     where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
-      fullName = name ++ "-" ++ show uid
+      fullName = name ++ "_" ++ show uid
       uid = hashOperation cluster args
 
-  kernelMetadata kernel = NativeKernelMetadata $ sizeOfEnv kernel
+  kernelMetadata kernel = PTXKernelMetadata $ sizeOfEnv kernel
 
   encodeKernel = Left . kernelUID
 
-instance PrettyKernel NativeKernel where
+instance PrettyKernel PTXKernel where
   prettyKernel = PrettyKernelFun go
     where
-      go :: OpenKernelFun NativeKernel env t -> Adoc
+      go :: OpenKernelFun PTXKernel env t -> Adoc
       go (KernelFunLam _ f) = go f
-      go (KernelFunBody (NativeKernel _ name _ _ "" _))
+      go (KernelFunBody (PTXKernel _ _ name _ _ "" _))
         = fromString $ take 32 $ toString name
-      go (KernelFunBody (NativeKernel _ name _ _ detail brief))
+      go (KernelFunBody (PTXKernel _ _ name _ _ detail brief))
         = fromString (take 32 $ toString name)
         <+> flatAlt (group $ line' <> "-- " <> desc)
           ("{- " <> desc <> "-}")
@@ -122,24 +129,24 @@ instance PrettyKernel NativeKernel where
       toString :: ShortByteString -> String
       toString = Char8.unpack . fromShort
 
-operationName :: NativeOp t -> (Int, String, String)
+operationName :: PTXOp t -> (Int, String, String)
 operationName = \case
-  NMap         -> (2, "map", "maps")
-  NBackpermute -> (1, "backpermute", "backpermutes")
-  NGenerate    -> (2, "generate", "generates")
-  NPermute     -> (5, "permute", "permutes")
-  NPermute'    -> (5, "permute", "permutes")
-  NScan LeftToRight
+  -- PTXMap         -> (2, "map", "maps")
+  -- PTXBackpermute -> (1, "backpermute", "backpermutes")
+  PTXGenerate    -> (2, "generate", "generates")
+  {- PTXPermute     -> (5, "permute", "permutes")
+  PTXPermute'    -> (5, "permute", "permutes")
+  PTXScan LeftToRight
                -> (4, "scanl", "scanls")
-  NScan RightToLeft
+  PTXScan RightToLeft
                -> (4, "scanr", "scanrs")
-  NScan1 LeftToRight
+  PTXScan1 LeftToRight
                -> (4, "scanl", "scanls")
-  NScan1 RightToLeft
+  PTXScan1 RightToLeft
                -> (4, "scanr", "scanrs")
-  NScan' LeftToRight
+  PTXScan' LeftToRight
                -> (4, "scanl", "scanls")
-  NScan' RightToLeft
+  PTXScan' RightToLeft
                -> (4, "scanr", "scanrs")
-  NFold        -> (3, "fold", "folds")
-  NFold1       -> (3, "fold", "folds")
+  PTXFold        -> (3, "fold", "folds")
+  PTXFold1       -> (3, "fold", "folds") -}

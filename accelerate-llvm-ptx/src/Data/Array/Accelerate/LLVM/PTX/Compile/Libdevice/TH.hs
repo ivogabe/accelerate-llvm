@@ -15,7 +15,6 @@
 module Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice.TH (
 
   nvvmReflectModule, -- nvvmReflectBitcode,
-  libdeviceBitcode,
 
 ) where
 
@@ -24,6 +23,7 @@ import qualified Text.LLVM.Triple.Parse                             as LP
 
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Representation
+import LLVM.AST.Type.Name
 
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.LLVM.CodeGen.Base
@@ -94,7 +94,7 @@ nvvmReflectModule =
           , LP.defVisibility = Nothing
           , LP.defRetType    = downcast (integralType :: IntegralType Int32)
           , LP.defName       = LP.Symbol "__nvvm_reflect"
-          , LP.defArgs       = [ptrParameter scalarType (UnName 0 :: Name (Ptr Int8))]
+          , LP.defArgs       = [LP.Typed (downcast (primType :: PrimType (Ptr Int8))) (nameToPrettyI (UnName 0 :: Name (Ptr Int8)))]
           , LP.defVarArgs    = False
           , LP.defAttrs      = [LP.Nounwind, LP.Readnone, LP.Alwaysinline]
           , LP.defSection    = Nothing

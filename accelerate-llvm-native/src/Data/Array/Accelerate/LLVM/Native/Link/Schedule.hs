@@ -59,6 +59,7 @@ import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Name
+import qualified Text.LLVM as LP
 
 import Data.Bits
 import Control.Monad
@@ -86,7 +87,7 @@ linkSchedule' uid schedule
     let ptrPtrTp = PtrPrimType ptrTp defaultAddrSpace
 
     let name = "schedule_" ++ show uid
-    (_, m) <- codeGenFunction name (PrimType ptrTp)
+    (_, m) <- codeGenFunction (Just LP.DLLExport) name (PrimType ptrTp)
         (LLVM.Lam ptrPtrTp "runtime_lib" . LLVM.Lam ptrTp "workers" . LLVM.Lam (primType @Word16) "thread_index" . LLVM.Lam ptrTp "program" . LLVM.Lam (primType @Int32) "location")
         body
 

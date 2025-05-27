@@ -140,12 +140,13 @@ getLLVMversion = asks codegenLLVMversion
 
 codeGenFunction
   :: forall arch f t a. (HasCallStack, Target arch, Intrinsic arch, Result f ~ t, Result t ~ t)
-  => String
+  => Maybe LP.Linkage
+  -> String
   -> Type t
   -> (GlobalFunctionDefinition t -> GlobalFunctionDefinition f)
   -> CodeGen arch a
   -> LLVM arch (a, Module f)
-codeGenFunction name returnTp bind body = do
+codeGenFunction linkage name returnTp bind body = do
   llvmver <- ask
   let context = CodeGenContext
         { codegenLLVMversion = llvmver }
@@ -192,7 +193,7 @@ codeGenFunction name returnTp bind body = do
       , moduleTargetTriple     = case targetTriple @arch of
           Just s -> LP.parseTriple (SBS8.unpack s)
           Nothing -> error "TODO: module target triple"
-      , moduleMain             = bind $ Body returnTp Nothing (GlobalFunctionBody (Label $ fromString name) code)
+      , moduleMain             = bind $ Body returnTp Nothing (GlobalFunctionBody linkage (Label $ fromString name) code)
       , moduleTypes            = typeDefs
       , moduleGlobals          = globals
       , moduleDeclares         = declares

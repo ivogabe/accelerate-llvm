@@ -18,5 +18,5 @@ module Data.Array.Accelerate.LLVM.PTX.Link.Cache (
 import Data.Array.Accelerate.LLVM.PTX.Link.Object
 import qualified Data.Array.Accelerate.LLVM.Link.Cache              as LC
 
-type KernelTable = LC.LinkCache FunctionTable ObjectCode
+type KernelTable = LC.LinkCache KernelObject ObjectCode
 
