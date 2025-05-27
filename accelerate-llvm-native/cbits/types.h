@@ -135,8 +135,8 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
-const int SHARD_AMOUNT = 64;
-const int CACHE_LINE_WIDTH = 64;
+#define SHARD_AMOUNT 64
+#define CACHE_LINE_WIDTH 64
 
 typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t first_index);
 struct KernelLaunch {
@@ -145,6 +145,7 @@ struct KernelLaunch {
   uint32_t program_continuation;
   _Atomic int32_t active_threads;
   _Atomic uint64_t shards[SHARD_AMOUNT * CACHE_LINE_WIDTH / 8];
+  uint64_t shard_sizes[SHARD_AMOUNT];
   _Atomic uint64_t next_shard;
   _Atomic uint64_t finished_shards;
   // In the future, perhaps also store a uint32_t work_size

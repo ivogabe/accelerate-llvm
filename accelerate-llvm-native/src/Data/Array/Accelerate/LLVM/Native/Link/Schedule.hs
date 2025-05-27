@@ -843,14 +843,14 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       -- Header
       workFnPtr' <- instr' $ GetElementPtr $ gepStruct kernelTp imports (tupleLeft importsIdx)
       workFn <- instr' $ LoadPtr NonVolatile workFnPtr'
-      workFnPtr <- instr' $ GetElementPtr $ gepStruct kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
+      workFnPtr <- instr' $ GetElementPtr $ gepStruct kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
       _ <- instr' $ Store NonVolatile workFnPtr workFn
-      programPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      programPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile programPtr operandProgram
       location <- computeLocation inAwhile $ fromIntegral nextBlock
-      locationPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      locationPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile locationPtr location
-      threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) -- active_threads
       -- shardsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       -- _ <- instr' $ Store NonVolatile shardsPtr  -- shards indexes

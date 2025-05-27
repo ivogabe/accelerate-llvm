@@ -180,12 +180,13 @@ iterFromTo tp start end seed body =
 
 workassistLoop
     :: Operand (Ptr (SizedArray Word64))    -- work indexes of shards
+    -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- next shard to work on
     -> Operand (Ptr Word64)                 -- finished shards
     -> Operand Word64                       -- size of total work
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-workassistLoop shardIndexes nextShard finishedShards size doWork = do
+workassistLoop shardIndexes shardSizes nextShard finishedShards size doWork = do
   entry    <- getBlock
   outer    <- newBlock "workassist.loop.outer"
   inner    <- newBlock "workassist.loop.inner"
@@ -196,7 +197,7 @@ workassistLoop shardIndexes nextShard finishedShards size doWork = do
 
   _ <- setBlock outer
 
-  
+
 
 
   -- firstIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
@@ -239,18 +240,19 @@ workassistChunked
     :: [Loop.LoopAnnotation] 
     -> ShapeR sh 
     -> Operand (Ptr (SizedArray Word64))    -- work indexes of shards
+    -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- next shard to work on
     -> Operand (Ptr Word64)                 -- finished shards
     -> sh 
     -> Operands sh 
     -> (Operands sh -> CodeGen Native ()) 
     -> CodeGen Native ()
-workassistChunked ann shr shardIndexes nextShard finishedShards chunkSz' sh doWork = do
+workassistChunked ann shr shardIndexes shardSizes nextShard finishedShards chunkSz' sh doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
   chunkCounts <- chunkCount shr sh chunkSz
   chunkCnt <- shapeSize shr chunkCounts
   chunkCnt' :: Operand Word64 <- instr' $ BitCast scalarType $ op TypeInt chunkCnt
-  workassistLoop shardIndexes nextShard finishedShards chunkCnt' $ \_ chunkLinearIndex -> do
+  workassistLoop shardIndexes shardSizes nextShard finishedShards chunkCnt' $ \_ chunkLinearIndex -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex

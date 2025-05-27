@@ -166,7 +166,7 @@ codegen name env cluster args
           -- only used in one tile loop. These arrays can also be stored as a
           -- single value.
           envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
-          workassistLoop shardIndexes nextShard finishedShards tileCount $ \seqMode tileIdx' -> do
+          workassistLoop shardIndexes shardSizes nextShard finishedShards tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
 
             tileIdxAbsolute <-
@@ -299,7 +299,7 @@ codegen name env cluster args
             if parallelDepth /= rank shr then []
             else if hasPermute then [Loop.LoopInterleave]
             else [Loop.LoopVectorize]
-      workassistChunked ann parallelShr shardIndexes nextShard finishedShards tileSize parSizes $ \idx -> do
+      workassistChunked ann parallelShr shardIndexes shardSizes nextShard finishedShards tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -313,7 +313,7 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, shardIndexes, nextShard, finishedShards, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, shardIndexes, shardSizes, nextShard, finishedShards, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True

@@ -57,7 +57,7 @@ cacheWidth = 64
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = (((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), SizedArray Word64), Word64), Word64)
+type Header = ((((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), SizedArray Word64), SizedArray Word64), Word64), Word64)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
@@ -65,6 +65,7 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle (ArrayPrimType (shardAmount * cacheWidth `div` 8) primType)
+  `TupRpair` TupRsingle (ArrayPrimType shardAmount primType)
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
 
@@ -76,6 +77,7 @@ bindHeaderEnv
   -> ( PrimType (Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)))
      , CodeGen Native ()
      , Operand (Ptr (SizedArray Word64))  -- work indexes of shards
+     , Operand (Ptr (SizedArray Word64))  -- sizes of the shards
      , Operand (Ptr Word64)               -- next shard to work on
      , Operand (Ptr Word64)               -- finished shards
      , Operand (Word64) -- First work index index
@@ -89,7 +91,8 @@ bindHeaderEnv env =
       instr_ $ downcast $ "env" := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ nameKernelMemory := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
-  , LocalReference (PrimType $ PtrPrimType (ArrayPrimType (shardAmount * cacheWidth `div` 8) {- Multiply by cache width -} (ScalarPrimType scalarType)) defaultAddrSpace) nameShards
+  , LocalReference (PrimType $ PtrPrimType (ArrayPrimType (shardAmount * cacheWidth `div` 8) (ScalarPrimType scalarType)) defaultAddrSpace) nameShards
+  , LocalReference (PrimType $ PtrPrimType (ArrayPrimType shardAmount (ScalarPrimType scalarType)) defaultAddrSpace) nameShardSizes
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameNextShard
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameFinishedShards
   , LocalReference type' nameFirstIndex
@@ -104,6 +107,7 @@ bindHeaderEnv env =
     (envTp, extractEnv, gamma) = bindEnvFromStruct env
 
     nameShards = "workassist.shards"
+    nameShardSizes = "workassist.shard_sizes"
     nameNextShard = "workassist.next_shard"
     nameFinishedShards = "workassist.finished_shards"
     nameFirstIndex = "workassist.first_index"
