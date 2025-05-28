@@ -53,6 +53,7 @@ import Data.Maybe
 
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
+import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
@@ -135,6 +136,7 @@ codegen name env cluster args
 
           setBlock initBlock
           do
+            initShards shardIndexes shardSizes tileCount
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
             -- Decide whether tileCount is large enough
@@ -284,6 +286,11 @@ codegen name env cluster args
       do
         tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
         tileCount' <- shapeSize parallelShr tileCount
+
+        OP_Word64 tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
+
+        initShards shardIndexes shardSizes tileCount64
+
         -- We are not using kernel memory, so no need to initialize it.
 
         OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
@@ -321,6 +328,13 @@ codegen name env cluster args
 
 linkage :: Maybe LP.Linkage
 linkage = Just LP.DLLExport
+
+initShards 
+  :: Operand (Ptr (SizedArray Word64))  -- work indexes of shards
+  -> Operand (Ptr (SizedArray Word64))  -- sizes of the shardsCodeGen Native ()
+  -> Operand Word64
+  -> CodeGen Native ()
+initShards shardIndexes shardSizes tileSize = undefined
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
 opCodeGen (FlatOp NGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
