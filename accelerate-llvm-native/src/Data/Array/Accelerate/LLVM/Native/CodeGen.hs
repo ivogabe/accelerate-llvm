@@ -54,6 +54,7 @@ import Data.Maybe
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Operand
+import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
@@ -334,7 +335,9 @@ initShards
   -> Operand (Ptr (SizedArray Word64))  -- sizes of the shardsCodeGen Native ()
   -> Operand Word64
   -> CodeGen Native ()
-initShards shardIndexes shardSizes tileSize = undefined
+initShards shardIndexes shardSizes tileSize = do
+  arr <- instr' $ GetElementPtr $ GEP undefined undefined $ GEPArray undefined undefined
+  return ()
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
 opCodeGen (FlatOp NGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
