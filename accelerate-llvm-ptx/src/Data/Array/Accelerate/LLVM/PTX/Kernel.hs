@@ -96,7 +96,7 @@ instance IsKernel PTXKernel where
   type KernelOperation PTXKernel = PTXOp
   type KernelMetadata  PTXKernel = PTXKernelMetadata
 
-  compileKernel env cluster args = unsafePerformIO $ evalLLVM defaultTarget $ do
+  compileKernel env cluster args = unsafePerformIO $ evalPTX defaultTarget $ do
     (sz, module') <- codegen fullName env cluster args
     dev <- gets ptxDeviceProperties
     -- TODO: Change simpleLaunchConfig to launchConfig when we use shared memory

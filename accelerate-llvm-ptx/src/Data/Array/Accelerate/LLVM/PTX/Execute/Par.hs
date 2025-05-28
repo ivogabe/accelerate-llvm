@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase                 #-}
 {-# LANGUAGE MultiParamTypeClasses      #-}
@@ -7,7 +8,7 @@
 {-# LANGUAGE TypeSynonymInstances       #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
--- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Async
+-- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Par
 -- Copyright   : [2014..2020] The Accelerate Team
 -- License     : BSD3
 --
@@ -16,62 +17,101 @@
 -- Portability : non-portable (GHC extensions)
 --
 
-module Data.Array.Accelerate.LLVM.PTX.Execute.Async (
-
-  module Data.Array.Accelerate.LLVM.Execute.Async,
-  module Data.Array.Accelerate.LLVM.PTX.Execute.Async,
-
+module Data.Array.Accelerate.LLVM.PTX.Execute.Par (
+  Par, evalPar, ptxStream, liftPar, spawnPar, block,
+  cleanUpTouchLifetime, cleanUpTouchForeignPtr, cleanUpUnregisterHostPtr,
 ) where
 
-import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Lifetime
 
--- import Data.Array.Accelerate.LLVM.Execute.Async
 import Data.Array.Accelerate.LLVM.State
 
+import Data.Array.Accelerate.LLVM.PTX.State
 import Data.Array.Accelerate.LLVM.PTX.Target
-import Data.Array.Accelerate.LLVM.PTX.Execute.Event                 ( Event )
 import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
-import Data.Array.Accelerate.LLVM.PTX.Link.Object                   ( FunctionTable )
 import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Event       as Event
 import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Stream      as Stream
 
+import qualified Foreign.CUDA.Driver.Stream                         as CUDA
+import qualified Foreign.CUDA.Ptr                                   as CUDA
+import qualified Foreign.CUDA.Driver                                as CUDA
+
+import Foreign.ForeignPtr
+
 import Control.Monad.Reader
 import Control.Monad.State
-import Data.IORef
+import Control.Concurrent
 
+newtype Par a = Par { runPar :: ReaderT Stream (StateT [CleanUp] (LLVM PTX)) a }
+    deriving ( Functor, Applicative, Monad, MonadIO, MonadReader Stream, MonadState [CleanUp] )
+
+-- CleanUp to be executed after the Par monad synchronises the CPU and GPU (via block)
+data CleanUp where
+  TouchLifetime :: Lifetime t -> CleanUp
+  TouchForeignPtr :: ForeignPtr t -> CleanUp
+  Unregister :: CUDA.HostPtr t -> CleanUp
 
 -- | Evaluate a parallel computation
 --
 {-# INLINE evalPar #-}
-evalPar :: Par PTX a -> LLVM PTX a
+evalPar :: Par a -> LLVM PTX a
 evalPar p = do
-  s <- Stream.create
-  r <- runReaderT (runPar p) (s, Nothing)
-  return r
+  stream <- Stream.create
+  result <- evalStateT (runReaderT (runPar (p <* block)) stream) []
+  Stream.destroy stream
+  return result
 
+ptxStream :: Stream -> Stream
+ptxStream = id
 
-type ParState = (Stream, Maybe (Lifetime FunctionTable))
+liftPar :: LLVM PTX a -> Par a
+liftPar = Par . lift . lift
 
-ptxStream :: ParState -> Stream
-ptxStream = fst
+spawnPar :: Par () -> Par ()
+spawnPar spawned = do
+  target <- liftPar $ gets llvmTarget
+  stream <- asks ptxStream
+  event <- liftPar $ Event.waypoint stream
+  _ <- liftIO $ forkIO $ evalPTX target $ evalPar $ do
+    spawnedStream <- asks ptxStream
+    liftIO $ Event.after event spawnedStream
+    spawned
+  return ()
 
-ptxKernel :: ParState -> Maybe (Lifetime FunctionTable)
-ptxKernel = snd
+cleanUpTouchLifetime :: Lifetime t -> Par ()
+cleanUpTouchLifetime lifetime =
+  modify' (TouchLifetime lifetime :)
 
+cleanUpTouchForeignPtr :: ForeignPtr t -> Par ()
+cleanUpTouchForeignPtr ptr =
+  modify' (TouchForeignPtr ptr :)
+
+cleanUpUnregisterHostPtr :: CUDA.HostPtr t -> Par ()
+cleanUpUnregisterHostPtr hostPtr =
+  modify' (Unregister hostPtr :)
+
+runCleanUp :: Par ()
+runCleanUp = do
+  list <- get
+  put []
+  liftIO $ forM_ list $ \case
+    TouchLifetime lifetime -> touchLifetime lifetime
+    TouchForeignPtr ptr -> touchForeignPtr ptr
+    Unregister hostPtr -> void $ CUDA.unregisterArray hostPtr
+
+-- Synchronises the CPU with the GPU. Blocks execution on the CPU until all
+-- operations submitted to the GPU, from this Par instance, have been completed.
+block :: Par ()
+block = do
+  stream <- ask
+  liftIO $ CUDA.block stream
+  runCleanUp
 
 -- Implementation
 -- --------------
 
-data Future a = Future {-# UNPACK #-} !(IORef (IVar a))
 
-data IVar a
-    = Full !a
-    | Pending {-# UNPACK #-} !Event !(Maybe (Lifetime FunctionTable)) !a
-    | Empty
-
-
-instance Async PTX where
+{-instance Async PTX where
   type FutureR PTX = Future
 
   newtype Par PTX a = Par { runPar :: ReaderT ParState (LLVM PTX) a }
@@ -159,4 +199,4 @@ wait (Future ref) = do
         Nothing -> return ()
       return v
     Empty           -> internalError "blocked on an IVar"
-
+-}

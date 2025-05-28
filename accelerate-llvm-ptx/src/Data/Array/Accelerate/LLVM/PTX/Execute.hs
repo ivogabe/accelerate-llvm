@@ -1,11 +1,14 @@
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE GADTs               #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
 {-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
 {-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE ViewPatterns        #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
@@ -20,98 +23,200 @@
 --
 
 module Data.Array.Accelerate.LLVM.PTX.Execute (
-
-  executeAcc,
-  executeOpenAcc,
-
+  {- instance Execute UniformSchedule PTXKernel -}
 ) where
 
 import Data.Array.Accelerate.Analysis.Match
+import Data.Array.Accelerate.AST.Execute
+import Data.Array.Accelerate.AST.Kernel
+import Data.Array.Accelerate.AST.LeftHandSide
+import Data.Array.Accelerate.AST.Schedule
+import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
+import Data.Array.Accelerate.Interpreter                            ( evalExp, EvalArrayInstr(..) )
+
+import Data.Array.Accelerate.LLVM.State
+
+import Data.Array.Accelerate.LLVM.PTX.Execute.Buffer
+import Data.Array.Accelerate.LLVM.PTX.Execute.Environment
+import Data.Array.Accelerate.LLVM.PTX.Execute.Par
+import Data.Array.Accelerate.LLVM.PTX.Kernel
+import Data.Array.Accelerate.LLVM.PTX.Execute.Stream (Stream)
+import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Event       as Event
+import Data.Array.Accelerate.LLVM.PTX.Link.Object
 
 -- import Data.Array.Accelerate.LLVM.Execute
 
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch               ( multipleOf )
-import Data.Array.Accelerate.LLVM.PTX.Array.Data
-import Data.Array.Accelerate.LLVM.PTX.Array.Prim                    ( memsetArrayAsync )
-import Data.Array.Accelerate.LLVM.PTX.Execute.Async
-import Data.Array.Accelerate.LLVM.PTX.Execute.Environment
-import Data.Array.Accelerate.LLVM.PTX.Execute.Marshal
-import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
-import Data.Array.Accelerate.LLVM.PTX.Link
+-- import Data.Array.Accelerate.LLVM.PTX.Array.Data
+-- import Data.Array.Accelerate.LLVM.PTX.Array.Prim                    ( memsetArrayAsync )
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Async
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Environment
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Marshal
+-- import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
+-- import Data.Array.Accelerate.LLVM.PTX.Link
 import Data.Array.Accelerate.LLVM.PTX.Target
-import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
-import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Event       as Event
+import Data.Array.Accelerate.LLVM.PTX.State
+-- import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
+-- import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Event       as Event
 
 import qualified Foreign.CUDA.Driver                                as CUDA
+import qualified Foreign.CUDA.Driver.Stream                         as CUDA
 
-import Control.Monad                                                ( when, forM_ )
-import Control.Monad.Reader                                         ( asks, local )
+import Control.Monad                                                ( forM_ )
+import Control.Monad.Reader                                         ( asks )
 import Control.Monad.State                                          ( liftIO )
-import Data.ByteString.Short.Char8                                  ( ShortByteString, unpack )
-import Data.List                                                    ( find )
-import Data.Maybe                                                   ( fromMaybe )
-import Formatting
+import Control.Concurrent.MVar
 import Prelude                                                      hiding ( exp, map, sum, scanl, scanr )
-import qualified Data.ByteString.Short                              as S
-import qualified Data.ByteString.Short.Extra                        as SE
-import qualified Data.DList                                         as DL
 
+instance Execute UniformScheduleFun PTXKernel where
+  data Linked UniformScheduleFun PTXKernel t = PTXLinked (UniformScheduleFun PTXKernel () t)
 
-{-# SPECIALISE INLINE executeAcc     :: ExecAcc     PTX      a ->             Par PTX (FutureArraysR PTX a) #-}
-{-# SPECIALISE INLINE executeOpenAcc :: ExecOpenAcc PTX aenv a -> Val aenv -> Par PTX (FutureArraysR PTX a) #-}
+  linkAfunSchedule = PTXLinked
 
--- Array expression evaluation
--- ---------------------------
+  executeAfunSchedule _ (PTXLinked f) = executeFun f
 
--- Computations are evaluated by traversing the AST bottom up, and for each node
--- distinguishing between three cases:
+executeFun :: UniformScheduleFun PTXKernel () f -> IOFun f
+executeFun (Sbody _) = return ()
+executeFun (Slam lhs1 (Slam lhs2 f)) = \a -> \b ->
+  executeFun (Slam (LeftHandSidePair lhs1 lhs2) f) (a, b)
+executeFun (Slam lhs (Sbody body)) = \arguments -> evalPTX defaultTarget $ evalPar $ do
+  arguments' <- baseToValues (lhsToTupR lhs) arguments
+  let env = push' Empty (lhs, arguments')
+  execute env body
+
+execute :: Gamma env -> UniformSchedule PTXKernel env -> Par ()
+execute env = \case
+  Return -> return ()
+  Alet lhs bnd next -> do
+    bnd' <- executeBinding env (lhsToTupR lhs) bnd
+    let env' = push' env (lhs, bnd')
+    execute env' next
+  Effect effect next -> do
+    executeEffect env effect
+    execute env next
+  Acond cond true false next -> do
+    let cond' = case prj' (varIdx cond) env of
+          ValueScalar _ c -> c
+    if cond' == 1 then
+      execute env true
+    else
+      execute env false
+    execute env next
+  Awhile io step initial next -> error "TODO: awhile"
+  AwhileSeq io step initial next -> error "TODO: awhile"
+  Spawn a b -> do
+    spawnPar (execute env a)
+    execute env b
+
+executeBinding :: Gamma env -> BasesR t -> Binding env t -> Par (Distribute Value t)
+executeBinding env baseTp = \case
+  Compute expr -> do
+    result <- evalExp expr $ evalArrayInstr env
+    return $ scalarToValues (mapTupR expectScalarType baseTp) result
+  NewSignal _ -> do
+    event <- liftPar $ Event.create
+    let signal = PTXSignal event
+    return (ValueSignal signal, ValueSignalResolver signal)
+  NewRef _ -> do
+    mvar <- liftIO newEmptyMVar
+    return (ValueRef mvar, ValueOutputRef mvar)
+  Alloc shr tp sh -> do
+    let n = size' shr $ prjVars sh env
+    ValueBuffer <$> mallocDevice tp n
+  Use tp _ buffer ->
+    ValueBuffer <$> copyToDevice tp buffer
+  Unit var -> error "TODO: Unit"
+  RefRead ref -> case prj' (varIdx ref) env of
+    ValueScalar _ _ -> internalError "Ref impossible"
+    ValueRef mvar -> do
+      value <- liftIO $ readMVar mvar
+      case reprIsSingle @Value @_ @Value value of
+        Refl -> return value
+  where
+    expectScalarType :: BaseR tp -> ScalarType tp
+    expectScalarType (BaseRground (GroundRscalar tp)) = tp
+    expectScalarType _ = internalError "Expected scalar type"
+
+executeEffect :: Gamma env -> Effect PTXKernel env -> Par ()
+executeEffect env = \case
+  Exec _ kernelFun args
+    | Exists kernel <- kernelFunKernel kernelFun -> do
+      stream <- asks ptxStream
+      let n = 1024 * 64 -- TODO
+      let (lifetimes, args') = kernelArgs env args
+      liftIO $ launch kernel stream n args'
+      -- Ensure 'touchLifetime' is called when we next synchronise.
+      cleanUpTouchLifetime $ kernelLinked kernel
+      mapM_ (\(Exists l) -> cleanUpTouchLifetime l) lifetimes
+  SignalAwait signals -> do
+    stream <- asks ptxStream
+    forM_ signals $ \signal -> case prj' signal env of
+      ValueSignal (PTXSignal event) -> liftIO $ Event.after event stream
+      ValueScalar _ _ -> internalError "Signal impossible"
+  SignalResolve signals -> do
+    stream <- asks ptxStream
+    forM_ signals $ \signal -> case prj' signal env of
+      ValueSignalResolver (PTXSignal event) -> liftIO $ Event.record event stream
+      ValueScalar _ _ -> internalError "SignalResolver impossible"
+  RefWrite refVar valueVar
+    | ValueOutputRef mvar <- prj' (varIdx refVar) env
+    , value <- prj' (varIdx valueVar) env
+    , Refl <- reprIsSingle @Value @_ @Value value -> do
+      liftIO $ putMVar mvar value
+    | otherwise -> internalError "Ref or scalar impossible"
+
+size' :: ShapeR sh -> Distribute Value sh -> Int
+size' ShapeRz _ = 1
+size' (ShapeRsnoc shr) (sh, ValueScalar _ sz)
+  | sz <= 0 = 0
+  | otherwise = size' shr sh * sz
+
+-- Execute a device function with the given thread configuration and function
+-- parameters.
 --
---  1. If it is a Use node, we return a reference to the array data. The data
---     will already have been copied to the device during compilation of the
---     kernels.
---
---  2. If it is a non-skeleton node, such as a let binding or shape conversion,
---     then execute directly by updating the environment or similar.
---
---  3. If it is a skeleton node, then we need to execute the generated LLVM
---     code.
---
-instance Execute PTX where
-  {-# INLINE map         #-}
-  {-# INLINE generate    #-}
-  {-# INLINE transform   #-}
-  {-# INLINE backpermute #-}
-  {-# INLINE fold        #-}
-  {-# INLINE foldSeg     #-}
-  {-# INLINE scan        #-}
-  {-# INLINE scan'       #-}
-  {-# INLINE permute     #-}
-  {-# INLINE stencil1    #-}
-  {-# INLINE stencil2    #-}
-  {-# INLINE aforeign    #-}
-  map           = mapOp
-  generate      = generateOp
-  transform     = transformOp
-  backpermute   = backpermuteOp
-  fold True     = foldOp
-  fold False    = fold1Op
-  foldSeg i _   = foldSegOp i
-  scan _ True   = scanOp
-  scan _ False  = scan1Op
-  scan' _       = scan'Op
-  permute       = permuteOp
-  stencil1      = stencil1Op
-  stencil2      = stencil2Op
-  aforeign      = aforeignOp
+launch :: HasCallStack => PTXKernel f -> Stream -> Int -> [CUDA.FunParam] -> IO ()
+launch kernel stream n args = do
+  let obj = unsafeGetValue $ kernelLinked kernel
+  let cta = (kernelObjThreadBlockSize obj, 1, 1)
+  let grid = (kernelObjThreadBlocks obj n, 1, 1)
+  let smem = kernelObjSharedMemBytes obj
+  let kernelData = CUDA.nullDevPtr :: CUDA.DevicePtr Word8
+  CUDA.launchKernel (kernelObjFun obj) grid cta smem (Just stream) (CUDA.VArg kernelData : reverse args)
 
+kernelArgs :: Gamma env -> SArgs env f -> ([Exists Lifetime], [CUDA.FunParam])
+kernelArgs _ ArgsNil = ([], [])
+kernelArgs env (SArgScalar (Var tp idx) :>: args) = case prj' idx env of
+  ValueScalar _ value
+    | ScalarDict <- scalarDict tp ->
+      (lifetimes, CUDA.VArg value : args')
+  _ -> internalError "Scalar impossible"
+  where
+    (lifetimes, args') = kernelArgs env args
+kernelArgs env (SArgBuffer _ (Var _ idx) :>: args) = case prj' idx env of
+  ValueBuffer (PTXBuffer _ lifetime) ->
+    (Exists lifetime : lifetimes, CUDA.VArg (unsafeGetValue lifetime) : args')
+  ValueScalar _ _ -> internalError "Scalar impossible"
+  where
+    (lifetimes, args') = kernelArgs env args
 
--- Skeleton implementation
+evalArrayInstr :: Gamma env -> EvalArrayInstr Par (ArrayInstr env)
+evalArrayInstr env = EvalArrayInstr $ \instr arg -> case instr of
+  Index (Var gtp bufferIdx)
+    | GroundRbuffer tp <- gtp
+    , ValueBuffer buffer <- prj' bufferIdx env ->
+      readFromDevice tp buffer arg
+    | otherwise -> internalError "Buffer impossible"
+  Parameter (Var _ idx) -> case prj' idx env of
+    ValueScalar _ value -> return value
+    _ -> internalError "Scalar impossible"
+
+{- -- Skeleton implementation
 -- -----------------------
 
 -- Simple kernels just need to know the shape of the output array
@@ -865,4 +970,4 @@ launch Kernel{..} stream n args =
                       | otherwise = SE.take (S.length kernelName - 65) kernelName
       Debug.traceM Debug.dump_exec ("exec: " % string % " <<< " % int % ", " % int % ", " % int % " >>> " % Debug.elapsed)
         (unpack kernelName') (fst3 grid) (fst3 cta) smem wall cpu gpu
-
+-}

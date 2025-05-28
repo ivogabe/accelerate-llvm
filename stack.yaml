@@ -15,20 +15,7 @@ extra-deps:
 - OptDir-0.0.4
 - bytestring-encoding-0.1.2.0
 - ../accelerate
-- github: msakai/haskell-MIP
-  commit: 4295aa21a24a30926b55770c55ac00f749fb8a39
-  subdirs:
-  - MIP
-
-- github: llvm-hs/llvm-hs
-  commit: e4b3cfa47e72f094ab109884f18acfc666b0fb7d  # llvm-15
-  # commit: 423220bffac4990d019fc088c46c5f25310d5a33  # llvm-12
-  subdirs:
-    - llvm-hs
-    - llvm-hs-pure
-# - highs-lp-0.0
-# - linear-programming-0.0.1
-# - comfort-array-0.5.5
+- MIP-0.2.0.0
 
 - github: tomsmeding/llvm-pretty
   commit: 16fb617f282bde97a090b8b08cbd2dcf5e259ad3
