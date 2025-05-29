@@ -543,8 +543,8 @@ inputConstraints :: Label Comp -> Labels Comp -> Constraint NativeOp
 inputConstraints c = foldMap $ \wIn ->
     --             timesN (fused lIn l) .>=. ILP.var (InDims l) .-. ILP.var (OutDims lIn)
     -- <> (-1) .*. timesN (fused lIn l) .<=. ILP.var (InDims l) .-. ILP.var (OutDims lIn)
-                timesN (fused wIn c) .>=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
-    <> (-1) .*. timesN (fused wIn c) .<=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
+                timesN (fused (wIn, undefined, c)) .>=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
+    <> (-1) .*. timesN (fused (wIn, undefined, c)) .<=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
 
 -- inrankifmanifest :: ShapeR sh -> Label Comp -> Label Buff -> Constraint NativeOp
 -- inrankifmanifest shr c b = ILP.int (rank shr) .+. timesN (manifest b) .>=. ILP.var (InDims c)
