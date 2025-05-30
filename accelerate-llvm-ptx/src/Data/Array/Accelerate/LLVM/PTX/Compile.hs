@@ -88,7 +88,7 @@ compile uid name config module' = do
   --
   cubin <- liftIO . unsafeInterleaveIO $ do
     exists <- doesFileExist cacheFile
-    recomp <- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
+    recomp <- return True -- if Debug.debuggingIsEnabled then Debug.getFlag Debug.force_recomp else return False
     if exists && not recomp
       then do
         Debug.traceM Debug.dump_cc ("cc: found cached object code " % shown) uid

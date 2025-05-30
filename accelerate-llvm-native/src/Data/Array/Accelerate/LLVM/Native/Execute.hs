@@ -31,37 +31,26 @@ import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Ground
-import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.AST.Execute
-import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.AST.Schedule
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Analysis.Hash.Schedule.Uniform
-import Data.Array.Accelerate.Interpreter                ( evalExp, EvalArrayInstr(..) )
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.LLVM.Native.Kernel
 import Data.Array.Accelerate.LLVM.Native.Link.Schedule
 
-import Control.Exception
-import Data.String
-import Data.Int
-import Data.Word
 import Data.IORef
-import Data.Typeable
 import Data.Maybe
 import Text.Read (readMaybe)
-import Language.Haskell.TH.Syntax
-import qualified Crypto.Hash.XKCP as Hash
 import Control.Concurrent
 import Foreign.Ptr
 import Foreign.StablePtr
 import Foreign.ForeignPtr
 import Foreign.Storable
 import GHC.Conc
-import System.IO
 import System.IO.Unsafe ( unsafePerformIO )
 import LLVM.AST.Type.Representation
 import System.Environment
@@ -73,7 +62,7 @@ instance Execute UniformScheduleFun NativeKernel where
     NativeLinked
       (linkSchedule (hashUniformScheduleFun schedule) schedule)
       schedule
-  executeAfunSchedule _ (NativeLinked (NativeProgram fun size lifetimes imports offset) schedule)
+  executeAfunSchedule _ (NativeLinked (NativeProgram fun size' lifetimes imports offset) schedule)
     | not rtsSupportsBoundThreads = error
       $ "\nCannot run Accelerate programs without GHC's multi-threaded runtime\n\n"
       ++ "In your .cabal file, add -threaded to ghc-options in the section of your executable:\n"
@@ -90,9 +79,9 @@ instance Execute UniformScheduleFun NativeKernel where
         -- This happens in 'destructWhen' from a separate thread.
         destructorMVar <- newEmptyMVar
         sp <- newStablePtrPrimMVar destructorMVar
-        forkIO $ destructWhen destructorMVar (Exists fun : lifetimes)
+        _ <- forkIO $ destructWhen destructorMVar (Exists fun : lifetimes)
         -- Allocate space for the program imports, arguments and local state
-        program <- runtimeProgramAlloc (fromIntegral size) (castPtr $ unsafeGetPtrFromLifetimeFunPtr fun) sp
+        program <- runtimeProgramAlloc (fromIntegral size') (castPtr $ unsafeGetPtrFromLifetimeFunPtr fun) sp
         -- Initialize the struct with the imports
         imports program
         -- 'prepareProgram' will initialize struct with the arguments of the function
@@ -158,7 +147,7 @@ prepareProgram (Slam lhs f) accum final =
           poke (plusPtr ptr cursor2) (2 :: Word)
         _ -> return ()
       _ <- forkIO $ do
-        readMVar localMVar
+        () <- readMVar localMVar
         value <- peekGround tp (plusPtr ptr cursor2)
         writeIORef ioref value
         runtimeProgramRelease ptr
