@@ -99,11 +99,10 @@ readFromDevice tp (PTXBuffer size lifetime) idx
     stream <- asks ptxStream
     liftIO $ CUDA.peekArrayAsync (fromIntegral byteSize) devicePtr2 hostPtr2 (Just stream)
 
-    -- Call 'CUDA.unregisterArray hostPtr2' when we next block (sync CPU with GPU)
-    cleanUpUnregisterHostPtr hostPtr2
-    -- Same for touchForeignPtr hostPtr
-    cleanUpTouchForeignPtr hostPtr
-    -- And touchLifetime lifetime
-    cleanUpTouchLifetime lifetime
+    block
+
+    liftIO $ CUDA.unregisterArray hostPtr2
+    liftIO $ touchForeignPtr hostPtr
+    liftIO $ touchLifetime lifetime
 
     return $! indexBuffer tp buffer 0
