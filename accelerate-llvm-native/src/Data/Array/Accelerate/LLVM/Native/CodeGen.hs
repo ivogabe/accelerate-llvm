@@ -332,11 +332,12 @@ linkage = Just LP.DLLExport
 
 initShards 
   :: Operand (Ptr (SizedArray Word64))  -- work indexes of shards
-  -> Operand (Ptr (SizedArray Word64))  -- sizes of the shardsCodeGen Native ()
-  -> Operand Word64
+  -> Operand (Ptr (SizedArray Word64))  -- sizes of the shards
+  -> Operand Word64 -- Amount of tiles to be divided over the shards
   -> CodeGen Native ()
-initShards shardIndexes shardSizes tileSize = do
-  arr <- instr' $ GetElementPtr $ GEP undefined undefined $ GEPArray undefined undefined
+initShards shardIndexes shardSizes tileCount = do
+  arr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray (integral TypeWord64 0) GEPEmpty
+  _ <- instr' $ Store NonVolatile arr (integral TypeWord64 5)
   return ()
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)

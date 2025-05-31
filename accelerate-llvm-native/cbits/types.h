@@ -148,6 +148,5 @@ struct KernelLaunch {
   uint64_t shard_sizes[SHARD_AMOUNT];
   _Atomic uint64_t next_shard;
   _Atomic uint64_t finished_shards;
-  // In the future, perhaps also store a uint32_t work_size
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
 };
