@@ -346,7 +346,8 @@ initShards shardIndexes shardSizes tileCount = do
       shardSize <- instr' $ Select (A.unbool add1) shardMaxSize shardMinSize
       OP_Word64 shardEnd <- A.add (IntegralNumType TypeWord64) (OP_Word64 shardSize) (OP_Word64 shardStart)
 
-      shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray i GEPEmpty
+      OP_Word64 idxCacheWidth <- A.mul (IntegralNumType TypeWord64) (OP_Word64 i) (A.liftWord64 cacheWidth)
+      shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
       _ <- instr' $ Store NonVolatile shardIdxArr shardStart
 
       shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty

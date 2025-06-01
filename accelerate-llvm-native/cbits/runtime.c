@@ -96,13 +96,13 @@ void* accelerate_worker(void *data_packed) {
         unsigned char parallel =
           kernel->work_function(kernel, 0xFFFFFFFF);
 
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < SHARD_AMOUNT * CACHE_LINE_WIDTH; i += CACHE_LINE_WIDTH) {
           printf("%d ", kernel->shards[i]);
         }
 
         printf("\n");
 
-        for (int i = 0; i < 64; i++) {
+        for (int i = 0; i < SHARD_AMOUNT; i++) {
           printf("%d ", kernel->shard_sizes[i]);
         }
 
