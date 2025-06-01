@@ -46,6 +46,7 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
+import Data.Array.Accelerate.LLVM.CodeGen.Loop (iterFromStepTo)
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -137,7 +138,7 @@ codegen name env cluster args
 
           setBlock initBlock
           do
-            initShards shardIndexes shardSizes tileCount
+            initShards shardIndexes shardSizes (OP_Word64 tileCount)
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
             -- Decide whether tileCount is large enough
@@ -288,7 +289,7 @@ codegen name env cluster args
         tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
         tileCount' <- shapeSize parallelShr tileCount
 
-        OP_Word64 tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
+        tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
 
         initShards shardIndexes shardSizes tileCount64
 
@@ -333,11 +334,26 @@ linkage = Just LP.DLLExport
 initShards 
   :: Operand (Ptr (SizedArray Word64))  -- work indexes of shards
   -> Operand (Ptr (SizedArray Word64))  -- sizes of the shards
-  -> Operand Word64 -- Amount of tiles to be divided over the shards
+  -> Operands Word64 -- Amount of tiles to be divided over the shards
   -> CodeGen Native ()
 initShards shardIndexes shardSizes tileCount = do
-  arr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray (integral TypeWord64 0) GEPEmpty
-  _ <- instr' $ Store NonVolatile arr (integral TypeWord64 5)
+  shardAmount' <- A.min (NumSingleType $ IntegralNumType TypeWord64) (A.liftWord64 shardAmount) tileCount
+  (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 tileCount shardAmount'
+  OP_Word64 shardMaxSize <- A.add (IntegralNumType TypeWord64) (OP_Word64 shardMinSize) (OP_Word64 $ integral TypeWord64 1)
+
+  _ <- iterFromStepTo [] (TupRsingle $ SingleScalarType $ NumSingleType$ IntegralNumType TypeWord64) (A.liftWord64 0) (A.liftWord64 1) shardAmount' (A.liftWord64 0) (\(OP_Word64 i) (OP_Word64 shardStart) -> do
+      add1 <- A.lt (NumSingleType $ IntegralNumType TypeWord64) (OP_Word64 i) remainder
+      shardSize <- instr' $ Select (A.unbool add1) shardMaxSize shardMinSize
+      OP_Word64 shardEnd <- A.add (IntegralNumType TypeWord64) (OP_Word64 shardSize) (OP_Word64 shardStart)
+
+      shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray i GEPEmpty
+      _ <- instr' $ Store NonVolatile shardIdxArr shardStart
+
+      shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty
+      _ <- instr' $ Store NonVolatile shardSizeArray shardEnd
+
+      return $ OP_Word64 shardEnd
+    )
   return ()
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
