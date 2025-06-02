@@ -140,6 +140,7 @@ baseToValues (TupRsingle BaseRsignalResolver `TupRpair` TupRsingle (BaseRrefWrit
           _ -> internalError "Buffer impossible"
     buffer <- copyToHost tp ptxBuffer
     liftIO $ writeIORef output buffer
+    block
     liftIO $ putMVar mvar ()
 
   return (ValueSignalResolver $ PTXSignal event, ValueOutputRef ref)
