@@ -21,6 +21,7 @@ module Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape                   hiding ( eq )
 
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Base               (shardAmount, cacheWidth)
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                hiding ( lift )
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
@@ -42,6 +43,7 @@ import Control.Monad.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import LLVM.AST.Type.Function
 import LLVM.AST.Type.Name
+import LLVM.AST.Type.GetElementPtr
 
 -- | A standard 'for' loop, that steps from the start to end index executing the
 -- given function at each index.
@@ -195,7 +197,38 @@ workassistLoop shardIndexes shardSizes nextShard finishedShards size doWork = do
   exit     <- newBlock "workassist.exit"
   finished <- newBlock "workassist.finished"
 
+  -- TODO: Reuse from init
+  shardAmount' <- A.min (NumSingleType $ IntegralNumType TypeWord64) (A.liftWord64 shardAmount) (OP_Word64 size)
+
   _ <- setBlock outer
+
+  finishCount <- atomicLoad Monotonic finishedShards
+
+  next <- atomicAdd Monotonic nextShard (integral TypeWord64 1)
+  OP_Word64 shardToWorkOn <- A.mod TypeWord64 (OP_Word64 next) shardAmount'
+
+  OP_Word64 shardIdx <- A.mul (IntegralNumType TypeWord64) (A.liftWord64 cacheWidth) (OP_Word64 shardToWorkOn)
+  shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
+  
+  shardSizeIdx <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty
+  shardSize <- instr' $ Load scalarType NonVolatile shardSizeIdx
+
+  _ <- br inner
+
+  _ <- setBlock inner
+
+  let indexName = "block_index"
+  -- Whether the thread should operate in the single threaded mode of
+  -- zero-overhead parallel scans.
+  let seqName = "sequential_mode"
+  let seqMode = LocalReference type' seqName
+  let index = LocalReference type' indexName
+
+  doWork seqMode index
+
+
+  nextIndex <- atomicAdd Monotonic shard (integral TypeWord64 1)
+  condition <- A.lt singleType (OP_Word64 nextIndex) (OP_Word64 shardSize)
 
 
 
@@ -306,6 +339,10 @@ chunkEnd (ShapeRsnoc shr) (OP_Pair sh0 sz0) (OP_Pair sh1 sz1) (OP_Pair sh2 sz2) 
 atomicAdd :: MemoryOrdering -> Operand (Ptr Word64) -> Operand Word64 -> CodeGen Native (Operand Word64)
 atomicAdd ordering ptr increment = do
   instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)
+
+atomicLoad :: MemoryOrdering -> Operand (Ptr Word64) -> CodeGen Native (Operand Word64)
+atomicLoad ordering ptr = do
+  instr' $ LoadAtomic scalarType NonVolatile ptr ordering
 
 ---- debugging tools ----
 putchar :: Operands Int -> CodeGen Native (Operands Int)

@@ -138,6 +138,7 @@ codegen name env cluster args
 
           setBlock initBlock
           do
+            -- TODO: Remove it for now
             initShards shardIndexes shardSizes (OP_Word64 tileCount)
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
