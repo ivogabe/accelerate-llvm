@@ -188,83 +188,73 @@ workassistLoop
     -> Operand Word64                       -- size of total work
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-workassistLoop shardIndexes shardSizes nextShard finishedShards size doWork = do
+workassistLoop shardIndexes shardSizes nextShard finishedShards tileCount doWork = do
   entry    <- getBlock
-  outer    <- newBlock "workassist.loop.outer"
-  inner    <- newBlock "workassist.loop.inner"
-  work     <- newBlock "workassist.loop.work"
-  claimed  <- newBlock "workassist.all.claimed"
+  start    <- newBlock "workassist.shards.start"
+  outer    <- newBlock "workassist.shards.outer"
+  inner    <- newBlock "workassist.shards.inner"
+  done     <- newBlock "workassist.shards.done"
+  finish   <- newBlock "workassist.shards.finish"
   exit     <- newBlock "workassist.exit"
-  finished <- newBlock "workassist.finished"
 
   -- TODO: Reuse from init
-  shardAmount' <- A.min (NumSingleType $ IntegralNumType TypeWord64) (A.liftWord64 shardAmount) (OP_Word64 size)
+  shardAmount' <- A.min (NumSingleType $ IntegralNumType TypeWord64) (A.liftWord64 shardAmount) (OP_Word64 tileCount)
+  _ <- br start
 
-  _ <- setBlock outer
+  setBlock start
 
-  finishCount <- atomicLoad Monotonic finishedShards
+  finishCount <- atomicAdd Monotonic finishedShards (integral TypeWord64 0) -- atomicLoad Monotonic finishedShards
+  finished <- A.lt singleType (OP_Word64 finishCount) shardAmount'
+
+  _ <- cbr finished outer exit
+
+
+  setBlock outer
 
   next <- atomicAdd Monotonic nextShard (integral TypeWord64 1)
   OP_Word64 shardToWorkOn <- A.mod TypeWord64 (OP_Word64 next) shardAmount'
 
   OP_Word64 shardIdx <- A.mul (IntegralNumType TypeWord64) (A.liftWord64 cacheWidth) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
+  firstIndex <- atomicAdd Monotonic shard (integral TypeWord64 1)
   
   shardSizeIdx <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty
   shardSize <- instr' $ Load scalarType NonVolatile shardSizeIdx
 
-  _ <- br inner
+  shardAlreadyFinished <- A.lt singleType (OP_Word64 firstIndex) (OP_Word64 shardSize)
 
-  _ <- setBlock inner
+  _ <- cbr shardAlreadyFinished inner done
+
+  setBlock inner
 
   let indexName = "block_index"
-  -- Whether the thread should operate in the single threaded mode of
-  -- zero-overhead parallel scans.
-  let seqName = "sequential_mode"
-  let seqMode = LocalReference type' seqName
   let index = LocalReference type' indexName
 
-  doWork seqMode index
+  -- Sequential mode needs to be false here, as it is only used in 
+  -- a scan operation and this scheduler is never used for scans
+  doWork (boolean False) index
 
 
   nextIndex <- atomicAdd Monotonic shard (integral TypeWord64 1)
-  condition <- A.lt singleType (OP_Word64 nextIndex) (OP_Word64 shardSize)
+  shardFinished <- A.lt singleType (OP_Word64 nextIndex) (OP_Word64 shardSize)
 
+  currentBlock <- getBlock
+  _ <- phi1 inner indexName [(firstIndex, entry), (nextIndex, currentBlock)]
 
+  _ <- cbr shardFinished inner done
 
+  setBlock done
 
-  -- firstIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
+  workIdx <- phi (TupRsingle scalarType) [(OP_Word64 firstIndex, entry), (OP_Word64 nextIndex, inner)]
+  incrementFinished <- A.eq singleType workIdx (OP_Word64 shardSize)
 
-  -- initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 size)
-  -- initialSeq <- eq singleType (OP_Word64 firstIndex) (liftWord64 0)
-  -- _ <- cbr initialCondition work exit
+  _ <- cbr incrementFinished finish start
+  
+  setBlock finish
 
-  -- _ <- setBlock work
-  -- let indexName = "block_index"
-  -- -- Whether the thread should operate in the single threaded mode of
-  -- -- zero-overhead parallel scans.
-  -- let seqName = "sequential_mode"
-  -- let seqMode = LocalReference type' seqName
-  -- let index = LocalReference type' indexName
+  _ <- atomicAdd Monotonic finishedShards (integral TypeWord64 1)
 
-  -- doWork seqMode index
-
-  -- nextIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
-  -- condition <- lt singleType (OP_Word64 nextIndex) (OP_Word64 size)
-  -- indexPlusOne <- add numType (OP_Word64 index) (liftWord64 1)
-  -- nextSeq' <- eq singleType indexPlusOne (OP_Word64 nextIndex)
-  -- -- Continue in sequential mode if the newly claimed block directly follows
-  -- -- the previous block, and we were still in the sequential mode.
-  -- nextSeq <- land nextSeq' (OP_Bool seqMode)
-
-  -- -- Append the phi node to the start of the 'work' block.
-  -- -- We can only do this now, as we need to have 'nextIndex', and know the
-  -- -- exit block of 'doWork'.
-  -- currentBlock <- getBlock
-  -- phi1 work indexName [(firstIndex, entry), (nextIndex, currentBlock)]
-  -- phi1 work seqName [(op BoolPrimType initialSeq, entry), (op BoolPrimType nextSeq, currentBlock)]
-
-  -- cbr condition work exit
+  _ <- br start
 
   setBlock exit
   retval_ $ scalar (scalarType @Word8) 0
