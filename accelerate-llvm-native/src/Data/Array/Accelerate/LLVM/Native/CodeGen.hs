@@ -138,8 +138,6 @@ codegen name env cluster args
 
           setBlock initBlock
           do
-            -- TODO: Remove it for now
-            initShards shardIndexes shardSizes (OP_Word64 tileCount)
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
             -- Decide whether tileCount is large enough
@@ -171,7 +169,7 @@ codegen name env cluster args
           -- only used in one tile loop. These arrays can also be stored as a
           -- single value.
           envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
-          workassistLoop shardIndexes shardSizes nextShard finishedShards tileCount $ \seqMode tileIdx' -> do
+          workassistLoop finishedShards tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
 
             tileIdxAbsolute <-
@@ -309,7 +307,7 @@ codegen name env cluster args
             if parallelDepth /= rank shr then []
             else if hasPermute then [Loop.LoopInterleave]
             else [Loop.LoopVectorize]
-      workassistChunked ann parallelShr shardIndexes shardSizes nextShard finishedShards tileSize parSizes $ \idx -> do
+      shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes nextShard finishedShards tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =

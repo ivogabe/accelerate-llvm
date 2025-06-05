@@ -96,18 +96,6 @@ void* accelerate_worker(void *data_packed) {
         unsigned char parallel =
           kernel->work_function(kernel, 0xFFFFFFFF);
 
-        for (int i = 0; i < SHARD_AMOUNT * CACHE_LINE_WIDTH / 8; i += CACHE_LINE_WIDTH / 8) {
-          printf("%d ", kernel->shards[i]);
-        }
-
-        printf("\n");
-
-        for (int i = 0; i < SHARD_AMOUNT; i++) {
-          printf("%d ", kernel->shard_sizes[i]);
-        }
-
-        printf("\n");
-
         // start_task from the Work Assisting paper
         if (parallel == 1) {
           atomic_store_explicit(&workers->scheduler.activities[thread_idx], accelerate_pack(kernel, 0), memory_order_release);
