@@ -193,6 +193,7 @@ workassistLoop shardIndexes shardSizes nextShard finishedShards tileCount doWork
   start    <- newBlock "workassist.shards.start"
   outer    <- newBlock "workassist.shards.outer"
   inner    <- newBlock "workassist.shards.inner"
+  work     <- newBlock "workassist.shards.work"
   done     <- newBlock "workassist.shards.done"
   finish   <- newBlock "workassist.shards.finish"
   exit     <- newBlock "workassist.exit"
@@ -215,36 +216,30 @@ workassistLoop shardIndexes shardSizes nextShard finishedShards tileCount doWork
 
   OP_Word64 shardIdx <- A.mul numType (A.liftWord64 cacheWidth) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
-  firstIndex <- atomicAdd Monotonic shard (integral TypeWord64 1)
   
   shardSizeIdx <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty
   shardSize <- instr' $ Load scalarType NonVolatile shardSizeIdx
 
-  shardAlreadyFinished <- A.lt singleType (OP_Word64 firstIndex) (OP_Word64 shardSize)
-
-  _ <- cbr shardAlreadyFinished inner done
+  _ <- br inner
 
   setBlock inner
+  
+  workIdx <- atomicAdd Monotonic shard (integral TypeWord64 1)
+  shardFinished <- A.lt singleType (OP_Word64 workIdx) (OP_Word64 shardSize)
 
-  let indexName = "block_index"
-  let index = LocalReference type' indexName
+  _ <- cbr shardFinished work done
+
+  setBlock work
 
   -- Sequential mode needs to be false here, as it is only used in 
   -- a scan operation and this scheduler is never used for scans
-  doWork (boolean False) index
+  doWork (boolean False) workIdx
 
-  nextIndex <- atomicAdd Monotonic shard (integral TypeWord64 1)
-  shardFinished <- A.lt singleType (OP_Word64 nextIndex) (OP_Word64 shardSize)
-
-  currentBlock <- getBlock
-  _ <- phi1 inner indexName [(firstIndex, outer), (nextIndex, currentBlock)]
-
-  _ <- cbr shardFinished inner done
+  _ <- br inner
 
   setBlock done
 
-  workIdx <- phi (TupRsingle scalarType) [(OP_Word64 firstIndex, outer), (OP_Word64 nextIndex, inner)]
-  incrementFinished <- A.eq singleType workIdx (OP_Word64 shardSize)
+  incrementFinished <- A.eq singleType (OP_Word64 workIdx) (OP_Word64 shardSize)
 
   _ <- cbr incrementFinished finish start
   
