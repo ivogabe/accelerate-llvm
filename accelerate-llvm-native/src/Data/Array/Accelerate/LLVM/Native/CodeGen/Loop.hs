@@ -214,7 +214,7 @@ workassistLoop shardIndexes shardSizes nextShard finishedShards tileCount doWork
   next <- atomicAdd Monotonic nextShard (integral TypeWord64 1)
   OP_Word64 shardToWorkOn <- A.rem TypeWord64 (OP_Word64 next) shardAmount'
 
-  OP_Word64 shardIdx <- A.mul numType (A.liftWord64 cacheWidth) (OP_Word64 shardToWorkOn)
+  OP_Word64 shardIdx <- A.mul numType (A.liftWord64 (cacheWidth `div` 8)) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
   
   shardSizeIdx <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty

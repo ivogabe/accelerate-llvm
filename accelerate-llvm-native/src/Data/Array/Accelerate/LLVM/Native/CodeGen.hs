@@ -338,16 +338,16 @@ initShards
   -> Operands Word64 -- Amount of tiles to be divided over the shards
   -> CodeGen Native ()
 initShards shardIndexes shardSizes tileCount = do
-  shardAmount' <- A.min (NumSingleType $ IntegralNumType TypeWord64) (A.liftWord64 shardAmount) tileCount
+  shardAmount' <- A.min singleType (A.liftWord64 shardAmount) tileCount
   (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 tileCount shardAmount'
-  OP_Word64 shardMaxSize <- A.add (IntegralNumType TypeWord64) (OP_Word64 shardMinSize) (OP_Word64 $ integral TypeWord64 1)
+  OP_Word64 shardMaxSize <- A.add numType (OP_Word64 shardMinSize) (OP_Word64 $ integral TypeWord64 1)
 
-  _ <- iterFromStepTo [] (TupRsingle $ SingleScalarType $ NumSingleType$ IntegralNumType TypeWord64) (A.liftWord64 0) (A.liftWord64 1) shardAmount' (A.liftWord64 0) (\(OP_Word64 i) (OP_Word64 shardStart) -> do
-      add1 <- A.lt (NumSingleType $ IntegralNumType TypeWord64) (OP_Word64 i) remainder
+  _ <- iterFromStepTo [] (TupRsingle scalarType) (A.liftWord64 0) (A.liftWord64 1) shardAmount' (A.liftWord64 0) (\(OP_Word64 i) (OP_Word64 shardStart) -> do
+      add1 <- A.lt singleType (OP_Word64 i) remainder
       shardSize <- instr' $ Select (A.unbool add1) shardMaxSize shardMinSize
-      OP_Word64 shardEnd <- A.add (IntegralNumType TypeWord64) (OP_Word64 shardSize) (OP_Word64 shardStart)
+      OP_Word64 shardEnd <- A.add numType (OP_Word64 shardSize) (OP_Word64 shardStart)
 
-      OP_Word64 idxCacheWidth <- A.mul (IntegralNumType TypeWord64) (OP_Word64 i) (A.liftWord64 cacheWidth)
+      OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 (cacheWidth `div` 8))
       shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
       _ <- instr' $ Store NonVolatile shardIdxArr shardStart
 
