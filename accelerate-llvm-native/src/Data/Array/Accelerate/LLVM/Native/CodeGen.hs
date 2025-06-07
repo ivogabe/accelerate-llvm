@@ -93,6 +93,8 @@ codegen name env cluster args
     -- This first call will initialize kernel memory (SEE: Kernel Memory)
     -- and decide whether the runtime may try to let multiple threads work on this kernel.
     initBlock <- newBlock "init"
+    initShardsBlock <- newBlock "init.shards"
+    initExitBlock <- newBlock "init.exit"
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
     _ <- switch (OP_Word64 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
@@ -284,19 +286,26 @@ codegen name env cluster args
       let parSizes = parallelIterSize parallelShr loops
 
       setBlock initBlock
-      do
-        tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
-        tileCount' <- shapeSize parallelShr tileCount
-
-        tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
-
-        initShards shardIndexes shardSizes tileCount64
-
+      
+      tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
+      tileCount' <- shapeSize parallelShr tileCount
+      zeroTiles <- A.eq singleType tileCount' (A.liftInt 0)
+      _ <- cbr zeroTiles initExitBlock initShardsBlock
+        
         -- We are not using kernel memory, so no need to initialize it.
 
-        OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
-        value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
-        retval_ value
+      setBlock initShardsBlock  
+      
+      tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
+      initShards shardIndexes shardSizes tileCount64
+      _ <- br initExitBlock
+
+      setBlock initExitBlock
+       
+      OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
+      value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
+
+      retval_ value
 
       setBlock finishBlock
       -- Nothing has to be done in the finish function for this kernel.
@@ -337,24 +346,26 @@ initShards
   -> CodeGen Native ()
 initShards shardIndexes shardSizes tileCount = do
   shardAmount' <- A.min singleType (A.liftWord64 shardAmount) tileCount
+  
   (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 tileCount shardAmount'
   OP_Word64 shardMaxSize <- A.add numType (OP_Word64 shardMinSize) (OP_Word64 $ integral TypeWord64 1)
 
   _ <- iterFromStepTo [] (TupRsingle scalarType) (A.liftWord64 0) (A.liftWord64 1) shardAmount' (A.liftWord64 0) (\(OP_Word64 i) (OP_Word64 shardStart) -> do
-      add1 <- A.lt singleType (OP_Word64 i) remainder
-      shardSize <- instr' $ Select (A.unbool add1) shardMaxSize shardMinSize
-      OP_Word64 shardEnd <- A.add numType (OP_Word64 shardSize) (OP_Word64 shardStart)
+    add1 <- A.lt singleType (OP_Word64 i) remainder
+    shardSize <- instr' $ Select (A.unbool add1) shardMaxSize shardMinSize
+    OP_Word64 shardEnd <- A.add numType (OP_Word64 shardSize) (OP_Word64 shardStart)
 
-      OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 (cacheWidth `div` 8))
-      shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
-      _ <- instr' $ Store NonVolatile shardIdxArr shardStart
+    OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 (cacheWidth `div` 8))
+    shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
+    _ <- instr' $ Store NonVolatile shardIdxArr shardStart
 
-      shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty
-      _ <- instr' $ Store NonVolatile shardSizeArray shardEnd
+    shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty
+    _ <- instr' $ Store NonVolatile shardSizeArray shardEnd
 
-      return $ OP_Word64 shardEnd
+    return $ OP_Word64 shardEnd
     )
   return ()
+      
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
 opCodeGen (FlatOp NGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
