@@ -204,7 +204,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards tileCount
 
   setBlock start
 
-  finishCount <- atomicAdd Monotonic finishedShards (integral TypeWord64 0) -- atomicLoad Monotonic finishedShards
+  finishCount <- atomicLoad Monotonic finishedShards
   finished <- A.lt singleType (OP_Word64 finishCount) shardAmount'
 
   _ <- cbr finished outer exit
@@ -386,7 +386,7 @@ atomicAdd ordering ptr increment = do
 
 atomicLoad :: MemoryOrdering -> Operand (Ptr Word64) -> CodeGen Native (Operand Word64)
 atomicLoad ordering ptr = do
-  instr' $ LoadAtomic scalarType NonVolatile ptr ordering
+  instr' $ LoadAtomic scalarType NonVolatile ptr ordering (Prelude.fromIntegral cacheWidth)
 
 ---- debugging tools ----
 putchar :: Operands Int -> CodeGen Native (Operands Int)
