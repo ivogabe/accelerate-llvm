@@ -35,7 +35,6 @@ import LLVM.AST.Type.Instruction.RMW                                as RMW
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Representation
 
-import Prelude
 import Data.Array.Accelerate.AST.Operation (Mut, Arg (ArgArray), Modifier (Mut))
 
 {-

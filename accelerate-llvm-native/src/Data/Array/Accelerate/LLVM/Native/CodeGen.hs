@@ -46,6 +46,7 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
+import Data.Array.Accelerate.LLVM.CodeGen.Default
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -221,7 +222,7 @@ codegen name env cluster args
                       envsIsFirst = isFirst,
                       envsTileLocalIndex = localIdx
                     }
-                  genSequential envs'''' loops $ ptIn tileLoop
+                  genSequential envs'''' loops' $ ptIn tileLoop
                 ptAfter tileLoop envs'''
                 return OP_Unit
               )
@@ -323,65 +324,17 @@ linkage :: Maybe LP.Linkage
 linkage = Just LP.DLLExport
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
-opCodeGen (FlatOp NGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    let idxs' = envsPrjIndices idxs envs
-    r <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) idxs'
-    writeArray' envs array idxs r
-  )
-opCodeGen (FlatOp NMap (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    x <- readArray' envs input idxs
-    r <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) x
-    writeArray' envs output idxs r
-  )
-opCodeGen (FlatOp NBackpermute (_ :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    -- Note that the index transformation (the function in the first argument)
-    -- is already executed and part of the idxEnv. The index transformation is
-    -- thus now given by 'inputIdx' and 'outputIdx'.
-    x <- readArray' envs input inputIdx
-    writeArray' envs output outputIdx x
-  )
+opCodeGen (FlatOp NGenerate args idxArgs) = defaultCodeGenGenerate args idxArgs
+opCodeGen (FlatOp NMap args idxArgs) = defaultCodeGenMap args idxArgs
+opCodeGen (FlatOp NBackpermute args idxArgs) = defaultCodeGenBackpermute args idxArgs
 opCodeGen (FlatOp NPermute
-    (ArgFun combine :>: output :>: locks :>: source :>: _)
-    (_ :>: _ :>: _ :>: IdxArgIdx depth sourceIdx :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    -- project element onto the destination array and (atomically) update
-    x' <- readArray' envs source sourceIdx
-    A.when (A.isJust x') $ do
-      let idxx = A.fromJust x'
-      let idx = A.fst idxx
-      let x = A.snd idxx
-      let sh' = envsPrjParameters (shapeExpVars shr sh) envs
-      j <- intOfIndex shr sh' idx
-      atomically envs locks j $ do
-        y <- readArray TypeInt envs output j
-        r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combine) x y
-        writeArray TypeInt envs output j r
-  )
-  where
-    ArgArray _ (ArrayR shr _) sh _ = output
-opCodeGen (FlatOp NPermute'
-    (output :>: source :>: _)
-    (_ :>: IdxArgIdx depth sourceIdx :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    x' <- readArray' envs source sourceIdx
-    A.when (A.isJust x') $ do
-      let idxx = A.fromJust x'
-      let idx = A.fst idxx
-      let x = A.snd idxx
-      let sh' = envsPrjParameters (shapeExpVars shr sh) envs
-      j <- intOfIndex shr sh' idx
-      writeArray TypeInt envs output j x
-  )
-  where
-    ArgArray _ (ArrayR shr _) sh _ = output
+    (combineFun :>: output :>: locks :>: source :>: _)
+    (i1 :>: i2 :>: _ :>: i3 :>: _)) =
+  defaultCodeGenPermute
+    (\envs j _ -> atomically envs locks $ OP_Int j)
+    (combineFun :>: output :>: source :>: ArgsNil)
+    (i1 :>: i2 :>: i3 :>: ArgsNil)
+opCodeGen (FlatOp NPermute' args idxArgs) = defaultCodeGenPermuteUnique args idxArgs
 opCodeGen flatOp@(FlatOp NFold (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _) (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
   ( depth
   , OpCodeGenLoop

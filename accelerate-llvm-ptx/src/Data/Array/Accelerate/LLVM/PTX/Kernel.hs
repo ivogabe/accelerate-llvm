@@ -131,12 +131,12 @@ instance PrettyKernel PTXKernel where
 
 operationName :: PTXOp t -> (Int, String, String)
 operationName = \case
-  -- PTXMap         -> (2, "map", "maps")
-  -- PTXBackpermute -> (1, "backpermute", "backpermutes")
+  PTXMap         -> (2, "map", "maps")
+  PTXBackpermute -> (1, "backpermute", "backpermutes")
   PTXGenerate    -> (2, "generate", "generates")
-  {- PTXPermute     -> (5, "permute", "permutes")
+  PTXPermute     -> (5, "permute", "permutes")
   PTXPermute'    -> (5, "permute", "permutes")
-  PTXScan LeftToRight
+  {-PTXScan LeftToRight
                -> (4, "scanl", "scanls")
   PTXScan RightToLeft
                -> (4, "scanr", "scanrs")
