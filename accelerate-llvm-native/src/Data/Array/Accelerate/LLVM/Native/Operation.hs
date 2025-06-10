@@ -341,7 +341,7 @@ instance MakesILP NativeOp where
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
       <> ILP.var (InDir c)      .==. ILP.var (OutDir c))
     fusionILP.bounds %= (<> defaultBounds c)
-    fusionILP.inplacePaths %= (<> mkUnitInplacePaths c lIn lOut)
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut)
 
   -- mkGraph l NMap (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) =
   --   Graph.Info
@@ -438,7 +438,7 @@ instance MakesILP NativeOp where
       <> ILP.var (InDir  c)     .==. ILP.int dir
       <> ILP.var (OutDir c)     .==. ILP.int dir)
     fusionILP.bounds %= (<> defaultBounds c)
-    fusionILP.inplacePaths %= (<> mkUnitInplacePaths c lIn lOut)
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut)
 
   -- mkGraph l (NScan1 dir) (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) =
   --   Graph.Info
@@ -464,7 +464,7 @@ instance MakesILP NativeOp where
       <> ILP.var (InDir  c)     .==. ILP.int dir
       <> ILP.var (OutDir c)     .==. ILP.int dir)
     fusionILP.bounds %= (<> defaultBounds c)
-    fusionILP.inplacePaths %= (<> mkUnitInplacePaths c lIn lOut1)
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut1)
 
   -- mkGraph l (NScan' dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: _ :>: ArgsNil) =
   --   Graph.Info
