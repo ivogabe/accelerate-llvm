@@ -221,7 +221,7 @@ codegen name env cluster args
                       envsIsFirst = isFirst,
                       envsTileLocalIndex = localIdx
                     }
-                  genSequential envs'''' loops $ ptIn tileLoop
+                  genSequential envs'''' loops' $ ptIn tileLoop
                 ptAfter tileLoop envs'''
                 return OP_Unit
               )
@@ -295,7 +295,7 @@ codegen name env cluster args
       retval_ $ scalar (scalarType @Word8) 0
 
       setBlock workBlock
-      let ann = 
+      let ann =
             if parallelDepth /= rank shr then []
             else if hasPermute then [Loop.LoopInterleave]
             else [Loop.LoopVectorize]
