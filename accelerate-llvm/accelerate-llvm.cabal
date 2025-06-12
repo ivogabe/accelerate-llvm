@@ -76,6 +76,7 @@ Library
     Data.Array.Accelerate.LLVM.CodeGen.Base
     Data.Array.Accelerate.LLVM.CodeGen.Cluster
     Data.Array.Accelerate.LLVM.CodeGen.Constant
+    Data.Array.Accelerate.LLVM.CodeGen.Default
     Data.Array.Accelerate.LLVM.CodeGen.Environment
     Data.Array.Accelerate.LLVM.CodeGen.Exp
     Data.Array.Accelerate.LLVM.CodeGen.IR

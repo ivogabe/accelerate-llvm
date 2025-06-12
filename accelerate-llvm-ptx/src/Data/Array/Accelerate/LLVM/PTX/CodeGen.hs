@@ -35,9 +35,11 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
+import Data.Array.Accelerate.LLVM.CodeGen.Default
 import Data.Array.Accelerate.LLVM.PTX.Operation
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Intrinsic ()
+import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute
 import Data.Array.Accelerate.LLVM.PTX.Foreign
 import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Maybe
@@ -109,10 +111,14 @@ codegen name env cluster args
     kernelDataRawType = PtrPrimType (ArrayPrimType 0 primType) defaultAddrSpace
 
 opCodeGen :: FlatOp PTXOp env idxEnv -> (LoopDepth, OpCodeGen PTX PTXOp env idxEnv)
-opCodeGen (FlatOp PTXGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    let idxs' = envsPrjIndices idxs envs
-    r <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) idxs'
-    writeArray' envs array idxs r
-  )
+opCodeGen (FlatOp PTXGenerate args idxArgs) = defaultCodeGenGenerate args idxArgs
+opCodeGen (FlatOp PTXMap args idxArgs) = defaultCodeGenMap args idxArgs
+opCodeGen (FlatOp PTXBackpermute args idxArgs) = defaultCodeGenBackpermute args idxArgs
+opCodeGen (FlatOp PTXPermute
+    (combineFun :>: output :>: locks :>: source :>: _)
+    (i1 :>: i2 :>: _ :>: i3 :>: _)) =
+  defaultCodeGenPermute
+    (\envs j _ -> atomically envs locks $ OP_Int j)
+    (combineFun :>: output :>: source :>: ArgsNil)
+    (i1 :>: i2 :>: i3 :>: ArgsNil)
+opCodeGen (FlatOp PTXPermute' args idxArgs) = defaultCodeGenPermuteUnique args idxArgs

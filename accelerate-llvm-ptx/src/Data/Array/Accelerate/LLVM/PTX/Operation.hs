@@ -47,7 +47,7 @@ import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken, LHS (..), mkLHS)
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
-import Data.Array.Accelerate.Type (scalarType, Word8, scalarTypeWord8, scalarTypeInt, singleType)
+import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Analysis.Match
 import Data.Maybe (isJust)
 import Data.Array.Accelerate.Interpreter (InOut (..))
@@ -65,18 +65,18 @@ import Data.Array.Accelerate.Pretty.Exp (Val (Push))
 import Unsafe.Coerce (unsafeCoerce)
 
 data PTXOp t where
-  -- PTXMap       :: PTXOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
-  -- PTXBackpermute :: PTXOp (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
+  PTXMap       :: PTXOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
+  PTXBackpermute :: PTXOp (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
   PTXGenerate  :: PTXOp (Fun' (sh -> t)              -> Out sh  t -> ())
-  {- PTXPermute   :: PTXOp (Fun' (e -> e -> e)
+  PTXPermute   :: PTXOp (Fun' (e -> e -> e)
                          -> Mut sh' e
-                         -> Mut sh' Word8
+                         -> Mut sh' Word32
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
   PTXPermute'  :: PTXOp (Mut sh' e
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
-  PTXScan      :: Direction
+  {- PTXScan      :: Direction
                -> PTXOp (Fun' (e -> e -> e)
                          -> Exp' e
                          -> In (sh, Int) e
@@ -105,12 +105,12 @@ data PTXOp t where
                          -> ()) -}
 
 instance PrettyOp PTXOp where
-  --prettyOp PTXMap         = "map"
-  --prettyOp PTXBackpermute = "backpermute"
+  prettyOp PTXMap         = "map"
+  prettyOp PTXBackpermute = "backpermute"
   prettyOp PTXGenerate    = "generate"
-  {-prettyOp PTXPermute     = "permute"
+  prettyOp PTXPermute     = "permute"
   prettyOp PTXPermute'    = "permuteUnique"
-  prettyOp (PTXScan dir) = case dir of
+  {- prettyOp (PTXScan dir) = case dir of
     LeftToRight -> "scanl"
     RightToLeft -> "scanr"
   prettyOp (PTXScan1 dir) = case dir of
@@ -126,52 +126,52 @@ instance NFData' PTXOp where
   rnf' !_ = ()
 
 instance DesugarAcc PTXOp where
-  -- mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
-  -- mkBackpermute a b c   = Exec PTXBackpermute (a :>: b :>: c :>:       ArgsNil)
+  mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
+  mkBackpermute a b c   = Exec PTXBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec PTXGenerate    (a :>: b :>:             ArgsNil)
   {- mkScan dir f (Just seed) i@(ArgArray In (ArrayR shr ty) sh buf) o
     = Exec (PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
   mkScan dir f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
     = Exec (PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
-    = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
+    = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)-}
   mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
-    | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord8
+    | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord32
     = aletUnique lhs 
-        (Alloc shr scalarTypeWord8 $ groundToExpVar (shapeType shr) sh)
+        (Alloc shr scalarTypeWord32 $ groundToExpVar (shapeType shr) sh)
         $ alet LeftHandSideUnit
           (Exec PTXGenerate ( -- TODO: The old pipeline used a 'memset 0' instead, which sounds faster...
-                ArgFun (Lam (LeftHandSideWildcard (shapeType shr)) $ Body $ Const scalarTypeWord8 0)
-            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId) 
+                ArgFun (Lam (LeftHandSideWildcard (shapeType shr)) $ Body $ Const scalarTypeWord32 0)
+            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId) 
             :>: ArgsNil))
           (Exec PTXPermute (
                 weaken w a 
             :>: weaken w b 
-            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId) 
+            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId) 
             :>: weaken w c 
             :>: ArgsNil))
   mkPermute Nothing a b = Exec PTXPermute' (a :>: b :>: ArgsNil)
-  mkFold a (Just seed) b c = Exec PTXFold (a :>: seed :>: b :>: c :>: ArgsNil)
+  {-mkFold a (Just seed) b c = Exec PTXFold (a :>: seed :>: b :>: c :>: ArgsNil)
   mkFold a Nothing b c = Exec PTXFold1 (a :>: b :>: c :>: ArgsNil) -}
 
 instance SimplifyOperation PTXOp where
-  -- detectCopy PTXMap         = detectMapCopies
-  -- detectCopy PTXBackpermute = detectBackpermuteCopies
+  detectCopy PTXMap         = detectMapCopies
+  detectCopy PTXBackpermute = detectBackpermuteCopies
   detectCopy _              = const []
 
 instance SLVOperation PTXOp where
   slvOperation PTXGenerate    = defaultSlvGenerate    PTXGenerate
-  -- slvOperation PTXMap         = defaultSlvMap         PTXMap
-  -- slvOperation PTXBackpermute = defaultSlvBackpermute PTXBackpermute
+  slvOperation PTXMap         = defaultSlvMap         PTXMap
+  slvOperation PTXBackpermute = defaultSlvBackpermute PTXBackpermute
   slvOperation _ = Nothing
 
 instance EncodeOperation PTXOp where
-  --encodeOperation PTXMap         = intHost $(hashQ ("Map" :: String))
-  --encodeOperation PTXBackpermute = intHost $(hashQ ("Backpermute" :: String))
+  encodeOperation PTXMap         = intHost $(hashQ ("Map" :: String))
+  encodeOperation PTXBackpermute = intHost $(hashQ ("Backpermute" :: String))
   encodeOperation PTXGenerate    = intHost $(hashQ ("Generate" :: String))
-  {-encodeOperation PTXPermute     = intHost $(hashQ ("Permute" :: String))
+  encodeOperation PTXPermute     = intHost $(hashQ ("Permute" :: String))
   encodeOperation PTXPermute'    = intHost $(hashQ ("Permute'" :: String))
-  encodeOperation (PTXScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
+  {-encodeOperation (PTXScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
   encodeOperation (PTXScan RightToLeft)  = intHost $(hashQ ("Scanr" :: String))
   encodeOperation (PTXScan1 LeftToRight) = intHost $(hashQ ("Scanl1" :: String))
   encodeOperation (PTXScan1 RightToLeft) = intHost $(hashQ ("Scanr1" :: String))
@@ -182,11 +182,11 @@ instance EncodeOperation PTXOp where
 
 instance SetOpIndices PTXOp where
   setOpIndices _ PTXGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
-  {-setOpIndices _ PTXMap _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  setOpIndices _ PTXMap _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
   setOpIndices _ PTXMap _ _ = error "Missing indices for PTXMap"
   setOpIndices _ PTXBackpermute _ _ = Just $ Left IsBackpermute
-  setOpIndices _ (PTXScan _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  {-setOpIndices _ (PTXScan _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     -- Annotate the input with an index.
     -- Don't annotate the output. We don't fuse over the output of a normal scan,
     -- as the output of a scan is one longer than the input.
@@ -212,7 +212,7 @@ instance SetOpIndices PTXOp where
       IdxArgNone :>: IdxArgIdx (d + 1) (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx d i :>: ArgsNil
     | otherwise
     = Nothing
-  setOpIndices _ PTXFold1 _ _ = error "Missing indices for PTXFold1"
+  setOpIndices _ PTXFold1 _ _ = error "Missing indices for PTXFold1" -}
   setOpIndices indexVar PTXPermute (_ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
@@ -240,7 +240,7 @@ instance SetOpIndices PTXOp where
         | Just a <- findIndex shr'
         , Just b <- indexVar (rank shr')
         = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
-        | otherwise = Nothing-}
+        | otherwise = Nothing
 
   {- getOpLoopDirections (PTXScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
@@ -292,7 +292,7 @@ instance MakesILP PTXOp where
   defaultBA = 0
   data BackendClusterArg PTXOp a = BCAN
 
-  {- mkGraph PTXBackpermute (_ :>: L (ArgArray In (ArrayR _shrI _) _ _) (_, lIns) :>: L (ArgArray Out (ArrayR shrO _) _ _) _ :>: ArgsNil) l@(Label i _) =
+  mkGraph PTXBackpermute (_ :>: L (ArgArray In (ArrayR _shrI _) _ _) (_, lIns) :>: L (ArgArray Out (ArrayR shrO _) _ _) _ :>: ArgsNil) l@(Label i _) =
     Graph.Info
       mempty
       (    inputConstraints l lIns
@@ -306,13 +306,13 @@ instance MakesILP PTXOp where
           -- problem: this clashes with the assumption in 'inputConstraints' and 'finalise' that orders are at most n,
           -- so if we want this we need to change inputConstraints and finalise
         )-- <> c (InDims l) .+. int (rank shrO) .==. c (OutDims l) .+. int (rank shrI))
-      (defaultBounds l) -}
+      (defaultBounds l)
   mkGraph PTXGenerate (_ :>: L (ArgArray Out (ArrayR shr _) _ _) _ :>: ArgsNil) l =
     Graph.Info
       mempty
       (outrankifmanifest shr l)
       (defaultBounds l)
-  {- mkGraph PTXMap (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
+  mkGraph PTXMap (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
     Graph.Info
       mempty
       (    inputConstraints l lIns
@@ -341,7 +341,7 @@ instance MakesILP PTXOp where
         <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
       ( lower (-2) (InDir l)
       <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). 
-  mkGraph (PTXScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
+  {-mkGraph (PTXScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
     Graph.Info
       -- Scan cannot fuse with its consumer, as the output is one larger than the input
       mempty
