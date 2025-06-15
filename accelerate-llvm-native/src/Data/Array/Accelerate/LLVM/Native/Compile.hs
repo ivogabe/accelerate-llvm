@@ -203,14 +203,16 @@ compile uid name module' = do
         dDumpAsm <- Debug.getFlag Debug.dump_asm
 
         let clangFlags inputType outputFlags output =
-              ["-O3", "-march=native", "-c", "-o", output, "-x", inputType, "-"
+              -- '-O3' is ignored when only assembling; let's avoid clang warning about that
+              (if inputType == "assembler" then [] else ["-O3"]) ++
+              ["-march=native", "-c", "-o", output, "-x", inputType, "-"
               -- clang knows better what the target triple (and the data
               -- layout) should be than us, so let it override the triple, and
               -- don't warn about it
               -- TODO: change llvm-pretty so that it doesn't require us to give
               -- it a target triple
-              ,"-Wno-override-module"]
-              ++ outputFlags
+              ,"-Wno-override-module"] ++
+              outputFlags
 
         let linkOutputFlags | Info.os == "mingw32" = []
                             | otherwise = ["-fPIC"]
@@ -264,6 +266,10 @@ compile uid name module' = do
         -- directly, so shell out to the system linker to do this.
         --
         if Info.os == "darwin"
+          -- TODO: should we pass -lm on Darwin too? Seems likely. (The -lm on
+          -- Linux was added to properly declare dependency on libm, so that it
+          -- gets pulled in even if the main executable is statically-linked and
+          -- thus does not have a dynamic libm in its address space.)
           then callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-undefined", "dynamic_lookup"]
           else callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-lm"]
         Debug.traceM Debug.dump_cc ("cc: new shared object " % shown) uid
