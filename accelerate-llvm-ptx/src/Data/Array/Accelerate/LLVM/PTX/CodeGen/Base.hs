@@ -754,7 +754,7 @@ alignTo align ptr = do
 -- Requires compute capability >= 7.0
 --
 nanosleep :: Operands Int32 -> CodeGen PTX ()
-nanosleep ns =
+nanosleep ns = do
   -- This is an acc prelude function because it requires inline assembly, and
   -- llvm-pretty does not yet support caling inline assembly snippets. Thus we
   -- manually wrap the assembly in an inlineable function and call that.

@@ -52,6 +52,7 @@ import Data.ByteString.Short                                        ( ShortByteS
 import Data.List                                                    ( intercalate )
 import qualified Data.List.NonEmpty                                 as NE
 import Data.Foldable                                                ( toList )
+import qualified Data.ByteString.Short.Char8                        as SBS8
 import GHC.IO.Exception                                             ( IOErrorType(OtherError) )
 import Formatting
 import System.Directory
