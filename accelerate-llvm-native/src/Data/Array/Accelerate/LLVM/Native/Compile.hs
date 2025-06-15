@@ -134,9 +134,13 @@ compile uid name module' = do
         -- directly, so shell out to the system linker to do this.
         --
 #if defined(darwin_HOST_OS)
+        -- TODO: should we pass -lm on Darwin too? Seems likely. (The -lm on
+        -- Linux was added to properly declare dependency on libm, so that it
+        -- gets pulled in even if the main executable is statically-linked and
+        -- thus does not have a dynamic libm in its address space.)
         callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-undefined", "dynamic_lookup"]
 #else
-        callProcess ld ["--shared", "-o", sharedObjFile, objFile]
+        callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-lm"]
 #endif
         Debug.traceM Debug.dump_cc ("cc: new shared object " % shown) uid
 
@@ -261,7 +265,7 @@ compile uid name module' = do
         --
         if Info.os == "darwin"
           then callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-undefined", "dynamic_lookup"]
-          else callProcess ld ["--shared", "-o", sharedObjFile, objFile]
+          else callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-lm"]
         Debug.traceM Debug.dump_cc ("cc: new shared object " % shown) uid
 
     return sharedObjFile
