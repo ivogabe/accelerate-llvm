@@ -448,8 +448,8 @@ instance Downcast (Instruction a) LP.Instr where
     IntToFP a b x         -> int2float a b (downcast x)
     BitCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
     PtrCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
-    Phi t e               -> LP.Phi (fmfFor t) (map (bimap (LP.typedValue . downcast) (LP.Named . labelToPrettyI)) e)
-    Select p x y          -> LP.Select (fmfFor p) (downcast x) (LP.typedValue (downcast y))
+    Phi t e               -> LP.Phi (fmfFor t) (downcast t) (map (bimap (LP.typedValue . downcast) (LP.Named . labelToPrettyI)) e)
+    Select p x y          -> LP.Select (fmfFor $ typeOf x) (downcast p) (downcast x) (LP.typedValue (downcast y))
     IsNaN _ x             -> isNaN (downcast x)
     Cmp t p x y           -> cmp t p (downcast x) (downcast y)
     Call f args           -> call f args
