@@ -44,6 +44,7 @@ import qualified Text.LLVM                                as LP
 
 import Data.Array.Accelerate.AST                          ( PrimBool )
 import Data.Array.Accelerate.AST.Idx
+import qualified Data.Array.Accelerate.Debug.Internal     as Debug
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Type
 import Data.Primitive.Vec
@@ -51,6 +52,7 @@ import Data.Primitive.Vec
 import Prelude                                            hiding ( Ordering(..), quot, rem, div, isNaN, tail )
 import Data.Bifunctor                                     ( bimap )
 import Data.Maybe                                         ( fromMaybe )
+import System.IO.Unsafe                                   ( unsafePerformIO )
 
 -- | Non-terminating instructions
 --
@@ -411,7 +413,7 @@ instance Downcast (Instruction a) LP.Instr where
     Mul t x y             -> mul t (downcast x) (downcast y)
     Quot t x y            -> quot t (downcast x) (downcast y)
     Rem t x y             -> rem t (downcast x) (downcast y)
-    Div _ x y             -> LP.Arith LP.FDiv (downcast x) (LP.typedValue (downcast y))
+    Div _ x y             -> LP.Arith (LP.FDiv fmf) (downcast x) (LP.typedValue (downcast y))
     ShiftL _ x i          -> LP.Bit (LP.Shl nsw nuw) (downcast x) (LP.typedValue (downcast i))
     ShiftRL _ x i         -> LP.Bit (LP.Lshr exact) (downcast x) (LP.typedValue (downcast i))
     ShiftRA _ x i         -> LP.Bit (LP.Ashr exact) (downcast x) (LP.typedValue (downcast i))
@@ -454,8 +456,8 @@ instance Downcast (Instruction a) LP.Instr where
     IntToFP a b x         -> int2float a b (downcast x)
     BitCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
     PtrCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
-    Phi t e               -> LP.Phi (downcast t) (map (bimap (LP.typedValue . downcast) (LP.Named . labelToPrettyI)) e)
-    Select p x y          -> LP.Select (downcast p) (downcast x) (LP.typedValue (downcast y))
+    Phi t e               -> LP.Phi (fmfFor t) (downcast t) (map (bimap (LP.typedValue . downcast) (LP.Named . labelToPrettyI)) e)
+    Select p x y          -> LP.Select (fmfFor $ typeOf x) (downcast p) (downcast x) (LP.typedValue (downcast y))
     IsNaN _ x             -> isNaN (downcast x)
     Cmp t p x y           -> cmp t p (downcast x) (downcast y)
     Call f args           -> call f args
@@ -469,6 +471,9 @@ instance Downcast (Instruction a) LP.Instr where
 
       exact :: Bool     -- does not lose any information
       exact = False
+
+      fmf :: [LP.FMF]
+      fmf = fastmathFlags
 
       inbounds :: Bool
       inbounds = True
@@ -498,15 +503,15 @@ instance Downcast (Instruction a) LP.Instr where
 
       add :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       add IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Add nsw nuw) x y
-      add FloatingNumType{} x (LP.Typed _ y) = LP.Arith LP.FAdd x y
+      add FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FAdd fmf)    x y
 
       sub :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       sub IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Sub nsw nuw) x y
-      sub FloatingNumType{} x (LP.Typed _ y) = LP.Arith LP.FSub          x y
+      sub FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FSub fmf)    x y
 
       mul :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       mul IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Mul nsw nuw) x y
-      mul FloatingNumType{} x (LP.Typed _ y) = LP.Arith LP.FMul          x y
+      mul FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FMul fmf)    x y
 
       quot :: IntegralType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       quot t x (LP.Typed _ y)
@@ -546,12 +551,12 @@ instance Downcast (Instruction a) LP.Instr where
         | otherwise = LP.Conv LP.UiToFp x b
 
       isNaN :: LP.Typed LP.Value -> LP.Instr
-      isNaN x = LP.FCmp LP.Funo x (LP.typedValue x)
+      isNaN x = LP.FCmp fmf LP.Funo x (LP.typedValue x)
 
       cmp :: SingleType a -> Ordering -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       cmp t p x (LP.Typed _ y) =
         case t of
-          NumSingleType FloatingNumType{} -> LP.FCmp (fp p) x y
+          NumSingleType FloatingNumType{} -> LP.FCmp fastmathFlags (fp p) x y
           _ | signed t                    -> LP.ICmp (si p) x y
             | otherwise                   -> LP.ICmp (ui p) x y
         where
@@ -584,31 +589,32 @@ instance Downcast (Instruction a) LP.Instr where
       pointeeType _ = internalError "Ptr impossible"
 
       call :: Function Callable t -> Arguments t -> LP.Instr
-      call f args = LP.Call tail fun_ty target $ travArgs args
+      call f args = LP.Call tail fmFlags fun_ty target $ travArgs args
         where
           trav :: Function Callable t
-               -> ( [LP.Type]                                 -- argument types
-                  , Bool                                      -- tail call?
-                  , LP.Type                                   -- return type
-                  , LP.Value                                  -- function name or inline assembly
+               -> ( [LP.Type]           -- argument types
+                  , Bool                -- tail call?
+                  , LP.Type             -- return type
+                  , [LP.FMF]            -- fast-math flags for this return type
+                  , LP.Value            -- function name or inline assembly
                   )
           trav (Body u k o) =
             case o of
               CallAssembly asm -> error "TODO inline assembly"
                 -- ([], downcast k, downcast u, Left  (downcast (LLVM.FunctionType ret argt False, asm)))
-              CallGlobal n -> ([], fromMaybe False (downcast k), downcast u, LP.ValSymbol (labelToPrettyS n))
-              CallLocal n  -> ([], fromMaybe False (downcast k), downcast u, LP.ValIdent (labelToPrettyI n))
+              CallGlobal n -> ([], fromMaybe False (downcast k), downcast u, fmfFor u, LP.ValSymbol (labelToPrettyS n))
+              CallLocal n  -> ([], fromMaybe False (downcast k), downcast u, fmfFor u, LP.ValIdent (labelToPrettyI n))
           trav (Lam t _ l)  =
-            let (ts, k, r, n) = trav l
-            in  (downcast t : ts, k, r, n)
+            let (ts, k, r, fm, n) = trav l
+            in  (downcast t : ts, k, r, fm, n)
 
           travArgs :: Arguments t -> [LP.Typed LP.Value]
           -- TODO: Place the attrs on the argument, when llvm-pretty supports that
           travArgs (ArgumentsCons operand attrs args') = downcast operand : travArgs args'
           travArgs ArgumentsNil = []
 
-          (argt, tail, ret, target) = trav f
-          fun_ty                    = LP.FunTy ret argt False
+          (argt, tail, ret, fmFlags, target) = trav f
+          fun_ty = LP.FunTy ret argt False
 
 
 instance Downcast (Named Instruction a) LP.Stmt where
@@ -705,3 +711,42 @@ instance TypeOf Instruction where
 -- This function is not in GetElementPtr.hs as that would cause a cycle.
 gepStruct :: PrimType b -> Operand (Ptr (Struct a)) -> TupleIdx a b -> GetElementPtr Operand (Ptr (Struct a)) (Ptr b)
 gepStruct tp struct idx = GEP struct (ConstantOperand $ ScalarConstant scalarTypeInt32 0) $ GEPStruct tp idx GEPEmpty
+
+{-# NOINLINE fmfEnabled #-}
+fmfEnabled :: Bool
+fmfEnabled = unsafePerformIO $ Debug.getFlag Debug.fast_math
+
+fastmathFlags :: [LP.FMF]
+fastmathFlags
+  -- We explicitly exclude 'nnan' and 'ninf' from this list, because apparently
+  -- we care about NaN and Inf values:
+  --   <https://github.com/AccelerateHS/accelerate/issues/407>
+  | fmfEnabled = [LP.Fnsz, LP.Farcp, LP.Fcontract, LP.Fafn, LP.Freassoc]
+  | otherwise  = []
+
+-- | Some LLVM instructions allow fast math flags only if their return type is
+-- a "compatible floating-point type". This class returns fast-math flags given
+-- such a return type.
+class FmfFor s where
+  fmfFor :: s a -> [LP.FMF]
+
+instance FmfFor PrimType where
+  fmfFor BoolPrimType = []
+  fmfFor (ScalarPrimType t) = fmfFor t
+  fmfFor PtrPrimType{} = []
+  fmfFor (ArrayPrimType _ t) = fmfFor t
+  fmfFor StructPrimType{} = []  -- TODO: homogeneous float structs are allowed by LLVM
+  fmfFor NamedPrimType{} = []
+
+instance FmfFor ScalarType where
+  fmfFor (SingleScalarType st) = fmfFor st
+  fmfFor (VectorScalarType (VectorType _ st)) = fmfFor st
+
+instance FmfFor SingleType where
+  fmfFor (NumSingleType (IntegralNumType _)) = []
+  fmfFor (NumSingleType (FloatingNumType _)) = fastmathFlags
+
+instance FmfFor Type where
+  fmfFor VoidType = []
+  fmfFor (PrimType t) = fmfFor t
+

@@ -63,7 +63,7 @@ loadSharedObject nm path = do
   sym <- dlsym so s
   object_code <- newLifetime so
   addFinalizer object_code $ do
-    -- XXX: Should we disable unloading objects in debug mode? Tracy might
+    -- XXX: Should we disable unloading objects in tracy mode? Tracy might
     -- still need access to e.g. embedded string data
     Debug.traceM Debug.dump_gc ("gc: unload module: " % string) (B8.unpack nm)
     dlclose so
