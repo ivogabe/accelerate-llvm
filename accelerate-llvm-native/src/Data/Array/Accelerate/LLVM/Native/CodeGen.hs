@@ -98,6 +98,8 @@ codegen name env cluster args
     initExitBlock <- newBlock "init.exit"
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
+    shardWorkBlock <- newBlock "work.shards"
+    workAssistBlock <- newBlock "work.workassist"
     _ <- switch (OP_Word64 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
 
@@ -290,12 +292,12 @@ codegen name env cluster args
       
       tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
       tileCount' <- shapeSize parallelShr tileCount
-      zeroTiles <- A.eq singleType tileCount' (A.liftInt 0)
-      _ <- cbr zeroTiles initExitBlock initShardsBlock
-        
-        -- We are not using kernel memory, so no need to initialize it.
+      enoughTiles <- A.gt singleType tileCount' (A.liftInt $ fromIntegral shardAmount)
+      _ <- cbr enoughTiles initShardsBlock initExitBlock
+      
+      -- We are not using kernel memory, so no need to initialize it.
 
-      setBlock initShardsBlock  
+      setBlock initShardsBlock
       
       tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
       initShards shardIndexes shardSizes tileCount64
@@ -317,7 +319,29 @@ codegen name env cluster args
             if parallelDepth /= rank shr then []
             else if hasPermute then [Loop.LoopInterleave]
             else [Loop.LoopVectorize]
-      shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes nextShard finishedShards tileSize parSizes $ \idx -> do
+
+      tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
+      tileCount' <- shapeSize parallelShr tileCount
+      enoughTiles <- A.gt singleType tileCount' (A.liftInt $ fromIntegral shardAmount)
+      _ <- cbr enoughTiles shardWorkBlock workAssistBlock
+
+      setBlock shardWorkBlock
+
+      shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes nextShard finishedShards tileSize parSizes tileCount $ \idx -> do
+        let envs' = envs{
+            envsLoopDepth = parallelDepth,
+            envsIdx =
+              foldr (\(o, i) -> Env.partialUpdate o i) (envsIdx envs)
+              $ zip (shapeOperandsToList parallelShr idx) (map (\(i, _, _) -> i) loops),
+            -- Independent operations should not depend on envsIsFirst.
+            envsIsFirst = OP_Bool $ boolean False,
+            envsDescending = False
+          }
+        genSequential envs' (drop parallelDepth loops) $ opCodeGens opCodeGen flatOps
+
+      setBlock workAssistBlock
+
+      workassistChunked ann parallelShr finishedShards tileSize parSizes tileCount tileCount' $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -346,11 +370,10 @@ initShards
   -> Operands Word64 -- Amount of tiles to be divided over the shards
   -> CodeGen Native ()
 initShards shardIndexes shardSizes tileCount = do
-  shardAmount' <- A.min singleType (A.liftWord64 shardAmount) tileCount
   
-  (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 tileCount shardAmount'
+  (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 tileCount (A.liftWord64 shardAmount)
 
-  imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) shardAmount' (\(OP_Word64 i) -> do
+  imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
     shardStart <- A.mul numType (OP_Word64 i) (OP_Word64 shardMinSize)
     addRemainder <- A.min singleType (OP_Word64 i) remainder
     OP_Word64 shard <- A.add numType shardStart addRemainder 
@@ -362,7 +385,7 @@ initShards shardIndexes shardSizes tileCount = do
     return ()
     )
 
-  imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) shardAmount' (\(OP_Word64 i) -> do
+  imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
     indexPlus1 <- A.add numType (OP_Word64 i) (A.liftWord64 1)
     shardStart <- A.mul numType indexPlus1 (OP_Word64 shardMinSize)
     addRemainder <- A.min singleType indexPlus1 remainder

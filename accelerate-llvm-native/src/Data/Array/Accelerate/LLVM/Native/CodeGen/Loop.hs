@@ -38,7 +38,6 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.Volatile
 import qualified LLVM.AST.Type.Instruction.RMW as RMW
-import Control.Monad.Trans
 import Control.Monad.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import LLVM.AST.Type.Function
@@ -185,11 +184,9 @@ shardedSelfScheduling
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- next shard to work on
     -> Operand (Ptr Word64)                 -- finished shards
-    -> Operand Word64                       -- size of total work
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards tileCount doWork = do
-  entry    <- getBlock
+shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards doWork = do
   start    <- newBlock "workassist.shards.start"
   outer    <- newBlock "workassist.shards.outer"
   inner    <- newBlock "workassist.shards.inner"
@@ -198,21 +195,19 @@ shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards tileCount
   finish   <- newBlock "workassist.shards.finish"
   exit     <- newBlock "workassist.exit"
 
-  -- TODO: Reuse from init
-  shardAmount' <- A.min singleType (A.liftWord64 shardAmount) (OP_Word64 tileCount)
   _ <- br start
 
   setBlock start
 
   finishCount <- atomicLoad Monotonic finishedShards
-  finished <- A.lt singleType (OP_Word64 finishCount) shardAmount'
+  finished <- A.lt singleType (OP_Word64 finishCount) (A.liftWord64 shardAmount)
 
   _ <- cbr finished outer exit
 
   setBlock outer
 
   next <- atomicAdd Monotonic nextShard (integral TypeWord64 1)
-  OP_Word64 shardToWorkOn <- A.rem TypeWord64 (OP_Word64 next) shardAmount'
+  OP_Word64 shardToWorkOn <- A.rem TypeWord64 (OP_Word64 next) (A.liftWord64 shardAmount)
 
   OP_Word64 shardIdx <- A.mul numType (A.liftWord64 (cacheWidth `div` 8)) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
@@ -260,15 +255,13 @@ shardedSelfSchedulingChunked
     -> Operand (Ptr Word64)                 -- next shard to work on
     -> Operand (Ptr Word64)                 -- finished shards
     -> sh 
-    -> Operands sh 
+    -> Operands sh
+    -> Operands sh
     -> (Operands sh -> CodeGen Native ()) 
     -> CodeGen Native ()
-shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShard finishedShards chunkSz' sh doWork = do
+shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShard finishedShards chunkSz' sh chunkCounts doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
-  chunkCounts <- chunkCount shr sh chunkSz
-  chunkCnt <- shapeSize shr chunkCounts
-  chunkCnt' :: Operand Word64 <- instr' $ BitCast scalarType $ op TypeInt chunkCnt
-  shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards chunkCnt' $ \_ chunkLinearIndex -> do
+  shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards $ \_ chunkLinearIndex -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex
@@ -280,16 +273,14 @@ workassistLoop
     -> Operand Word64                       -- size of total work
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-workassistLoop counter size doWork = do
+workassistLoop counter workSize doWork = do
   entry    <- getBlock
   work     <- newBlock "workassist.loop.work"
-  claimed  <- newBlock "workassist.all.claimed"
   exit     <- newBlock "workassist.exit"
-  finished <- newBlock "workassist.finished"
 
   firstIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
 
-  initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 size)
+  initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 workSize)
   initialSeq <- eq singleType (OP_Word64 firstIndex) (liftWord64 0)
   _ <- cbr initialCondition work exit
 
@@ -304,7 +295,7 @@ workassistLoop counter size doWork = do
   doWork seqMode index
 
   nextIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
-  condition <- lt singleType (OP_Word64 nextIndex) (OP_Word64 size)
+  condition <- lt singleType (OP_Word64 nextIndex) (OP_Word64 workSize)
   indexPlusOne <- add numType (OP_Word64 index) (liftWord64 1)
   nextSeq' <- eq singleType indexPlusOne (OP_Word64 nextIndex)
   -- Continue in sequential mode if the newly claimed block directly follows
@@ -315,19 +306,26 @@ workassistLoop counter size doWork = do
   -- We can only do this now, as we need to have 'nextIndex', and know the
   -- exit block of 'doWork'.
   currentBlock <- getBlock
-  phi1 work indexName [(firstIndex, entry), (nextIndex, currentBlock)]
-  phi1 work seqName [(op BoolPrimType initialSeq, entry), (op BoolPrimType nextSeq, currentBlock)]
+  _ <- phi1 work indexName [(firstIndex, entry), (nextIndex, currentBlock)]
+  _ <- phi1 work seqName [(op BoolPrimType initialSeq, entry), (op BoolPrimType nextSeq, currentBlock)]
 
-  cbr condition work exit
+  _ <- cbr condition work exit
 
   setBlock exit
   retval_ $ scalar (scalarType @Word8) 0
 
-workassistChunked :: [Loop.LoopAnnotation] -> ShapeR sh -> Operand (Ptr Word64) -> sh -> Operands sh -> (Operands sh -> CodeGen Native ()) -> CodeGen Native ()
-workassistChunked ann shr counter chunkSz' sh doWork = do
+workassistChunked 
+    :: [Loop.LoopAnnotation] 
+    -> ShapeR sh 
+    -> Operand (Ptr Word64) 
+    -> sh 
+    -> Operands sh 
+    -> Operands sh
+    -> Operands Int
+    -> (Operands sh -> CodeGen Native ()) 
+    -> CodeGen Native ()
+workassistChunked ann shr counter chunkSz' sh chunkCounts chunkCnt doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
-  chunkCounts <- chunkCount shr sh chunkSz
-  chunkCnt <- shapeSize shr chunkCounts
   chunkCnt' :: Operand Word64 <- instr' $ BitCast scalarType $ op TypeInt chunkCnt
   workassistLoop counter chunkCnt' $ \_ chunkLinearIndex -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
@@ -342,10 +340,9 @@ chunkSizeOne (ShapeRsnoc sh) = (chunkSizeOne sh, 1)
 
 chunkSize :: ShapeR sh -> sh
 chunkSize ShapeRz = ()
-chunkSize (ShapeRsnoc ShapeRz) = ((), 1024 * 8)
-chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 64), 128)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 8), 16), 64)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((chunkSizeOne sh, 4), 4), 8), 64)
+chunkSize (ShapeRsnoc ShapeRz) = ((), 256)
+chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 8), 32)
+chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh))) = (((chunkSizeOne sh, 2), 4), 32)
 
 chunkCount :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen Native (Operands sh)
 chunkCount ShapeRz OP_Unit OP_Unit = return OP_Unit
@@ -386,7 +383,7 @@ atomicAdd ordering ptr increment = do
 
 atomicLoad :: MemoryOrdering -> Operand (Ptr Word64) -> CodeGen Native (Operand Word64)
 atomicLoad ordering ptr = do
-  instr' $ LoadAtomic scalarType NonVolatile ptr ordering (Prelude.fromIntegral cacheWidth)
+  instr' $ LoadAtomic scalarType NonVolatile ptr ordering 8
 
 ---- debugging tools ----
 putchar :: Operands Int -> CodeGen Native (Operands Int)

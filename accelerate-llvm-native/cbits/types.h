@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <stdalign.h>
 
 struct Workers;
 struct Program;
@@ -146,7 +147,7 @@ struct KernelLaunch {
   _Atomic int32_t active_threads;
   _Atomic uint64_t shards[SHARD_AMOUNT * CACHE_LINE_WIDTH / 8];
   uint64_t shard_sizes[SHARD_AMOUNT];
-  _Atomic uint64_t next_shard;
-  _Atomic uint64_t finished_shards;
+  alignas(CACHE_LINE_WIDTH) _Atomic uint64_t next_shard;
+  alignas(CACHE_LINE_WIDTH) _Atomic uint64_t finished_shards;
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
 };
