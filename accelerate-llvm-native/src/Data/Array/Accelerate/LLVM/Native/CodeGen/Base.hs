@@ -57,7 +57,7 @@ cacheWidth = 64
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = ((((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), SizedArray Word64), SizedArray Word64), Word64), Word64)
+type Header = (((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), SizedArray Word64), SizedArray Word64), Word64)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
@@ -66,7 +66,6 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle (ArrayPrimType (shardAmount * cacheWidth `div` 8) primType)
   `TupRpair` TupRsingle (ArrayPrimType shardAmount primType)
-  `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
 
 
@@ -79,7 +78,6 @@ bindHeaderEnv
      , Operand (Ptr (SizedArray Word64))  -- work indexes of shards
      , Operand (Ptr (SizedArray Word64))  -- sizes of the shards
      , Operand (Ptr Word64)               -- next shard to work on
-     , Operand (Ptr Word64)               -- finished shards
      , Operand (Word64) -- First work index index
      , Operand (Ptr (SizedArray Word))
      , Gamma env
@@ -87,17 +85,15 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameShards         := GetElementPtr (gepStruct (ArrayPrimType (shardAmount * cacheWidth `div` 8) (ScalarPrimType scalarType)) arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameShardSizes     := GetElementPtr (gepStruct (ArrayPrimType shardAmount (ScalarPrimType scalarType)) arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameNextShard      := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameFinishedShards := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameShards         := GetElementPtr (gepStruct (ArrayPrimType (shardAmount * cacheWidth `div` 8) (ScalarPrimType scalarType)) arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameShardSizes     := GetElementPtr (gepStruct (ArrayPrimType shardAmount (ScalarPrimType scalarType)) arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameIndex          := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ "env"              := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ nameKernelMemory   := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ArrayPrimType (shardAmount * cacheWidth `div` 8) (ScalarPrimType scalarType)) defaultAddrSpace) nameShards
   , LocalReference (PrimType $ PtrPrimType (ArrayPrimType shardAmount (ScalarPrimType scalarType)) defaultAddrSpace) nameShardSizes
-  , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameNextShard
-  , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameFinishedShards
+  , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
   , LocalReference type' nameFirstIndex
   , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
   , gamma
@@ -111,8 +107,7 @@ bindHeaderEnv env =
 
     nameShards = "workassist.shards"
     nameShardSizes = "workassist.shard_sizes"
-    nameNextShard = "workassist.next_shard"
-    nameFinishedShards = "workassist.finished_shards"
+    nameIndex = "workassist.index"
     nameFirstIndex = "workassist.first_index"
     nameKernelMemory = "kernel_memory"
 

@@ -186,10 +186,9 @@ shardedSelfScheduling
     :: Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- next shard to work on
-    -> Operand (Ptr Word64)                 -- finished shards
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-shardedSelfScheduling shardIndexes shardSizes nextFinishedShard _ doWork = do
+shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = do
   entry    <- getBlock
   start    <- newBlock "workassist.shards.start"
   outer    <- newBlock "workassist.shards.outer"
@@ -200,19 +199,19 @@ shardedSelfScheduling shardIndexes shardSizes nextFinishedShard _ doWork = do
   next     <- newBlock "workassist.shards.done.next"
   exit     <- newBlock "workassist.exit"
 
-  initNextFinish <- atomicAdd Monotonic nextFinishedShard (integral TypeWord64 0x100000000)
+  initNextFinish <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000000)
 
   _ <- br start
 
   setBlock next
 
-  nextInc <- atomicAdd Monotonic nextFinishedShard (integral TypeWord64 0x100000000)
+  nextInc <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000000)
 
   _ <- br start
 
   setBlock finish
 
-  finishInc <- atomicAdd Monotonic nextFinishedShard (integral TypeWord64 0x100000001)
+  finishInc <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000001)
 
   _ <- br start
 
@@ -272,15 +271,14 @@ shardedSelfSchedulingChunked
     -> Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- next shard to work on
-    -> Operand (Ptr Word64)                 -- finished shards
     -> sh 
     -> Operands sh
     -> Operands sh
     -> (Operands sh -> CodeGen Native ()) 
     -> CodeGen Native ()
-shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShard finishedShards chunkSz' sh chunkCounts doWork = do
+shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShardFinishedShards chunkSz' sh chunkCounts doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
-  shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards $ \_ chunkLinearIndex -> do
+  shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards $ \_ chunkLinearIndex -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex

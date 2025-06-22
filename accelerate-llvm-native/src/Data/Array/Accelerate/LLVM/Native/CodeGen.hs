@@ -174,7 +174,7 @@ codegen name env cluster args
           -- only used in one tile loop. These arrays can also be stored as a
           -- single value.
           envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
-          workassistLoop finishedShards tileCount $ \seqMode tileIdx' -> do
+          workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
 
             tileIdxAbsolute <-
@@ -327,7 +327,7 @@ codegen name env cluster args
 
       setBlock shardWorkBlock
 
-      shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes nextShard finishedShards tileSize parSizes tileCount $ \idx -> do
+      shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes workassistIndex tileSize parSizes tileCount $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -341,7 +341,7 @@ codegen name env cluster args
 
       setBlock workAssistBlock
 
-      workassistChunked ann parallelShr finishedShards tileSize parSizes tileCount tileCount' $ \idx -> do
+      workassistChunked ann parallelShr workassistIndex tileSize parSizes tileCount tileCount' $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -355,7 +355,7 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, shardIndexes, shardSizes, nextShard, finishedShards, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, shardIndexes, shardSizes, workassistIndex, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True
