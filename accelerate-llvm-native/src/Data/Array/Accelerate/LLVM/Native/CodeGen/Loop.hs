@@ -189,30 +189,47 @@ shardedSelfScheduling
     -> Operand (Ptr Word64)                 -- finished shards
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards doWork = do
+shardedSelfScheduling shardIndexes shardSizes nextFinishedShard _ doWork = do
+  entry    <- getBlock
   start    <- newBlock "workassist.shards.start"
   outer    <- newBlock "workassist.shards.outer"
   inner    <- newBlock "workassist.shards.inner"
   work     <- newBlock "workassist.shards.work"
   done     <- newBlock "workassist.shards.done"
-  finish   <- newBlock "workassist.shards.finish"
+  finish   <- newBlock "workassist.shards.done.finish"
+  next     <- newBlock "workassist.shards.done.next"
   exit     <- newBlock "workassist.exit"
+
+  initNextFinish <- atomicAdd Monotonic nextFinishedShard (integral TypeWord64 0x100000000)
+
+  _ <- br start
+
+  setBlock next
+
+  nextInc <- atomicAdd Monotonic nextFinishedShard (integral TypeWord64 0x100000000)
+
+  _ <- br start
+
+  setBlock finish
+
+  finishInc <- atomicAdd Monotonic nextFinishedShard (integral TypeWord64 0x100000001)
 
   _ <- br start
 
   setBlock start
 
-  finishCount <- atomicLoad Monotonic finishedShards
-  finished <- A.lt singleType (OP_Word64 finishCount) (A.liftWord64 shardAmount)
+  finishCount <- phi (TupRsingle scalarType) [(OP_Word64 initNextFinish, entry), (OP_Word64 nextInc, next), (OP_Word64 finishInc, finish)]
+  finishCount' <- A.band TypeWord64 finishCount (A.liftWord64 0xFFFFFFFF)
+  finished <- A.lt singleType finishCount' (A.liftWord64 shardAmount)
 
   _ <- cbr finished outer exit
 
   setBlock outer
 
-  next <- atomicAdd Monotonic nextShard (integral TypeWord64 1)
+  nextShard' <- A.shiftR TypeWord64 finishCount (A.liftInt 32)
   OP_Word64 shardToWorkOn <- if (shardAmount .&. (shardAmount - 1)) == 0 
-    then A.band TypeWord64 (OP_Word64 next) (A.liftWord64 (shardAmount - 1))
-    else A.rem TypeWord64 (OP_Word64 next) (A.liftWord64 shardAmount)
+    then A.band TypeWord64 nextShard' (A.liftWord64 (shardAmount - 1))
+    else A.rem TypeWord64 nextShard' (A.liftWord64 shardAmount)
 
   OP_Word64 shardIdx <- if (cacheWidth .&. (cacheWidth - 1)) == 0 
     then A.mul numType (A.liftWord64 (cacheWidth `div` 8)) (OP_Word64 shardToWorkOn)
@@ -243,13 +260,8 @@ shardedSelfScheduling shardIndexes shardSizes nextShard finishedShards doWork = 
 
   incrementFinished <- A.eq singleType (OP_Word64 workIdx) (OP_Word64 shardSize)
 
-  _ <- cbr incrementFinished finish start
+  _ <- cbr incrementFinished finish next
   
-  setBlock finish
-
-  _ <- atomicAdd Monotonic finishedShards (integral TypeWord64 1)
-
-  _ <- br start
 
   setBlock exit
   retval_ $ scalar (scalarType @Word8) 0
