@@ -226,13 +226,9 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
   setBlock outer
 
   nextShard' <- A.shiftR TypeWord64 finishCount (A.liftInt 32)
-  OP_Word64 shardToWorkOn <- if (shardAmount .&. (shardAmount - 1)) == 0 
-    then A.band TypeWord64 nextShard' (A.liftWord64 (shardAmount - 1))
-    else A.rem TypeWord64 nextShard' (A.liftWord64 shardAmount)
+  OP_Word64 shardToWorkOn <- A.rem TypeWord64 nextShard' (A.liftWord64 shardAmount)
 
-  OP_Word64 shardIdx <- if (cacheWidth .&. (cacheWidth - 1)) == 0 
-    then A.mul numType (A.liftWord64 (cacheWidth `div` 8)) (OP_Word64 shardToWorkOn)
-    else A.shiftL integralType (OP_Word64 shardToWorkOn) (A.liftInt $ Data.Bits.countTrailingZeros $ cacheWidth `div` 8)
+  OP_Word64 shardIdx <- A.mul numType (A.liftWord64 (cacheWidth `div` 8)) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
   
   shardSizeIdx <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty
