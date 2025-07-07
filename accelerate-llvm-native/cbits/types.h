@@ -138,7 +138,7 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
 #define SHARD_AMOUNT 64
 #define CACHE_LINE_WIDTH 64
 
-typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t first_index);
+typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t flag);
 struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;
