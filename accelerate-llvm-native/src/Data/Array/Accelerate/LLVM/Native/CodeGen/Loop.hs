@@ -185,7 +185,7 @@ iterFromTo tp start end seed body =
 shardedSelfScheduling
     :: Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
-    -> Operand (Ptr Word64)                 -- next shard to work on
+    -> Operand (Ptr Word64)                 -- combined: high 32 bits = next shard index, low 32 bits = finished shard count
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
 shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = do
@@ -199,24 +199,28 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
   next     <- newBlock "workassist.shards.done.next"
   exit     <- newBlock "workassist.exit"
 
+  -- Increment next shard by 1.
   initNextFinish <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000000)
 
   _ <- br start
 
   setBlock next
 
+  -- Increment next shard by 1.
   nextInc <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000000)
 
   _ <- br start
 
   setBlock finish
 
+  -- Increment next shard and finished shards by 1.
   finishInc <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000001)
 
   _ <- br start
 
   setBlock start
 
+  -- Check if amount of finished shards is lower than amount of shards to continue.
   finishCount <- phi (TupRsingle scalarType) [(OP_Word64 initNextFinish, entry), (OP_Word64 nextInc, next), (OP_Word64 finishInc, finish)]
   finishCount' <- A.band TypeWord64 finishCount (A.liftWord64 0xFFFFFFFF)
   finished <- A.lt singleType finishCount' (A.liftWord64 shardAmount)
@@ -228,6 +232,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
   nextShard' <- A.shiftR TypeWord64 finishCount (A.liftInt 32)
   OP_Word64 shardToWorkOn <- A.rem TypeWord64 nextShard' (A.liftWord64 shardAmount)
 
+  -- Get shard from shards array, to do this we need to multiply by cache width as every shards is on a seperate cache line.
   OP_Word64 shardIdx <- A.mul numType (A.liftWord64 (cacheWidth `div` 8)) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
   
@@ -238,6 +243,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
 
   setBlock inner
   
+  -- Continue working on shard until finished.
   workIdx <- atomicAdd Monotonic shard (integral TypeWord64 1)
   shardFinished <- A.lt singleType (OP_Word64 workIdx) (OP_Word64 shardSize)
 
@@ -253,10 +259,10 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
 
   setBlock done
 
+  -- If this thread is the one to finish the last tile, we increment the amount of finished shards.
   incrementFinished <- A.eq singleType (OP_Word64 workIdx) (OP_Word64 shardSize)
 
   _ <- cbr incrementFinished finish next
-  
 
   setBlock exit
   retval_ $ scalar (scalarType @Word8) 0
@@ -266,7 +272,7 @@ shardedSelfSchedulingChunked
     -> ShapeR sh 
     -> Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
-    -> Operand (Ptr Word64)                 -- next shard to work on
+    -> Operand (Ptr Word64)                 -- combined: high 32 bits = next shard index, low 32 bits = finished shard count
     -> sh 
     -> Operands sh
     -> Operands sh

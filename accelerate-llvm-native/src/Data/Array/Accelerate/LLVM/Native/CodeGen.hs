@@ -87,7 +87,7 @@ codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
-  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index") $ do
+  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.flag") $ do
     extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -100,7 +100,7 @@ codegen name env cluster args
     workBlock <- newBlock "work"
     shardWorkBlock <- newBlock "work.shards"
     workAssistBlock <- newBlock "work.workassist"
-    _ <- switch (OP_Word64 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
+    _ <- switch (OP_Word64 flag) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
 
     if parallelDepth == 0 && rank shr /= 0 then do
@@ -320,6 +320,8 @@ codegen name env cluster args
             else if hasPermute then [Loop.LoopInterleave]
             else [Loop.LoopVectorize]
 
+      -- Check if there are more tiles than shards. Only use sharded self scheduling if there are, 
+      -- otherwise use work assisting.
       tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
       tileCount' <- shapeSize parallelShr tileCount
       enoughTiles <- A.gt singleType tileCount' (A.liftInt $ fromIntegral shardAmount)
@@ -355,7 +357,7 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, shardIndexes, shardSizes, workassistIndex, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, shardIndexes, shardSizes, workassistIndex, flag, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True
@@ -364,20 +366,23 @@ codegen name env cluster args
 linkage :: Maybe LP.Linkage
 linkage = Just LP.DLLExport
 
+-- initShards needs to be called before sharded self scheduling.
 initShards 
   :: Operand (Ptr (SizedArray Word64))  -- work indexes of shards
   -> Operand (Ptr (SizedArray Word64))  -- sizes of the shards
-  -> Operands Word64 -- Amount of tiles to be divided over the shards
+  -> Operands Word64 -- Amount of tiles to be divided over the shards. Must be greater than the number of shards
   -> CodeGen Native ()
 initShards shardIndexes shardSizes tileCount = do
   
   (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 tileCount (A.liftWord64 shardAmount)
 
+  -- Initialize shardIndexes with the start index of every shard.
   imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
     shardStart <- A.mul numType (OP_Word64 i) (OP_Word64 shardMinSize)
     addRemainder <- A.min singleType (OP_Word64 i) remainder
     OP_Word64 shard <- A.add numType shardStart addRemainder 
 
+    -- Multiply the index by the cache width in bytes to ensure every shard is on a seperate cache line.
     OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 (cacheWidth `div` 8))
     shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
     _ <- instr' $ Store NonVolatile shardIdxArr shard
@@ -385,19 +390,18 @@ initShards shardIndexes shardSizes tileCount = do
     return ()
     )
 
+  -- Initialize shardSizeArray with the last index + 1 of every shard.
   imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
     indexPlus1 <- A.add numType (OP_Word64 i) (A.liftWord64 1)
     shardStart <- A.mul numType indexPlus1 (OP_Word64 shardMinSize)
     addRemainder <- A.min singleType indexPlus1 remainder
     OP_Word64 shard <- A.add numType shardStart addRemainder 
 
+    -- Multiplying by the cache width is not necessary here as shardSizes is only read.
     shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty
     _ <- instr' $ Store NonVolatile shardSizeArray shard
     return ()
     )
-    
-
-      
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
 opCodeGen (FlatOp NGenerate args idxArgs) = defaultCodeGenGenerate args idxArgs

@@ -77,8 +77,9 @@ bindHeaderEnv
      , CodeGen Native ()
      , Operand (Ptr (SizedArray Word64))  -- work indexes of shards
      , Operand (Ptr (SizedArray Word64))  -- sizes of the shards
-     , Operand (Ptr Word64)               -- next shard to work on
-     , Operand (Word64) -- First work index index
+     , Operand (Ptr Word64)               -- In the case of workassist, the workassist index.
+       -- In the case of sharded self scheduling, combined the next shard and amount of finished shards.
+     , Operand (Word64) -- Flag that specifies if the work needs to be initialized or finished
      , Operand (Ptr (SizedArray Word))
      , Gamma env
      )
@@ -94,7 +95,7 @@ bindHeaderEnv env =
   , LocalReference (PrimType $ PtrPrimType (ArrayPrimType (shardAmount * cacheWidth `div` 8) (ScalarPrimType scalarType)) defaultAddrSpace) nameShards
   , LocalReference (PrimType $ PtrPrimType (ArrayPrimType shardAmount (ScalarPrimType scalarType)) defaultAddrSpace) nameShardSizes
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
-  , LocalReference type' nameFirstIndex
+  , LocalReference type' nameFlag
   , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
   , gamma
   )
@@ -108,7 +109,7 @@ bindHeaderEnv env =
     nameShards = "workassist.shards"
     nameShardSizes = "workassist.shard_sizes"
     nameIndex = "workassist.index"
-    nameFirstIndex = "workassist.first_index"
+    nameFlag = "workassist.flag"
     nameKernelMemory = "kernel_memory"
 
     kernelMemTp :: PrimType (SizedArray Word)
