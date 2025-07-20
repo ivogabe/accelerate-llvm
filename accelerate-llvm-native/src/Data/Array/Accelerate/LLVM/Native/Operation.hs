@@ -576,7 +576,7 @@ inputConstraints c = foldMap $ \wIn ->
                 timesN (fused (wIn, c)) .>=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
     <> (-1) .*. timesN (fused (wIn, c)) .<=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
 
-defaultBounds :: Labels Buff -> Label Comp -> Labels Buff -> Bounds NativeOp
+defaultBounds :: Labels GVal -> Label Comp -> Labels GVal -> Bounds NativeOp
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
 
