@@ -37,6 +37,7 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.Volatile
 import qualified LLVM.AST.Type.Instruction.RMW as RMW
+import Control.Monad (void)
 import Control.Monad.Trans
 import Control.Monad.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
