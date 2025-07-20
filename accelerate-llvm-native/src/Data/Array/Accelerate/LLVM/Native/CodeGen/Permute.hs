@@ -316,15 +316,17 @@ atomically envs mutArray i action
       -- and i is the index in the array (where the permute is writing to).
       seed <- firstArrayPtr envs mutArray
       i' <- A.add numType seed i
-      h <- hash i'
-      idx <- A.rem TypeInt h $ A.liftInt lockArraySize
+      i'' <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) i'
+      h <- hash i''
+      idx <- A.rem TypeWord64 h $ A.liftWord64 $ Prelude.fromIntegral lockArraySize
 
       spin <- newBlock "spinlock.entry"
       crit <- newBlock "spinlock.critical-section"
       exit <- newBlock "spinlock.exit"
 
-      byteIdx <- A.quot TypeInt idx $ A.liftInt 8
-      bitIdx <- A.rem TypeInt idx $ A.liftInt 8
+      byteIdx <- A.quot TypeWord64 idx $ A.liftWord64 8
+      bitIdx <- A.rem TypeWord64 idx $ A.liftWord64 8
+      bitIdx' <- A.fromIntegral TypeWord64 (IntegralNumType TypeInt) bitIdx
 
       let bufptr = LocalReference (PrimType (PtrPrimType (primType @Word8) defaultAddrSpace)) "locks_array"
 
@@ -335,8 +337,8 @@ atomically envs mutArray i action
       -- was unlocked we just acquired it, otherwise the state remains unchanged and
       -- we spin until it becomes available.
       setBlock spin
-      OP_Int mask' <- A.shiftL TypeInt (A.liftInt 1) bitIdx
-      mask <- instr' $ Trunc (IntegralBoundedType TypeInt) (IntegralBoundedType TypeWord8) mask'
+      OP_Word64 mask' <- A.shiftL TypeWord64 (A.liftWord64 1) bitIdx'
+      mask <- instr' $ Trunc (IntegralBoundedType TypeWord64) (IntegralBoundedType TypeWord8) mask'
       -- Using atomic_fetch_or, acquire the lock on the computed bit.
       old  <- instrMD (AtomicRMW numType NonVolatile Or addr mask (CrossThread, Acquire)) (bufferMetadata' Nothing)
       -- Check if the bit was zero before our atomic_fetch_or.
