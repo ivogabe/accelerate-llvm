@@ -546,7 +546,7 @@ parCodeGen descending (FlatOp NFold1
 parCodeGen descending (FlatOp (NScan1 _)
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenScan descending False fun Nothing input inputIdx
+  = Just $ parCodeGenScan descending IsScan fun Nothing input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
@@ -554,7 +554,7 @@ parCodeGen descending (FlatOp (NScan1 _)
 parCodeGen descending (FlatOp (NScan' _)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx _ foldOutputIdx :>: _))
-  = Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
+  = Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
     (\_ _ -> return ())
@@ -563,7 +563,7 @@ parCodeGen descending (FlatOp (NScan dir)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
   = case dir of
-      LeftToRight -> Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
+      LeftToRight -> Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
         (\_ _ -> return ())
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
@@ -571,7 +571,7 @@ parCodeGen descending (FlatOp (NScan dir)
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
-      RightToLeft -> Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
+      RightToLeft -> Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
         (\envs result -> do
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
@@ -610,7 +610,7 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
   , Just i <- identity
   = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
   | otherwise
-  = parCodeGenScan descending True fun seed input inputIdx
+  = parCodeGenScan descending IsFold fun seed input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\_ _ -> return ())
@@ -721,11 +721,13 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
     memoryTp = TupRsingle scalarTypeWord8 `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input
 
+data FoldOrScan = IsFold | IsScan deriving Eq
+
 parCodeGenScan
   :: Bool -- Whether the loop is descending
   -- Whether this is a fold. Folds use similar code generation as scans, hence
   -- it is handled here. Commutative folds are handled separately.
-  -> Bool
+  -> FoldOrScan
   -> Fun env (e -> e -> e)
   -> Maybe (Exp env e) -- Seed
   -> Arg env (In (sh, Int) e)
@@ -741,12 +743,12 @@ parCodeGenScan
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenScan descending isFold fun Nothing input index codeSeed codePre codePost codeEnd
+parCodeGenScan descending foldOrScan fun Nothing input index codeSeed codePre codePost codeEnd
   | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
-  = parCodeGenScan descending isFold fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
+  = parCodeGenScan descending foldOrScan fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
+parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
   -- If we know an identity value, we can implement this without loop peeling
   (isNothing identity)
   -- In kernel memory, store the index of the block we must now handle and the
@@ -918,7 +920,7 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
   -- In the first iteration, the first tile loop will then start without a prefix value,
   -- and we thus should do loop peeling there.
   -- Not executed when this tile is executed in the sequential mode.
-  (if isFold then Nothing else
+  (if foldOrScan == IsFold then Nothing else
     Just (isNothing seed, \accumVar _ envs -> do
       x <- readArray' envs input index
       if isJust seed then do
