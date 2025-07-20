@@ -794,6 +794,36 @@ mathf2 n f (op f -> x) (op f -> y)
               [NoUnwind, ReadOnly]
     return r
 
+-- Thomas Wang's 64-bit integer hash
+-- Original website is currently unavailable,
+-- but see for instance https://naml.us/post/inverse-of-a-hash-function/
+-- or https://aebou.rbind.io/post/a-rust-glimpse-at-thomas-wang-integer-hash-function/
+hash :: Operands Int -> CodeGen arch (Operands Int)
+hash key = do
+  -- key = (~key) + (key << 21);
+  a <- complement TypeInt key
+  b <- shiftL TypeInt key (liftInt 21)
+  key1 <- add numType a b
+
+  -- key = key ^ (key >> 24);
+  key2 <- shiftR TypeInt key1 (liftInt 24) >>= xor TypeInt key1
+
+  -- key = (key + (key << 3)) + (key << 8); // key * 265
+  key3 <- mul numType key2 (liftInt 265)
+  
+  -- key = key ^ (key >> 14);
+  key4 <- shiftR TypeInt key3 (liftInt 14) >>= xor TypeInt key3
+
+  -- key = (key + (key << 2)) + (key << 4); // key * 21
+  key5 <- mul numType key4 (liftInt 21)
+
+  -- key = key ^ (key >> 28);
+  key6 <- shiftR TypeInt key5 (liftInt 28) >>= xor TypeInt key5
+
+  -- key = key + (key << 31);
+  -- return key;
+  shiftL TypeInt key6 (liftInt 31) >>= add numType key6
+
 lm :: FloatingType t -> ShortByteString -> CodeGen arch Label
 lm t n
   = intrinsic

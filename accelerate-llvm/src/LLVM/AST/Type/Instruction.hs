@@ -343,7 +343,10 @@ data Instruction a where
                   -> Operand (Ptr a)
                   -> Instruction (Ptr b)
 
-  -- PtrToInt
+  PtrToInt        :: IntegralType b
+                  -> Operand (Ptr a)
+                  -> Instruction b
+
   -- IntToPtr
   -- AddrSpaceCast
 
@@ -448,6 +451,7 @@ instance Downcast (Instruction a) LP.Instr where
     IntToFP a b x         -> int2float a b (downcast x)
     BitCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
     PtrCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
+    PtrToInt t x          -> LP.Conv LP.PtrToInt (downcast x) (downcast t)
     Phi t e               -> LP.Phi (fmfFor t) (downcast t) (map (bimap (LP.typedValue . downcast) (LP.Named . labelToPrettyI)) e)
     Select p x y          -> LP.Select (fmfFor $ typeOf x) (downcast p) (downcast x) (LP.typedValue (downcast y))
     IsNaN _ x             -> isNaN (downcast x)
@@ -659,6 +663,7 @@ instance TypeOf Instruction where
     BoolToFP t _          -> floating t
     BitCast t _           -> scalar t
     PtrCast t _           -> PrimType t
+    PtrToInt t _          -> integral t
     Cmp{}                 -> type'
     IsNaN{}               -> type'
     Phi t _               -> PrimType t

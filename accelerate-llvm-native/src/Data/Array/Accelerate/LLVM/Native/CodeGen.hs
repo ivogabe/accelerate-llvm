@@ -84,7 +84,7 @@ codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
-  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index") $ do
+  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "workassist.first_index") $ do
     extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -328,10 +328,10 @@ opCodeGen (FlatOp NGenerate args idxArgs) = defaultCodeGenGenerate args idxArgs
 opCodeGen (FlatOp NMap args idxArgs) = defaultCodeGenMap args idxArgs
 opCodeGen (FlatOp NBackpermute args idxArgs) = defaultCodeGenBackpermute args idxArgs
 opCodeGen (FlatOp NPermute
-    (combineFun :>: output :>: locks :>: source :>: _)
-    (i1 :>: i2 :>: _ :>: i3 :>: _)) =
+    (combineFun :>: output :>: source :>: _)
+    (i1 :>: i2 :>: i3 :>: _)) =
   defaultCodeGenPermute
-    (\envs j _ -> atomically envs locks $ OP_Int j)
+    (\envs j _ -> atomically envs output $ OP_Int j)
     (combineFun :>: output :>: source :>: ArgsNil)
     (i1 :>: i2 :>: i3 :>: ArgsNil)
 opCodeGen (FlatOp NPermute' args idxArgs) = defaultCodeGenPermuteUnique args idxArgs
