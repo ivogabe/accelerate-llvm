@@ -298,8 +298,8 @@ codegen name env cluster args
       setBlock workBlock
       let ann = 
             if parallelDepth /= rank shr then []
-            else if hasPermute then [Loop.LoopInterleave]
-            else [Loop.LoopVectorize]
+            else {- if hasPermute then -} [Loop.LoopInterleave]
+            -- else [Loop.LoopVectorize]
       workassistChunked ann parallelShr workassistIndex workassistFirstIndex tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
