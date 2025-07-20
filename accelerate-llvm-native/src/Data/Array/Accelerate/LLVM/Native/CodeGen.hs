@@ -563,7 +563,7 @@ parCodeGen descending (FlatOp (NScan dir)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
   = case dir of
-      LeftToRight -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
+      LeftToRight -> Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
         (\_ _ -> return ())
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
@@ -571,13 +571,13 @@ parCodeGen descending (FlatOp (NScan dir)
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
-      RightToLeft -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
-        (\envs result -> writeArray' envs output inputIdx result)
-        (\_ _ -> return ())
+      RightToLeft -> Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
         (\envs result -> do
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
+        (\_ _ -> return ())
+        (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
   where
     ArgArray _ _ inputSh _ = input
