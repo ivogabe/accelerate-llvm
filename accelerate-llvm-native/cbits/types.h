@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <pthread.h>
 
+#define ACCELERATE_LOCK_ARRAY_SIZE (16 * 1024 * 8)
+
 struct Workers;
 struct Program;
 struct KernelLaunch;
@@ -75,6 +77,11 @@ struct Scheduler {
 struct Workers {
   struct Scheduler scheduler;
   uint64_t thread_count;
+  // Array of locks, to be used by permutes.
+  // The array has ACCELERATE_LOCK_ARRAY_SIZE locks, and each lock is one bit.
+  // A permute will need to map indices of the array to indices in the array of
+  // locks.
+  uint8_t *locks;
 };
 
 struct Signal {
@@ -135,7 +142,10 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
-typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t first_index);
+// locks: an array of locks that can be used by any permutes in the kernel.
+// This array is global, i.e. all kernels use the same array of locks, and is
+// taken from Workers.locks.
+typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint8_t *locks, uint32_t first_index);
 struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;

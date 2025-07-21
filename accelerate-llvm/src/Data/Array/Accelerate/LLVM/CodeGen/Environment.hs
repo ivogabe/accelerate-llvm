@@ -375,6 +375,7 @@ bindEnvArgs environment =
           | In <- m = mutOutCount
           | otherwise = mutOutCount + 1
 
+        -- SEE: [Alias metadata]
         alias
           | In <- m = Just (3, 4)
           | otherwise = Just ( fromIntegral mutOutCount' * 3 + 6,  fromIntegral mutOutCount' * 3 + 7)
@@ -402,12 +403,20 @@ declareAliasScopes mutOutCount = do
   when (domain /= 0) $
     internalError "bindEnvFromStruct assumes this is the first place where metadata nodes are created"
 
+  -- Note: [Alias metadata]
   -- The metadata nodes are introduced as follows:
+  --
   -- 0 is the domain
   -- 1 is the list with all scopes we define here
+  --
+  -- The following metadata nodes are in groups of three,
+  -- where the first introduces a scope, the second the alias.scope list,
+  -- and the third the noalias list.
+  --
   -- 2 is the scope for all inputs (which share one domain)
   -- 3 is the list containing only the scope for all inputs (i.e. the alias.scope)
   -- 4 is the list containing all scopes but the input scope (i.e. the noalias)
+  --
   -- 5 + 3 * k is the scope of the kth Out or Mut buffer
   -- 6 + 3 * k is the list containing only this scope
   -- 7 + 3 * k is the list containing all other scopes,

@@ -20,6 +20,7 @@ import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Type
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
+import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.IR
@@ -29,13 +30,13 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 
 import LLVM.AST.Type.GetElementPtr
+import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW                                as RMW
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Representation
 
-import Prelude
 import Data.Array.Accelerate.AST.Operation (Mut, Arg (ArgArray), Modifier (Mut))
 
 {-
@@ -282,45 +283,77 @@ reprLock :: ArrayR (Array ((), Int) Word8)
 reprLock = ArrayR (ShapeRsnoc ShapeRz) $ TupRsingle scalarTypeWord8
 -}
 
+-- Number of locks in the array of locks.
+-- Should have the same value as ACCELERATE_LOCK_ARRAY_SIZE in cbits/types.h.
+lockArraySize :: Int
+lockArraySize = 16 * 1024 * 8
 
 atomically 
   :: Envs env idxEnv
-  -> Arg env (Mut sh' Word8)
-  -> Operands Int 
-  -> CodeGen Native () 
+  -- The output (mut) argument of the permute.
+  -- This array is not mutated by this function,
+  -- instead it is only used to compute a lock index.
+  -- We use the pointer of the first output buffer
+  -- together with the index of the hash function,
+  -- as:
+  -- hash(ptr + i)
+  -- This reduces the chance of collisions between multiple concurrent
+  -- permutes, as each permute will have a different ptr, as they cannot write
+  -- to the same buffer concurrently.
+  -- Note that we use ptr + i instead of ptr + i * sizeof(..) for simplicity.
+  -- Given that ptr + i * sizeof(..) will not overlap between concurrent
+  -- permutes, ptr + i will also not overlap as sizeof(..) >= 1.
+  --
+  -> Arg env (Mut sh e)
+  -> Operands Int
   -> CodeGen Native ()
-atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
-  | irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
+  -> CodeGen Native ()
+atomically envs mutArray i action
+  -- | irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
   = do
-      let
-          lock      = integral integralType 1
-          unlock    = integral integralType 0
-          unlocked  = ir TypeWord8 unlock
-      --
+      -- As commented above, compute the hash of ptr + i,
+      -- where ptr is the pointer of the first buffer in the output, bitcasted to an int,
+      -- and i is the index in the array (where the permute is writing to).
+      seed <- firstArrayPtr envs mutArray
+      i' <- A.add numType seed i
+      i'' <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) i'
+      h <- hash i''
+      idx <- A.rem TypeWord64 h $ A.liftWord64 $ Prelude.fromIntegral lockArraySize
+
       spin <- newBlock "spinlock.entry"
       crit <- newBlock "spinlock.critical-section"
       exit <- newBlock "spinlock.exit"
 
-      addr <- instr' $ GetElementPtr $ GEP1 bufptr (op integralType i)
+      byteIdx <- A.quot TypeWord64 idx $ A.liftWord64 8
+      bitIdx <- A.rem TypeWord64 idx $ A.liftWord64 8
+      bitIdx' <- A.fromIntegral TypeWord64 (IntegralNumType TypeInt) bitIdx
+
+      let bufptr = LocalReference (PrimType (PtrPrimType (primType @Word8) defaultAddrSpace)) "locks_array"
+
+      addr <- instr' $ GetElementPtr $ GEP1 bufptr $ op integralType byteIdx
       _    <- br spin
 
       -- Atomically (attempt to) set the lock slot to the locked state. If the slot
       -- was unlocked we just acquired it, otherwise the state remains unchanged and
       -- we spin until it becomes available.
       setBlock spin
-      old  <- instrMD (AtomicRMW numType NonVolatile Exchange addr lock   (CrossThread, Acquire)) (bufferMetadata irbuffer)
-      ok   <- A.eq singleType old unlocked
+      OP_Word64 mask' <- A.shiftL TypeWord64 (A.liftWord64 1) bitIdx'
+      mask <- instr' $ Trunc (IntegralBoundedType TypeWord64) (IntegralBoundedType TypeWord8) mask'
+      -- Using atomic_fetch_or, acquire the lock on the computed bit.
+      old  <- instrMD (AtomicRMW numType NonVolatile Or addr mask (CrossThread, Acquire)) (bufferMetadata' Nothing)
+      -- Check if the bit was zero before our atomic_fetch_or.
+      check <- A.band TypeWord8 old (OP_Word8 mask)
+      -- If it is zero, we acquired the lock
+      ok   <- A.eq singleType check $ A.liftWord8 0
       _    <- cbr ok crit spin
 
       -- We just acquired the lock; perform the critical section then release the
-      -- lock and exit. For ("some") x86 processors, an unlocked MOV instruction
-      -- could be used rather than the slower XCHG, due to subtle memory ordering
-      -- rules.
+      -- lock and exit.
       setBlock crit
       r    <- action
-      _    <- instrMD (AtomicRMW numType NonVolatile Exchange addr unlock (CrossThread, Release)) (bufferMetadata irbuffer)
+      OP_Word8 maskComplement <- A.complement TypeWord8 (OP_Word8 mask)
+      _    <- instrMD (AtomicRMW numType NonVolatile And addr maskComplement (CrossThread, Release)) (bufferMetadata' Nothing)
       _    <- br exit
 
       setBlock exit
       return r
-  | otherwise = internalError "Expected IRBufferScopeArray"

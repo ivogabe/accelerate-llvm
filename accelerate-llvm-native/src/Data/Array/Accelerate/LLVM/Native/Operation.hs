@@ -66,7 +66,6 @@ data NativeOp t where
   NGenerate    :: NativeOp (Fun' (sh -> t)              -> Out sh  t -> ())
   NPermute     :: NativeOp (Fun' (e -> e -> e)
                          -> Mut sh' e
-                         -> Mut sh' Word8
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
   NPermute'    :: NativeOp (Mut sh' e
@@ -131,21 +130,7 @@ instance DesugarAcc NativeOp where
     = Exec (NScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
     = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
-    | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord8
-    = aletUnique lhs
-        (Alloc shr scalarTypeWord8 $ groundToExpVar (shapeType shr) sh)
-        $ alet LeftHandSideUnit
-          (Exec NGenerate ( -- TODO: The old pipeline used a 'memset 0' instead, which sounds faster...
-                ArgFun (Lam (LeftHandSideWildcard (shapeType shr)) $ Body $ Const scalarTypeWord8 0)
-            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId)
-            :>: ArgsNil))
-          (Exec NPermute (
-                weaken w a
-            :>: weaken w b
-            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId)
-            :>: weaken w c
-            :>: ArgsNil))
+  mkPermute (Just a) b c = Exec NPermute (a :>: b :>: c :>: ArgsNil)
   mkPermute Nothing a b = Exec NPermute' (a :>: b :>: ArgsNil)
   mkFold a (Just seed) b c = Exec NFold (a :>: seed :>: b :>: c :>: ArgsNil)
   mkFold a Nothing b c = Exec NFold1 (a :>: b :>: c :>: ArgsNil)
@@ -209,10 +194,10 @@ instance SetOpIndices NativeOp where
     | otherwise
     = Nothing
   setOpIndices _ NFold1 _ _ = error "Missing indices for NFold1"
-  setOpIndices indexVar NPermute (_ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+  setOpIndices indexVar NPermute (_ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
-      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
+      IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
     | otherwise
     = Nothing
     where
@@ -361,20 +346,17 @@ instance MakesILP NativeOp where
   --       <> inrankifmanifest shr l)
   --     (defaultBounds l)
 
-  mkGraph c NPermute (_fun :>: L _ lTargets :>: L _ lLocks :>: L _ lIn :>: ArgsNil) = do
+  mkGraph c NPermute (_fun :>: L _ lTargets :>: L _ lLocks :>: ArgsNil) = do
     let bsTargets = getLabelArrDeps lTargets
     let bsLocks   = getLabelArrDeps lLocks
-    let bsIn      = getLabelArrDeps lIn
     wsTargets <- use $ allWriters bsTargets
     wsLocks   <- use $ allWriters bsLocks
-    wsIn      <- use $ allWriters bsIn
     fusionILP %= (wsTargets <> wsLocks) `allBefore` c
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
       {- <> ILP.var (InDir  c)     .==. ILP.int (-2) -}
       {- <> ILP.var (OutDir c)     .==. ILP.int (-3) -})
-    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsLocks <> bsIn)
+    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsLocks)
                          <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsLocks))
 
     -- No output, so no in-place paths.

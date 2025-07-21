@@ -27,6 +27,7 @@ module Data.Array.Accelerate.LLVM.PTX.Execute (
 ) where
 
 import Data.Array.Accelerate.Analysis.Match
+import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.AST.Execute
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.LeftHandSide
@@ -90,6 +91,17 @@ executeFun (Slam lhs (Sbody body)) = \arguments -> evalPTX defaultTarget $ evalP
   let env = push' Empty (lhs, arguments')
   execute env body
 
+executeUnaryFun :: Gamma env -> UniformScheduleFun PTXKernel env (s -> ()) -> Distribute Value s -> Par ()
+executeUnaryFun env (Slam lhs (Sbody body)) arguments =
+  let env' = push' env (lhs, arguments)
+  in execute env' body
+
+executeBinaryFun :: Gamma env -> UniformScheduleFun PTXKernel env (a -> b -> ()) -> Distribute Value a -> Distribute Value b -> Par ()
+executeBinaryFun env (Slam lhs1 (Slam lhs2 f)) a b = executeUnaryFun env (Slam (LeftHandSidePair lhs1 lhs2) f) (a, b)
+
+executeTernaryFun :: Gamma env -> UniformScheduleFun PTXKernel env (a -> b -> c -> ()) -> Distribute Value a -> Distribute Value b -> Distribute Value c -> Par ()
+executeTernaryFun env (Slam lhs1 (Slam lhs2 f)) a b = executeBinaryFun env (Slam (LeftHandSidePair lhs1 lhs2) f) (a, b)
+
 execute :: Gamma env -> UniformSchedule PTXKernel env -> Par ()
 execute env = \case
   Return -> return ()
@@ -108,8 +120,8 @@ execute env = \case
     else
       execute env false
     execute env next
-  Awhile io step initial next -> error "TODO: awhile"
-  AwhileSeq io step initial next -> error "TODO: awhile"
+  Awhile io step initial next -> executeAwhile env io step (prjVars initial env) next
+  AwhileSeq io step initial next -> executeAwhileSeq env io step (prjVars initial env) next
   Spawn a b -> do
     spawnPar (execute env a)
     execute env b
@@ -131,7 +143,12 @@ executeBinding env baseTp = \case
     ValueBuffer <$> mallocDevice tp n
   Use tp _ buffer ->
     ValueBuffer <$> copyToDevice tp buffer
-  Unit var -> error "TODO: Unit"
+  Unit var -> case prj' (varIdx var) env of
+    ValueScalar tp value -> do
+      mbuffer@(MutableBuffer buffer) <- liftIO $ newBuffer tp 1
+      liftIO $ writeBuffer tp mbuffer 0 value
+      ValueBuffer <$> copyToDevice tp (Buffer buffer)
+    _ -> internalError "Buffer impossible"
   RefRead ref -> case prj' (varIdx ref) env of
     ValueScalar _ _ -> internalError "Ref impossible"
     ValueRef mvar -> do
@@ -215,6 +232,69 @@ evalArrayInstr env = EvalArrayInstr $ \instr arg -> case instr of
   Parameter (Var _ idx) -> case prj' idx env of
     ValueScalar _ value -> return value
     _ -> internalError "Scalar impossible"
+
+executeAwhile
+  :: Gamma env
+  -> InputOutputR input output
+  -> UniformScheduleFun PTXKernel env (input -> Output PrimBool -> output -> ())
+  -> Distribute Value input
+  -> UniformSchedule PTXKernel env
+  -> Par ()
+executeAwhile env io step input next = do
+  -- Set up the output variables for this iteration (and the input for the next)
+  event <- liftPar $ Event.create
+  let signal = PTXSignal event
+  mvar <- liftIO newEmptyMVar
+  (output, nextInput) <- bindAwhileIO io
+
+  -- Check condition when it is available
+  spawnPar $ do
+    stream <- asks ptxStream
+    liftIO $ Event.after event stream
+    condition <- liftIO $ readMVar mvar
+    case condition of
+      ValueScalar _ c
+        | c == 1 -> executeAwhile env io step nextInput next
+        | otherwise -> execute env next
+
+  -- Execute a step
+  executeTernaryFun env step input (ValueSignalResolver signal, ValueOutputRef mvar) output
+
+executeAwhileSeq
+  :: Gamma env
+  -> InputOutputR input output
+  -> UniformScheduleFun PTXKernel env (input -> OutputRef PrimBool -> output -> ())
+  -> Distribute Value input
+  -> UniformSchedule PTXKernel env
+  -> Par ()
+executeAwhileSeq env io step input next = do
+  -- Set up the output variables for this iteration (and the input for the next)
+  mvar <- liftIO newEmptyMVar
+  (output, nextInput) <- bindAwhileIO io
+
+  -- Execute a step
+  executeTernaryFun env step input (ValueOutputRef mvar) output
+
+  -- Check condition
+  condition <- liftIO $ readMVar mvar
+  case condition of
+    ValueScalar _ c
+      | c == 1 -> executeAwhileSeq env io step nextInput next
+      | otherwise -> execute env next
+
+bindAwhileIO :: InputOutputR input output -> Par (Distribute Value output, Distribute Value input)
+bindAwhileIO InputOutputRsignal = do
+  event <- liftPar $ Event.create
+  return (ValueSignalResolver $ PTXSignal event, ValueSignal $ PTXSignal event)
+bindAwhileIO (InputOutputRref _) = do
+  mvar <- liftIO newEmptyMVar
+  return (ValueOutputRef mvar, ValueRef mvar)
+bindAwhileIO (InputOutputRpair io1 io2) = do
+  (output1, input1) <- bindAwhileIO io1
+  (output2, input2) <- bindAwhileIO io2
+  return ((output1, output2), (input1, input2))
+bindAwhileIO InputOutputRunit =
+  return ((), ())
 
 {- -- Skeleton implementation
 -- -----------------------
