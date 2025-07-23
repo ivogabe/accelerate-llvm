@@ -28,6 +28,7 @@ module Data.Array.Accelerate.LLVM.PTX.Execute (
 
 import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Array.Buffer
+import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Execute
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.LeftHandSide
@@ -69,11 +70,11 @@ import Data.Array.Accelerate.LLVM.PTX.State
 import qualified Foreign.CUDA.Driver                                as CUDA
 import qualified Foreign.CUDA.Driver.Stream                         as CUDA
 
-import Control.Monad                                                ( forM_ )
+import Control.Monad                                                ( forM_, when )
 import Control.Monad.Reader                                         ( asks )
 import Control.Monad.State                                          ( liftIO )
 import Control.Concurrent.MVar
-import Prelude                                                      hiding ( exp, map, sum, scanl, scanr )
+import Data.Maybe                                                   ( fromMaybe )
 
 instance Execute UniformScheduleFun PTXKernel where
   data Linked UniformScheduleFun PTXKernel t = PTXLinked (UniformScheduleFun PTXKernel () t)
@@ -165,9 +166,18 @@ executeEffect env = \case
   Exec _ kernelFun args
     | Exists kernel <- kernelFunKernel kernelFun -> do
       stream <- asks ptxStream
-      let n = 1024 * 64 -- TODO
-      let (lifetimes, args') = kernelArgs env args
-      liftIO $ launch kernel stream n args'
+      let (lifetimes, intArgs, args') = kernelArgs env args
+      let intArgs' = reverse intArgs
+      let n = product
+            $ fmap (\idx -> fromMaybe (internalError "Expected Int argument for kernel grid size") $ intArgs' Prelude.!! idxToInt idx)
+            $ kernelMaxGridSize kernel
+      -- We start a kernel with the grid size being the minimum of the
+      -- iteration size ('n') and the maximum number of threads the GPU can
+      -- concurrently run for this kernel (computed in 'launchConfig').
+      -- To simplify things, we could also always launch the latter number of
+      -- threads and ignore the input size (the code in the kernel works with
+      -- any grid size).
+      when (n /= 0) $ liftIO $ launch kernel stream n args'
       -- Ensure 'touchLifetime' is called when we next synchronise.
       cleanUpTouchLifetime $ kernelLinked kernel
       mapM_ (\(Exists l) -> cleanUpTouchLifetime l) lifetimes
@@ -206,21 +216,27 @@ launch kernel stream n args = do
   let kernelData = CUDA.nullDevPtr :: CUDA.DevicePtr Word8
   CUDA.launchKernel (kernelObjFun obj) grid cta smem (Just stream) (CUDA.VArg kernelData : reverse args)
 
-kernelArgs :: Gamma env -> SArgs env f -> ([Exists Lifetime], [CUDA.FunParam])
-kernelArgs _ ArgsNil = ([], [])
+kernelArgs :: Gamma env -> SArgs env f -> ([Exists Lifetime], [Maybe Int], [CUDA.FunParam])
+kernelArgs _ ArgsNil = ([], [], [])
 kernelArgs env (SArgScalar (Var tp idx) :>: args) = case prj' idx env of
   ValueScalar _ value
     | ScalarDict <- scalarDict tp ->
-      (lifetimes, CUDA.VArg value : args')
+      let
+        intArg :: Maybe Int
+        intArg = case tp of
+          SingleScalarType (NumSingleType (IntegralNumType TypeInt)) -> Just value
+          _ -> Nothing
+      in
+        (lifetimes, intArg : intArgs, CUDA.VArg value : args')
   _ -> internalError "Scalar impossible"
   where
-    (lifetimes, args') = kernelArgs env args
+    (lifetimes, intArgs, args') = kernelArgs env args
 kernelArgs env (SArgBuffer _ (Var _ idx) :>: args) = case prj' idx env of
   ValueBuffer (PTXBuffer _ lifetime) ->
-    (Exists lifetime : lifetimes, CUDA.VArg (unsafeGetValue lifetime) : args')
+    (Exists lifetime : lifetimes, Nothing : intArgs, CUDA.VArg (unsafeGetValue lifetime) : args')
   ValueScalar _ _ -> internalError "Scalar impossible"
   where
-    (lifetimes, args') = kernelArgs env args
+    (lifetimes, intArgs, args') = kernelArgs env args
 
 evalArrayInstr :: Gamma env -> EvalArrayInstr Par (ArrayInstr env)
 evalArrayInstr env = EvalArrayInstr $ \instr arg -> case instr of

@@ -27,6 +27,7 @@ import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Type
+import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.AST.Kernel
@@ -69,6 +70,14 @@ data PTXKernel env where
        , kernelLinked     :: Lifetime KernelObject
        , kernelId         :: {-# UNPACK #-} !ShortByteString
        , kernelUID        :: {-# UNPACK #-} !UID
+       -- Note: [PTX Kernel Grid Size]
+       -- We always assign a one-dimensional grid size, for simplicity.
+       -- The product of the variables in kernelMaxGridSize denotes the maximum
+       -- grid size for the kernel. The actual grid size is the minimum of this
+       -- number, and the number of threads that the GPU can execute
+       -- concurrently (which depends on things like the register pressure),
+       -- and is computed in 'launchConfig'.
+       , kernelMaxGridSize :: [Idx env Int]
        -- Note: [Kernel Memory]
        -- Each kernel call gets a memory that is shared between all the threads
        -- working on this kernel.
@@ -83,7 +92,7 @@ data PTXKernel env where
     -> PTXKernel env
 
 instance NFData' PTXKernel where
-  rnf' (PTXKernel obj !_ !_ !_ !_ s l) = rnf' obj `seq` rnf s `seq` rnf l
+  rnf' (PTXKernel obj !_ !_ !_ sz !_ s l) = rnf' obj `seq` rnf sz `seq` rnf s `seq` rnf l
 
 newtype PTXKernelMetadata f =
   PTXKernelMetadata { kernelArgsSize :: Int }
@@ -97,13 +106,13 @@ instance IsKernel PTXKernel where
   type KernelMetadata  PTXKernel = PTXKernelMetadata
 
   compileKernel env cluster args = unsafePerformIO $ evalPTX defaultTarget $ do
-    (sz, module') <- codegen fullName env cluster args
+    ((maxGridSize, smemSize), module') <- codegen fullName env cluster args
     dev <- gets ptxDeviceProperties
     -- TODO: Change simpleLaunchConfig to launchConfig when we use shared memory
     obj <- compile uid (fromString $ fullName) (simpleLaunchConfig dev) module'
     obj `seq` return ()
     linked <- link obj
-    return $ PTXKernel obj linked (fromString $ fullName) uid sz detail brief
+    return $ PTXKernel obj linked (fromString $ fullName) uid maxGridSize smemSize detail brief
     where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "_" ++ show uid
@@ -118,9 +127,9 @@ instance PrettyKernel PTXKernel where
     where
       go :: OpenKernelFun PTXKernel env t -> Adoc
       go (KernelFunLam _ f) = go f
-      go (KernelFunBody (PTXKernel _ _ name _ _ "" _))
+      go (KernelFunBody (PTXKernel _ _ name _ _ _ "" _))
         = fromString $ take 32 $ toString name
-      go (KernelFunBody (PTXKernel _ _ name _ _ detail brief))
+      go (KernelFunBody (PTXKernel _ _ name _ _ _ detail brief))
         = fromString (take 32 $ toString name)
         <+> flatAlt (group $ line' <> "-- " <> desc)
           ("{- " <> desc <> "-}")

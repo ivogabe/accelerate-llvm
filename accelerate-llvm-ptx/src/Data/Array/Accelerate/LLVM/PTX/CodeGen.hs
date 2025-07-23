@@ -24,6 +24,7 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen (
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape (shapeRFromRank, shapeType, rank)
 import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Partitioned as P hiding (combine)
 import Data.Array.Accelerate.Analysis.Exp
@@ -57,7 +58,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 -- import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (atomically)
-import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists))
+import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists), flattenTupR)
 import Control.Monad
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
@@ -70,7 +71,8 @@ codegen :: String
         -> Clustered PTXOp args
         -> Args env args
         -> LLVM PTX
-           ( Int -- The size of the kernel data, shared by all threads working on this kernel.
+           ( ( [Idx env Int] -- The product of these variables is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
+             , Int ) -- The size of the kernel data, shared by all threads working on this kernel.
            , Module (KernelType env))
 codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
@@ -104,11 +106,18 @@ codegen name env cluster args
 
       return_
 
-    return 0 -- We don't use kernel data yet
+    let maxGridSize = map sizeVar $ flattenTupR sizes
+    let kernelMemSize = 0 -- We don't use kernel data yet
+    return (maxGridSize, kernelMemSize)
   where
     (bindArgs, extractEnv, gamma) = bindEnvArgs @PTX env
     kernelDataRawType :: PrimType (Ptr (SizedArray Word))
     kernelDataRawType = PtrPrimType (ArrayPrimType 0 primType) defaultAddrSpace
+
+    sizeVar :: Exists (Var GroundR env) -> Idx env Int
+    sizeVar (Exists (Var (GroundRscalar (SingleScalarType (NumSingleType (IntegralNumType TypeInt)))) idx))
+      = idx
+    sizeVar _ = internalError "Expected Int variable"
 
 opCodeGen :: FlatOp PTXOp env idxEnv -> (LoopDepth, OpCodeGen PTX PTXOp env idxEnv)
 opCodeGen (FlatOp PTXGenerate args idxArgs) = defaultCodeGenGenerate args idxArgs
