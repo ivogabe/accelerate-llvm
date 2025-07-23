@@ -47,8 +47,10 @@ import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction
 
 import Data.Maybe
+import Control.Monad
 
 type CG f = forall target op env idxEnv. CompileForeignExp target => Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
+type CGLoop f = forall target op env idxEnv. CompileForeignExp target => FlatOp op env idxEnv -> Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
 
 defaultCodeGenGenerate :: CG (Fun' (sh -> t) -> Out sh t -> ())
 defaultCodeGenGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _) =
@@ -126,3 +128,221 @@ defaultCodeGenPermuteUnique (output :>: source :>: _) (_ :>: IdxArgIdx depth sou
   where
     ArgArray _ (ArrayR shr _) sh _ = output
 defaultCodeGenPermuteUnique _ _ = internalError "Missing index for argument of permute"
+
+defaultCodeGenFold
+  :: CGLoop (Fun' (e -> e -> e) -> Exp' e -> In (sh, Int) e -> Out sh e -> ())
+defaultCodeGenFold flatOp (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _) (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _) =
+  ( depth
+  , OpCodeGenLoop
+    flatOp
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      return var
+    )
+    (\var envs -> do
+      x <- readArray' envs input inputIdx
+      accum <- tupleLoad tp var
+      new <-
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+    )
+    (\var envs -> do
+      value <- tupleLoad tp var
+      writeArray' envs output outputIdx value
+    )
+  )
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+defaultCodeGenFold _ _ _ = internalError "Missing index for argument of fold"
+
+defaultCodeGenFold1
+  :: CGLoop (Fun' (e -> e -> e) -> In (sh, Int) e -> Out sh e -> ())
+defaultCodeGenFold1 flatOp (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _) =
+  -- TODO: Try to find an identity value, and convert to NFold
+  ( depth
+  , OpCodeGenLoop
+    flatOp
+    PeelGuaranteed
+    (\_ -> tupleAlloca tp)
+    (\var envs -> do
+      x <- readArray' envs input inputIdx
+      -- Note: if the loop peeling is applied (separating the first iteration
+      -- of the loop), then this code will be executed twice. envsIsFirst envs
+      -- will then either be a constant True, or a constant False.
+      -- ifThenElse' (opposed to the version with a prime) will then generate
+      -- code for only one branch, and thus also without conditional jumps.
+      new <- A.ifThenElse' (tp, envsIsFirst envs)
+        ( do
+          return x
+        )
+        ( do
+          accum <- tupleLoad tp var
+          if envsDescending envs then
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+          else
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+        )
+      tupleStore tp var new
+    )
+    (\var envs -> do
+      value <- tupleLoad tp var
+      writeArray' envs output outputIdx value
+    )
+  )
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+defaultCodeGenFold1 _ _ _ = internalError "Missing index for argument of fold1"
+
+defaultCodeGenScan1 :: Direction -> CGLoop (Fun' (e -> e -> e) -> In (sh, Int) e -> Out (sh, Int) e -> ())
+defaultCodeGenScan1 dir flatOp (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _) =
+  -- TODO: Try to find an identity value to prevent loop peeling / the conditional in the body of the loop.
+  -- Ideally we add a PostScan as primitive, such that we can convert a scan1 into a postscan
+  ( depth - 1
+  , OpCodeGenLoop
+    flatOp
+    PeelConditional
+    (\_ -> tupleAlloca tp)
+    (\var envs -> do
+      x <- readArray' envs input inputIdx
+      new <- A.ifThenElse' (tp, envsIsFirst envs)
+        ( do
+          return x
+        )
+        ( do
+          accum <- tupleLoad tp var
+          if envsDescending envs then do
+            when (dir /= RightToLeft) $ internalError "Wrong direction in scan1"
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+          else do
+            when (dir /= LeftToRight) $ internalError "Wrong direction in scan1"
+            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+        )
+      tupleStore tp var new
+      writeArray' envs output outputIdx new
+    )
+    (\_ _ -> return ())
+  )
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+defaultCodeGenScan1 _ _ _ _ = internalError "Missing index for argument of scan1"
+
+defaultCodeGenScan' :: Direction -> CGLoop (Fun' (e -> e -> e) -> Exp' e -> In (sh, Int) e -> Out (sh, Int) e -> Out sh e -> ())
+defaultCodeGenScan' dir flatOp
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
+    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx depth foldOutputIdx :>: _) =
+  ( depth
+  , OpCodeGenLoop
+    flatOp
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      return var
+    )
+    (\var envs -> do
+      accum <- tupleLoad tp var
+      writeArray' envs output outputIdx accum
+      x <- readArray' envs input inputIdx
+      new <-
+        if envsDescending envs then do
+          when (dir /= RightToLeft) $ internalError "Wrong direction in scan'"
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else do
+          when (dir /= LeftToRight) $ internalError "Wrong direction in scan'"
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+    )
+    (\var envs -> do
+      value <- tupleLoad tp var
+      writeArray' envs foldOutput foldOutputIdx value
+    )
+  )
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+defaultCodeGenScan' _ _ _ _ = internalError "Missing index for argument of scan'"
+
+defaultCodeGenScan :: Direction -> CGLoop (Fun' (e -> e -> e) -> Exp' e -> In (sh, Int) e -> Out (sh, Int) e -> ())
+defaultCodeGenScan LeftToRight flatOp
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
+    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _) =
+  ( depth - 1
+  , OpCodeGenLoop
+    flatOp
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      return var
+    )
+    (\var envs -> do
+      when (envsDescending envs) $ internalError "Wrong direction in scan"
+      accum <- tupleLoad tp var
+      writeArray' envs output inputIdx accum
+      x <- readArray' envs input inputIdx
+      new <-
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+    )
+    (\var envs -> do
+      value <- tupleLoad tp var
+      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
+      writeArrayAt' envs output rowIdx n' value
+    )
+  )
+  where
+    ArgArray _ (ArrayR _ tp) inputSh _ = input
+    n = case inputSh of
+      TupRpair _ (TupRsingle n') -> n'
+      _ -> internalError "Shape impossible"
+    rowIdx = case inputIdx of
+      TupRpair i _ -> i
+      _ -> internalError "Shape impossible"
+defaultCodeGenScan RightToLeft flatOp
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
+    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _) =
+  ( depth - 1
+  , OpCodeGenLoop
+    flatOp
+    PeelNot
+    (\envs -> do
+      var <- tupleAlloca tp
+      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp var seed'
+      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
+      writeArrayAt' envs output rowIdx n' seed'
+      return var
+    )
+    (\var envs -> do
+      unless (envsDescending envs) $ internalError "Wrong direction in scan"
+      accum <- tupleLoad tp var
+      x <- readArray' envs input inputIdx
+      new <-
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      tupleStore tp var new
+      writeArray' envs output inputIdx new
+    )
+    (\_ _ -> return ())
+  )
+  where
+    ArgArray _ (ArrayR _ tp) inputSh _ = input
+    n = case inputSh of
+      TupRpair _ (TupRsingle n') -> n'
+      _ -> internalError "Shape impossible"
+    rowIdx = case inputIdx of
+      TupRpair i _ -> i
+      _ -> internalError "Shape impossible"
+defaultCodeGenScan _ _ _ _ = internalError "Missing index for argument of scan"
