@@ -269,7 +269,7 @@ pattern OutDims  l = BackendSpecific (Dims           OutArr l)
 -- pattern OutDepth l = BackendSpecific (DepthPerThread OutArr l)
 
 -- TODO: factor out more common parts of mkGraph
--- TODO: do the TODO's in here, and also do them in the Interpreter\
+-- TODO: do the TODO's in here, and also do them in the Interpreter
 -- TODO: constraints and bounds for the new variable(s)
 instance MakesILP NativeOp where
   type BackendVar NativeOp = NativeILPVar
@@ -375,7 +375,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. int (_labelId l)
+        <> ILP.c (OutFoldSize l) .==. int (_labelId l)
         <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
         <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
         -- <> foldMap (\lin -> fused lin l .==. int 1) lIns
@@ -385,7 +385,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. int (_labelId l)
+        <> ILP.c (OutFoldSize l) .==. int (_labelId l)
         <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
         <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
         -- <> foldMap (\lin -> fused lin l .==. int 1) lIns
