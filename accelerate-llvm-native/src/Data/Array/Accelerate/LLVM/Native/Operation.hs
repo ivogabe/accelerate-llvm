@@ -265,7 +265,7 @@ instance SetOpIndices NativeOp where
 -- pattern OutDepth l = BackendSpecific (DepthPerThread OutArr l)
 
 -- TODO: factor out more common parts of mkGraph
--- TODO: do the TODO's in here, and also do them in the Interpreter\
+-- TODO: do the TODO's in here, and also do them in the Interpreter
 -- TODO: constraints and bounds for the new variable(s)
 -- TODO: remove commented out old code
 instance MakesILP NativeOp where
