@@ -98,6 +98,7 @@ codegen name env cluster args
     workBlock <- newBlock "work"
     _ <- switch (OP_Word64 flag) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
+    let useSharded = hasFold flat -- Probably check if scan
 
     if parallelDepth == 0 && rank shr /= 0 then do
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -105,8 +106,13 @@ codegen name env cluster args
             [] -> internalError "Expected at least one loop since rank shr /= 0"
             (l:ls) -> (l, ls)
 
+      -- let opCode = opCodeGens opCodeGen flatOps
+      -- let parGen = parCodeGens (parCodeGen (isDescending direction)) 0 opCode
+      -- let parGenSharded = parCodeGens (parCodeGenSharded (isDescending direction)) 0 opCode
       -- Parallelise over first dimension using parallel folds or scans
-      case parCodeGens (parCodeGen $ isDescending direction) 0 $ opCodeGens opCodeGen flatOps of
+      case parCodeGens (
+        (if useSharded then parCodeGenSharded else parCodeGen) -- Use sharded if operation has a fold
+        (isDescending direction)) 0 $ opCodeGens opCodeGen flatOps of
         Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
         Just (Exists parCodes) -> do
           let hasScan = parCodeGenHasMultipleTileLoops parCodes
@@ -119,6 +125,8 @@ codegen name env cluster args
                   -- still in the cache during the second tile loop (the scan
                   -- step of the chained scan).
                   1024 * 2
+                else if useSharded then
+                  1024 -- Use smaller tile size when we are using sharded self scheduling
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
@@ -141,8 +149,10 @@ codegen name env cluster args
           do
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
-            -- Decide whether tileCount is large enough
 
+            when useSharded $ initShards shardIndexes shardSizes workassistIndex (OP_Word64 tileCount)
+  
+            -- Decide whether tileCount is large enough
             OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
             value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
             retval_ value
@@ -170,103 +180,110 @@ codegen name env cluster args
           -- only used in one tile loop. These arrays can also be stored as a
           -- single value.
           envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
-          workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
-            tileIdx <- instr' $ BitCast scalarType tileIdx'
+          
+          let processTile :: (Operand Bool -> Operand Word64 -> Maybe (Operand Word64) -> CodeGen Native ())
+              processTile seqMode tileIdx' _ = do
+                -- workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
+                tileIdx <- instr' $ BitCast scalarType tileIdx'
 
-            tileIdxAbsolute <-
-              -- For a scanr, convert low-to-high indices to high-to-low indices:
-              -- The first block (with tileIdx 0) should now correspond with the last
-              -- values of the array. We implement that by reversing the tile indices here.
-              if isDescending direction then do
-                i <- A.sub numType (OP_Int tileCount') (OP_Int tileIdx)
-                OP_Int j <- A.sub numType i (A.liftInt 1)
-                return j
-              else
-                return tileIdx
-            lower <- A.mul numType (OP_Int tileIdxAbsolute) (A.liftInt tileSize)
-            upper' <- A.add numType lower (A.liftInt tileSize)
-            upper <- A.min singleType upper' size
+                tileIdxAbsolute <-
+                  -- For a scanr, convert low-to-high indices to high-to-low indices:
+                  -- The first block (with tileIdx 0) should now correspond with the last
+                  -- values of the array. We implement that by reversing the tile indices here.
+                  if isDescending direction then do
+                    i <- A.sub numType (OP_Int tileCount') (OP_Int tileIdx)
+                    OP_Int j <- A.sub numType i (A.liftInt 1)
+                    return j
+                  else
+                    return tileIdx
+                lower <- A.mul numType (OP_Int tileIdxAbsolute) (A.liftInt tileSize)
+                upper' <- A.add numType lower (A.liftInt tileSize)
+                upper <- A.min singleType upper' size
 
-            -- If there is only a single tile loop (i.e. no parallel scans),
-            -- then we don't generate code for a single-threaded mode:
-            -- the default mode already is as fast as a single-threaded mode.
-            let seqMode' = if null (ptOtherLoops tileLoops) then boolean False else seqMode
+                -- If there is only a single tile loop (i.e. no parallel scans),
+                -- then we don't generate code for a single-threaded mode:
+                -- the default mode already is as fast as a single-threaded mode.
+                let seqMode' = if null (ptOtherLoops tileLoops) then boolean False else seqMode
 
-            let envs''' = envs''{
-                envsTileIndex = OP_Int tileIdx
-              }
+                let envs''' = envs''{
+                    envsTileIndex = OP_Int tileIdx
+                  }
 
-            -- Note: ifThenElse' does not generate code for the then-branch if
-            -- the condition is a constant. Thus, if a kernel does not have a
-            -- scan, we won't generate separate code for a single-threaded mode.
-            _ <- A.ifThenElse' (TupRunit, OP_Bool seqMode')
-              -- Sequential mode
-              (do
-                let tileLoop = ptSingleThreaded tileLoops
-                let ann =
-                      -- Only do loop peeling if requested and when there are no nested loops.
-                      -- Peeling over nested loops causes a lot of code duplication,
-                      -- and is probably not worth it.
-                      [ Loop.LoopPeel | ptPeel tileLoop && null loops' ]
-                      -- We can use LoopNonEmpty since we
-                      -- know that each tile is non-empty.
-                      -- We cannot vectorize this loop (yet), as LLVM cannot vectorize loops
-                      -- containing scans. We should either wait until LLVM supports this,
-                      -- or vectorize loops (partially) ourselves.
-                      -- As an alternative to vectorization, we ask LLVM to interleave the loop.
-                      ++ [ Loop.LoopNonEmpty, Loop.LoopInterleave ]
+                -- Note: ifThenElse' does not generate code for the then-branch if
+                -- the condition is a constant. Thus, if a kernel does not have a
+                -- scan, we won't generate separate code for a single-threaded mode.
+                _ <- A.ifThenElse' (TupRunit, OP_Bool seqMode')
+                  -- Sequential mode
+                  (do
+                    let tileLoop = ptSingleThreaded tileLoops
+                    let ann =
+                          -- Only do loop peeling if requested and when there are no nested loops.
+                          -- Peeling over nested loops causes a lot of code duplication,
+                          -- and is probably not worth it.
+                          [ Loop.LoopPeel | ptPeel tileLoop && null loops' ]
+                          -- We can use LoopNonEmpty since we
+                          -- know that each tile is non-empty.
+                          -- We cannot vectorize this loop (yet), as LLVM cannot vectorize loops
+                          -- containing scans. We should either wait until LLVM supports this,
+                          -- or vectorize loops (partially) ourselves.
+                          -- As an alternative to vectorization, we ask LLVM to interleave the loop.
+                          ++ [ Loop.LoopNonEmpty, Loop.LoopInterleave ]
 
-                ptBefore tileLoop envs'''
-                Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
-                  localIdx <- A.sub numType idx lower
-                  let envs'''' = envs'''{
-                      envsLoopDepth = 1,
-                      envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
-                      envsIsFirst = isFirst,
-                      envsTileLocalIndex = localIdx
-                    }
-                  genSequential envs'''' loops' $ ptIn tileLoop
-                ptAfter tileLoop envs'''
-                return OP_Unit
-              )
-              -- Parallel mode
-              (do
-                forM_ ((True, ptFirstLoop tileLoops) : map (False, ) (ptOtherLoops tileLoops)) $ \(isFirstTileLoop, tileLoop) -> do
-                  -- All nested loops are placed in the first tile loop by parCodeGens
-                  let loops'' = if isFirstTileLoop then loops' else []
-                  let ann =
-                        -- Only do loop peeling if requested and when there are no nested loops.
-                        -- Peeling over nested loops causes a lot of code duplication,
-                        -- and is probably not worth it.
-                        [ Loop.LoopPeel | ptPeel tileLoop && null loops'' ]
-                        -- LLVM cannot vectorize loops containing scans (yet).
-                        -- The first tile loop only does a reduction, others will perform a scan.
-                        -- Loops containing permute (not permuteUnique) can
-                        -- also not be vectorized.
-                        -- Reduction cannot always be vectorized. This might in particular fail
-                        -- on reductions of multiple values (tuples/pairs). For now, we thus do
-                        -- not request vectorization, until we can reliably know whether LLVM can
-                        -- vectorize something, or generate our code in a form that LLVM can
-                        -- definitely vectorize.
-                        ++ [ Loop.LoopInterleave ] -- Loop.LoopVectorize
-                        -- We can use LoopNonEmpty since we
-                        -- know that each tile is non-empty.
-                        ++ [ Loop.LoopNonEmpty ]
+                    ptBefore tileLoop envs'''
+                    Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
+                      localIdx <- A.sub numType idx lower
+                      let envs'''' = envs'''{
+                          envsLoopDepth = 1,
+                          envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
+                          envsIsFirst = isFirst,
+                          envsTileLocalIndex = localIdx
+                        }
+                      genSequential envs'''' loops' $ ptIn tileLoop
+                    ptAfter tileLoop envs'''
+                    return OP_Unit
+                  )
+                  -- Parallel mode
+                  (do
+                    forM_ ((True, ptFirstLoop tileLoops) : map (False, ) (ptOtherLoops tileLoops)) $ \(isFirstTileLoop, tileLoop) -> do
+                      -- All nested loops are placed in the first tile loop by parCodeGens
+                      let loops'' = if isFirstTileLoop then loops' else []
+                      let ann =
+                            -- Only do loop peeling if requested and when there are no nested loops.
+                            -- Peeling over nested loops causes a lot of code duplication,
+                            -- and is probably not worth it.
+                            [ Loop.LoopPeel | ptPeel tileLoop && null loops'' ]
+                            -- LLVM cannot vectorize loops containing scans (yet).
+                            -- The first tile loop only does a reduction, others will perform a scan.
+                            -- Loops containing permute (not permuteUnique) can
+                            -- also not be vectorized.
+                            -- Reduction cannot always be vectorized. This might in particular fail
+                            -- on reductions of multiple values (tuples/pairs). For now, we thus do
+                            -- not request vectorization, until we can reliably know whether LLVM can
+                            -- vectorize something, or generate our code in a form that LLVM can
+                            -- definitely vectorize.
+                            ++ [ Loop.LoopInterleave ] -- Loop.LoopVectorize
+                            -- We can use LoopNonEmpty since we
+                            -- know that each tile is non-empty.
+                            ++ [ Loop.LoopNonEmpty ]
 
-                  ptBefore tileLoop envs'''
-                  Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
-                    localIdx <- A.sub numType idx lower
-                    let envs'''' = envs'''{
-                        envsLoopDepth = 1,
-                        envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
-                        envsIsFirst = isFirst,
-                        envsTileLocalIndex = localIdx
-                      }
-                    genSequential envs'''' loops'' $ ptIn tileLoop
-                  ptAfter tileLoop envs'''
-                return OP_Unit
-              )
-            return ()
+                      ptBefore tileLoop envs'''
+                      Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
+                        localIdx <- A.sub numType idx lower
+                        let envs'''' = envs'''{
+                            envsLoopDepth = 1,
+                            envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
+                            envsIsFirst = isFirst,
+                            envsTileLocalIndex = localIdx
+                          }
+                        genSequential envs'''' loops'' $ ptIn tileLoop
+                      ptAfter tileLoop envs'''
+                    return OP_Unit
+                  )
+                return ()
+
+          if useSharded 
+            then shardedSelfScheduling shardIndexes shardSizes workassistIndex processTile
+            else workassistLoop workassistIndex tileCount (\seq tile -> processTile seq tile Nothing)
 
           ptExit tileLoops envs'
 
@@ -642,6 +659,17 @@ parCodeGen descending (FlatOp (NScan dir)
       TupRpair i _ -> i
       _ -> internalError "Shape impossible"
 parCodeGen _ _ = Nothing
+
+parCodeGenSharded :: Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (ParLoopCodeGen Native env idxEnv))
+parCodeGenSharded descending (FlatOp NFold
+    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
+    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
+  = Just $ parCodeGenFold descending fun (Just seed) input output inputIdx outputIdx
+parCodeGenSharded descending (FlatOp NFold1
+    (ArgFun fun :>: input :>: output :>: _)
+    (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
+  = Just $ parCodeGenFold descending fun Nothing input output inputIdx outputIdx
+parCodeGenSharded _ _ = Nothing
 
 parCodeGenFold
   :: Bool
@@ -1023,4 +1051,15 @@ hasNPermute (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
     go (FlatOpsBind _ _ _ ops) = go ops
     go (FlatOpsOp (FlatOp NPermute _ _) _) = True
     go (FlatOpsOp (FlatOp NPermute' _ _) _) = True
+    go (FlatOpsOp _ ops) = go ops
+
+-- Checks if the cluster has a fold.
+hasFold :: FlatCluster NativeOp env -> Bool
+hasFold (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
+  where
+    go :: FlatOps NativeOp env idxEnv -> Bool
+    go FlatOpsNil = False
+    go (FlatOpsBind _ _ _ ops) = go ops
+    go (FlatOpsOp (FlatOp NFold _ _) _) = True
+    go (FlatOpsOp (FlatOp NFold1 _ _) _) = True
     go (FlatOpsOp _ ops) = go ops

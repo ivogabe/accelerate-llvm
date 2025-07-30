@@ -184,7 +184,7 @@ shardedSelfScheduling
     :: Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- combined: high 32 bits = next shard index, low 32 bits = finished shard count
-    -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
+    -> (Operand Bool -> Operand Word64 -> Maybe (Operand Word64) -> CodeGen Native ())
     -> CodeGen Native ()
 shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = do
   entry    <- getBlock
@@ -251,7 +251,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
 
   -- Sequential mode needs to be false here, as it is only used in 
   -- a scan operation and this scheduler is never used for scans
-  doWork (boolean False) workIdx
+  doWork (boolean False) workIdx (Just shardIdx)
 
   _ <- br inner
 
@@ -278,7 +278,7 @@ shardedSelfSchedulingChunked
     -> CodeGen Native ()
 shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShardFinishedShards chunkSz' sh chunkCounts doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
-  shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards $ \_ chunkLinearIndex -> do
+  shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards $ \_ chunkLinearIndex shardIdx -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex
