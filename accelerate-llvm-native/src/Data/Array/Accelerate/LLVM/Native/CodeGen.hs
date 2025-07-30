@@ -94,12 +94,8 @@ codegen name env cluster args
     -- This first call will initialize kernel memory (SEE: Kernel Memory)
     -- and decide whether the runtime may try to let multiple threads work on this kernel.
     initBlock <- newBlock "init"
-    initShardsBlock <- newBlock "init.shards"
-    initExitBlock <- newBlock "init.exit"
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
-    shardWorkBlock <- newBlock "work.shards"
-    workAssistBlock <- newBlock "work.workassist"
     _ <- switch (OP_Word64 flag) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
 
@@ -289,22 +285,15 @@ codegen name env cluster args
       let parSizes = parallelIterSize parallelShr loops
 
       setBlock initBlock
-      
+
       tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
       tileCount' <- shapeSize parallelShr tileCount
-      enoughTiles <- A.gt singleType tileCount' (A.liftInt $ fromIntegral shardAmount)
-      _ <- cbr enoughTiles initShardsBlock initExitBlock
-      
+
       -- We are not using kernel memory, so no need to initialize it.
 
-      setBlock initShardsBlock
-      
       tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
-      initShards shardIndexes shardSizes tileCount64
-      _ <- br initExitBlock
+      initShards shardIndexes shardSizes workassistIndex tileCount64
 
-      setBlock initExitBlock
-       
       OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
       value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
 
@@ -315,35 +304,14 @@ codegen name env cluster args
       retval_ $ scalar (scalarType @Word8) 0
 
       setBlock workBlock
-      let ann = 
+      let ann =
             if parallelDepth /= rank shr then []
             else if hasPermute then [Loop.LoopInterleave]
             else [Loop.LoopVectorize]
 
-      -- Check if there are more tiles than shards. Only use sharded self scheduling if there are, 
-      -- otherwise use work assisting.
       tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
-      tileCount' <- shapeSize parallelShr tileCount
-      enoughTiles <- A.gt singleType tileCount' (A.liftInt $ fromIntegral shardAmount)
-      _ <- cbr enoughTiles shardWorkBlock workAssistBlock
-
-      setBlock shardWorkBlock
 
       shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes workassistIndex tileSize parSizes tileCount $ \idx -> do
-        let envs' = envs{
-            envsLoopDepth = parallelDepth,
-            envsIdx =
-              foldr (\(o, i) -> Env.partialUpdate o i) (envsIdx envs)
-              $ zip (shapeOperandsToList parallelShr idx) (map (\(i, _, _) -> i) loops),
-            -- Independent operations should not depend on envsIsFirst.
-            envsIsFirst = OP_Bool $ boolean False,
-            envsDescending = False
-          }
-        genSequential envs' (drop parallelDepth loops) $ opCodeGens opCodeGen flatOps
-
-      setBlock workAssistBlock
-
-      workassistChunked ann parallelShr workassistIndex tileSize parSizes tileCount tileCount' $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -367,20 +335,26 @@ linkage :: Maybe LP.Linkage
 linkage = Just LP.DLLExport
 
 -- initShards needs to be called before sharded self scheduling.
-initShards 
+initShards
   :: Operand (Ptr (SizedArray Word64))  -- work indexes of shards
   -> Operand (Ptr (SizedArray Word64))  -- sizes of the shards
+  -> Operand (Ptr Word64) -- Finished shards count
   -> Operands Word64 -- Amount of tiles to be divided over the shards. Must be greater than the number of shards
   -> CodeGen Native ()
-initShards shardIndexes shardSizes tileCount = do
-  
+initShards shardIndexes shardSizes finishedShards tileCount = do
+
+  OP_Bool notenoughTiles <- A.lt singleType tileCount (A.liftWord64 shardAmount)
+  OP_Word64 tileDiff <- A.sub numType (A.liftWord64 64) tileCount
+  finished <- instr' $ Select notenoughTiles tileDiff (integral TypeWord64 0)
+  _ <- instr' $ Store NonVolatile finishedShards finished
+
   (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 tileCount (A.liftWord64 shardAmount)
 
   -- Initialize shardIndexes with the start index of every shard.
   imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
     shardStart <- A.mul numType (OP_Word64 i) (OP_Word64 shardMinSize)
     addRemainder <- A.min singleType (OP_Word64 i) remainder
-    OP_Word64 shard <- A.add numType shardStart addRemainder 
+    OP_Word64 shard <- A.add numType shardStart addRemainder
 
     -- Multiply the index by the cache width in bytes to ensure every shard is on a seperate cache line.
     OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 (cacheWidth `div` 8))
@@ -395,7 +369,7 @@ initShards shardIndexes shardSizes tileCount = do
     indexPlus1 <- A.add numType (OP_Word64 i) (A.liftWord64 1)
     shardStart <- A.mul numType indexPlus1 (OP_Word64 shardMinSize)
     addRemainder <- A.min singleType indexPlus1 remainder
-    OP_Word64 shard <- A.add numType shardStart addRemainder 
+    OP_Word64 shard <- A.add numType shardStart addRemainder
 
     -- Multiplying by the cache width is not necessary here as shardSizes is only read.
     shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty

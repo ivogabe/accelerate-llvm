@@ -43,8 +43,6 @@ import Data.Array.Accelerate.LLVM.CodeGen.Base
 import LLVM.AST.Type.Function
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.GetElementPtr
-import GHC.Prelude ((.&.))
-import Data.Bits (countTrailingZeros)
 
 
 -- | A standard 'for' loop, that steps from the start to end index executing the
