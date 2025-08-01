@@ -692,10 +692,7 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
   , Just i <- identity
   = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
   | otherwise
-  = parCodeGenScan descending True fun seed input inputIdx
-    (\_ _ -> return ())
-    (\_ _ -> return ())
-    (\_ _ -> return ())
+  = parcideGenFoldSharded descending fun seed input inputIdx
     (\envs result -> writeArray' envs output outputIdx result)
   where
     ArgArray _ (ArrayR _ tp) _ _ = output
@@ -707,6 +704,151 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
       = Just $ mkConstant tp v
       | otherwise
       = Nothing
+
+parcideGenFoldSharded
+  :: Bool -- Whether the loop is descending
+  -> Fun env (e -> e -> e)
+  -> Maybe (Exp env e) -- Seed
+  -> Arg env (In (sh, Int) e)
+  -> ExpVars idxEnv (sh, Int)
+  -- Code after the parallel loop
+  -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
+  -> Exists (ParLoopCodeGen Native env idxEnv)
+parcideGenFoldSharded descending fun Nothing input index codeEnd
+  | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
+  = parcideGenFoldSharded descending fun (Just $ mkConstant tp identity) input index codeEnd
+  where
+    ArgArray _ (ArrayR _ tp) _ _ = input
+parcideGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoopCodeGen
+  -- If we know an identity value, we can implement this without loop peeling
+  (isNothing identity)
+  -- In kernel memory, store the index of the block we must now handle and the
+  -- reduced value so far. 'Handle' here means that we should now add the value
+  -- of that block.
+  (mapTupR ScalarPrimType memoryTp)
+  -- Initialize kernel memory
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair (TupRsingle intPtr) valuePtrs -> do
+        _ <- instr' $ Store NonVolatile intPtr (integral TypeInt 0)
+        case seed of
+          Nothing -> return ()
+          Just s -> do
+            value <- llvmOfExp (compileArrayInstrEnvs envs) s
+            tupleStore tp valuePtrs value
+            return ()
+  )
+  -- Initialize a thread
+  (\_ _ -> tupleAlloca tp)
+  -- Code before the tile loop
+  (\_ accumVar _ envs ->
+    case identity of
+      Nothing -> return ()
+      Just identity' -> do
+        value <- llvmOfExp (compileArrayInstrEnvs envs) identity'
+        tupleStore tp accumVar value
+    
+  )
+  -- Code within the tile loop
+  (\_ accumVar _ envs -> do
+    -- Parallel mode.
+    -- Execute the reduce-phase of a parallel chained scan here.
+    x <- readArray' envs input index
+    new <-
+      if isJust identity then do
+        accum <- tupleLoad tp accumVar
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      else
+        A.ifThenElse' (tp, envsIsFirst envs)
+          ( do
+            return x
+          )
+          ( do
+            accum <- tupleLoad tp accumVar
+            if envsDescending envs then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+          )
+    tupleStore tp accumVar new
+  )
+  -- Code after the tile loop
+  (\_ accumVar ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair (TupRsingle idxPtr) valuePtrs -> do
+        _ <- Loop.while [] TupRunit
+          (\_ -> do
+            idx <- instr $ Load scalarTypeInt Volatile idxPtr
+            A.neq singleType idx (envsTileIndex envs)
+          )
+          (\_ -> return OP_Unit)
+          OP_Unit
+        _ <- instr' $ Fence (CrossThread, Acquire)
+
+        local <- tupleLoad tp accumVar
+
+        new <-
+          if isNothing seed then
+            -- If there is no seed, then write the output directly in the first tiles.
+            -- The other tiles must combine their result with the given operator.
+            A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
+              (do
+                return local
+              )
+              (do
+                prefix <- tupleLoad tp valuePtrs
+                tupleStore tp accumVar prefix
+                if envsDescending envs then
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
+                else
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
+              )
+          -- If there is a seed, then all tile will combine their local result with
+          -- the already available value.
+          else do
+            prefix <- tupleLoad tp valuePtrs
+            tupleStore tp accumVar prefix
+            if envsDescending envs then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
+        tupleStore tp valuePtrs new
+
+        _ <- instr' $ Fence (CrossThread, Release)
+        OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
+        _ <- instr' $ Store Volatile idxPtr nextIdx
+        return ()
+  )
+  (\_ _ _ -> return ())
+  -- Code after the loop
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair _ valuePtrs -> do
+        value <- tupleLoad tp valuePtrs
+        codeEnd envs value
+  )
+  Nothing
+  where
+    memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
+    ArgArray _ (ArrayR _ tp) _ _ = input
+    identity
+      | Just s <- seed
+      , if descending then isRightIdentity fun s else isLeftIdentity fun s
+      = Just s
+      | Just v <- if descending then findRightIdentity fun else findLeftIdentity fun
+      = Just $ mkConstant tp v
+      | otherwise
+      = Nothing
+
 
 parCodeGenFoldCommutative
   :: Bool
