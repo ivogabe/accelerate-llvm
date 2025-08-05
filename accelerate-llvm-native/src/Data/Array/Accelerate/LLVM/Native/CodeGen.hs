@@ -361,7 +361,7 @@ initShards
 initShards shardIndexes shardSizes finishedShards tileCount = do
 
   OP_Bool notenoughTiles <- A.lt singleType tileCount (A.liftWord64 shardAmount)
-  OP_Word64 tileDiff <- A.sub numType (A.liftWord64 64) tileCount
+  OP_Word64 tileDiff <- A.sub numType (A.liftWord64 shardAmount) tileCount
   finished <- instr' $ Select notenoughTiles tileDiff (integral TypeWord64 0)
   _ <- instr' $ Store NonVolatile finishedShards finished
 
@@ -692,7 +692,7 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
   , Just i <- identity
   = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
   | otherwise
-  = parcideGenFoldSharded descending fun seed input inputIdx
+  = parCodeGenFoldSharded descending fun seed input inputIdx
     (\envs result -> writeArray' envs output outputIdx result)
   where
     ArgArray _ (ArrayR _ tp) _ _ = output
@@ -705,7 +705,7 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
       | otherwise
       = Nothing
 
-parcideGenFoldSharded
+parCodeGenFoldSharded
   :: Bool -- Whether the loop is descending
   -> Fun env (e -> e -> e)
   -> Maybe (Exp env e) -- Seed
@@ -714,12 +714,12 @@ parcideGenFoldSharded
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parcideGenFoldSharded descending fun Nothing input index codeEnd
+parCodeGenFoldSharded descending fun Nothing input index codeEnd
   | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
-  = parcideGenFoldSharded descending fun (Just $ mkConstant tp identity) input index codeEnd
+  = parCodeGenFoldSharded descending fun (Just $ mkConstant tp identity) input index codeEnd
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-parcideGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoopCodeGen
+parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoopCodeGen
   -- If we know an identity value, we can implement this without loop peeling
   (isNothing identity)
   -- In kernel memory, store the index of the block we must now handle and the
