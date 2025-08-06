@@ -21,7 +21,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
   readBuffer,
   writeBuffer,
 
-  tupleAlloca, tuplePtrs, tupleStore, tupleLoad,
+  tupleAlloca, tuplePtrs, tuplePtrs', tupleStore, tupleLoad,
 
   intOfIndex
 
@@ -280,6 +280,17 @@ tuplePtrs tp ptr = go TupleIdxSelf tp
     go tupleIdx (TupRsingle t)
       | Refl <- reprIsSingle @ScalarType @e @Ptr t
       = TupRsingle <$> instr' (GetElementPtr $ gepStruct (ScalarPrimType t) ptr tupleIdx)
+
+tuplePtrs' :: forall full arch. TupR PrimType full -> Operand (Ptr (Struct full)) -> CodeGen arch (TupR Operand (Distribute Ptr full))
+tuplePtrs' tp ptr = go TupleIdxSelf tp
+  where
+    go :: forall e. TupleIdx full e -> TupR PrimType e -> CodeGen arch (TupR Operand (Distribute Ptr e))
+    go _ TupRunit = return TupRunit
+    go tupleIdx (TupRpair t1 t2)
+      = TupRpair <$> go (tupleLeft tupleIdx) t1 <*> go (tupleRight tupleIdx) t2
+    go tupleIdx (TupRsingle t)
+      | Refl <- reprIsSingle @PrimType @e @Ptr t
+      = TupRsingle <$> instr' (GetElementPtr $ gepStruct t ptr tupleIdx)
 
 tupleStore :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> Operands e -> CodeGen arch ()
 tupleStore TupRunit _ _ = return ()

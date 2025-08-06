@@ -725,13 +725,14 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
   -- of that block.
-  (mapTupR ScalarPrimType memoryTp)
+  memoryTp
   -- Initialize kernel memory
   (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
+    ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle intPtr) valuePtrs -> do
+      TupRpair (TupRsingle _) _ -> internalError "Pair impossible"
+      TupRpair (TupRpair (TupRsingle intPtr) _) valuePtrs -> do
         _ <- instr' $ Store NonVolatile intPtr (integral TypeInt 0)
         case seed of
           Nothing -> return ()
@@ -779,10 +780,11 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   )
   -- Code after the tile loop
   (\_ accumVar ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
+    ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle idxPtr) valuePtrs -> do
+      TupRpair (TupRsingle _) _ -> internalError "Pair impossible"
+      TupRpair (TupRpair (TupRsingle idxPtr) _) valuePtrs -> do
         _ <- Loop.while [] TupRunit
           (\_ -> do
             idx <- instr $ Load scalarTypeInt Volatile idxPtr
@@ -829,7 +831,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   (\_ _ _ -> return ())
   -- Code after the loop
   (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
+    ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair _ valuePtrs -> do
@@ -838,8 +840,10 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   )
   Nothing
   where
-    memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
+    memoryTp =  TupRsingle (ScalarPrimType scalarTypeInt) `TupRpair` TupRsingle shardIndexes `TupRpair` mapTupR ScalarPrimType tp 
     ArgArray _ (ArrayR _ tp) _ _ = input
+    shardIndexes :: PrimType (SizedArray Word64)
+    shardIndexes = ArrayPrimType (shardAmount * cacheWidth `div` 8) primType
     identity
       | Just s <- seed
       , if descending then isRightIdentity fun s else isLeftIdentity fun s
