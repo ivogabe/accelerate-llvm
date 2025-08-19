@@ -21,7 +21,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
   readBuffer,
   writeBuffer,
 
-  tupleAlloca, tuplePtrs, tuplePtrs', tupleStore, tupleLoad,
+  tupleAlloca, tuplePtrs, tuplePtrs', tupleStore, tupleLoad, tupleStoreArray,
 
   intOfIndex
 
@@ -53,6 +53,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
+import Data.Array.Accelerate.Representation.Type (tupleLeft, tupleRight)
 
 
 -- | Read a value from an array at the given index
@@ -301,6 +302,21 @@ tupleStore (TupRsingle tp) (TupRsingle ptr) value
     _ <- instr' $ Store NonVolatile ptr $ op tp value
     return ()
 tupleStore _ _ _ = internalError "Tuple mismatch"
+
+tupleStoreArray :: forall e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand Word64 -> Operands e -> CodeGen arch ()
+tupleStoreArray t a idx v = go t a v TupleIdxSelf
+  where 
+    go :: forall e'. TypeR e' -> Operand (Ptr (SizedArray (Struct e))) -> Operands e' -> TupleIdx e e' -> CodeGen arch ()
+    go TupRunit _ _ _ = return ()
+    go (TupRpair t1 t2) array (OP_Pair v1 v2) i = do
+      go t1 array v1 (tupleLeft i)
+      go t2 array v2 (tupleRight i)
+    go (TupRsingle tp) array value i 
+      | Refl <- reprIsSingle @ScalarType @e' @Ptr tp = do
+        ptr <- instr' $ GetElementPtr $ GEP array (integral TypeWord64 0) $ GEPArray idx $ GEPStruct (ScalarPrimType tp) i GEPEmpty
+        _ <- instr' $ Store NonVolatile ptr $ op tp value
+        return ()
+
 
 tupleLoad :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> CodeGen arch (Operands e)
 tupleLoad TupRunit _ = return OP_Unit

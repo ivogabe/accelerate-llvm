@@ -106,6 +106,7 @@ data Envs env idxEnv = Envs
   -- Whether the loop at the current loop depth is descending
   -- (iterating from high indices to low indices)
   , envsDescending :: Bool
+  , envsShardIdx :: Maybe (Operand Word64)
   }
 
 initEnv

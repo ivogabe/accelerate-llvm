@@ -182,7 +182,7 @@ codegen name env cluster args
           envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
           
           let processTile :: (Operand Bool -> Operand Word64 -> Maybe (Operand Word64) -> CodeGen Native ())
-              processTile seqMode tileIdx' _ = do
+              processTile seqMode tileIdx' shardIdx = do
                 -- workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
                 tileIdx <- instr' $ BitCast scalarType tileIdx'
 
@@ -206,7 +206,8 @@ codegen name env cluster args
                 let seqMode' = if null (ptOtherLoops tileLoops) then boolean False else seqMode
 
                 let envs''' = envs''{
-                    envsTileIndex = OP_Int tileIdx
+                    envsTileIndex = OP_Int tileIdx,
+                    envsShardIdx = shardIdx
                   }
 
                 -- Note: ifThenElse' does not generate code for the then-branch if
@@ -706,7 +707,8 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
       = Nothing
 
 parCodeGenFoldSharded
-  :: Bool -- Whether the loop is descending
+  :: forall env idxEnv sh e.
+     Bool -- Whether the loop is descending
   -> Fun env (e -> e -> e)
   -> Maybe (Exp env e) -- Seed
   -> Arg env (In (sh, Int) e)
@@ -732,14 +734,24 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair (TupRsingle _) _ -> internalError "Pair impossible"
-      TupRpair (TupRpair (TupRsingle intPtr) _) valuePtrs -> do
+      TupRpair (TupRpair (TupRsingle intPtr) (TupRsingle shardIndexes)) valuePtrs -> do
         _ <- instr' $ Store NonVolatile intPtr (integral TypeInt 0)
         case seed of
           Nothing -> return ()
           Just s -> do
             value <- llvmOfExp (compileArrayInstrEnvs envs) s
             tupleStore tp valuePtrs value
-            return ()
+            imapFromStepTo 
+              [Loop.LoopVectorize, Loop.LoopNonEmpty] 
+              (A.liftWord64 0) 
+              (A.liftWord64 (cacheWidth `div` 8)) 
+              (A.liftWord64 (shardAmount * cacheWidth `div` 8)) 
+              (\(OP_Word64 idx) -> do
+                _ <- tupleStoreArray tp shardIndexes idx value
+                -- shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
+                -- _ <- instr' $ Store NonVolatile shard (op tp value)
+                return ()
+              )
   )
   -- Initialize a thread
   (\_ _ -> tupleAlloca tp)
@@ -842,8 +854,8 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   where
     memoryTp =  TupRsingle (ScalarPrimType scalarTypeInt) `TupRpair` TupRsingle shardIndexes `TupRpair` mapTupR ScalarPrimType tp 
     ArgArray _ (ArrayR _ tp) _ _ = input
-    shardIndexes :: PrimType (SizedArray Word64)
-    shardIndexes = ArrayPrimType (shardAmount * cacheWidth `div` 8) primType
+    shardIndexes :: PrimType (SizedArray (Struct e))
+    shardIndexes = ArrayPrimType (shardAmount * cacheWidth `div` 8) $ StructPrimType False $ mapTupR ScalarPrimType tp
     identity
       | Just s <- seed
       , if descending then isRightIdentity fun s else isLeftIdentity fun s
