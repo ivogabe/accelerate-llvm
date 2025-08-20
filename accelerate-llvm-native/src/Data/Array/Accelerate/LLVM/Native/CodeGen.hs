@@ -732,9 +732,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   (\ptr envs -> do
     ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle _) _ -> internalError "Pair impossible"
-      TupRpair (TupRpair (TupRsingle intPtr) (TupRsingle shardIndexes)) valuePtrs -> do
+      TupRpair (TupRpair (TupRpair (TupRpair (TupRsingle intPtr) (TupRsingle shardValues)) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes)) valuePtrs -> do
         _ <- instr' $ Store NonVolatile intPtr (integral TypeInt 0)
         case seed of
           Nothing -> return ()
@@ -747,11 +745,16 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
               (A.liftWord64 (cacheWidth `div` 8)) 
               (A.liftWord64 (shardAmount * cacheWidth `div` 8)) 
               (\(OP_Word64 idx) -> do
-                _ <- tupleStoreArray tp shardIndexes idx value
+                _ <- tupleStoreArray tp shardValues idx value
+                shardIdx <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
+
+                shardStartIdx <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
+                
                 -- shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
                 -- _ <- instr' $ Store NonVolatile shard (op tp value)
                 return ()
               )
+      _ -> internalError "Pair impossible"
   )
   -- Initialize a thread
   (\_ _ -> tupleAlloca tp)
@@ -794,9 +797,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   (\_ accumVar ptr envs -> do
     ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle _) _ -> internalError "Pair impossible"
-      TupRpair (TupRpair (TupRsingle idxPtr) _) valuePtrs -> do
+      TupRpair (TupRpair (TupRpair (TupRpair (TupRsingle idxPtr) (TupRsingle shardValues)) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes)) valuePtrs -> do
         _ <- Loop.while [] TupRunit
           (\_ -> do
             idx <- instr $ Load scalarTypeInt Volatile idxPtr
@@ -839,6 +840,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
         OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
         _ <- instr' $ Store Volatile idxPtr nextIdx
         return ()
+      _ -> internalError "Pair impossible"
   )
   (\_ _ _ -> return ())
   -- Code after the loop
@@ -852,10 +854,14 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   )
   Nothing
   where
-    memoryTp =  TupRsingle (ScalarPrimType scalarTypeInt) `TupRpair` TupRsingle shardIndexes `TupRpair` mapTupR ScalarPrimType tp 
+    memoryTp =  TupRsingle (ScalarPrimType scalarTypeInt) `TupRpair` TupRsingle shardValues `TupRpair` TupRsingle shardIndexes `TupRpair` TupRsingle shardStartIndexes `TupRpair` mapTupR ScalarPrimType tp 
     ArgArray _ (ArrayR _ tp) _ _ = input
-    shardIndexes :: PrimType (SizedArray (Struct e))
-    shardIndexes = ArrayPrimType (shardAmount * cacheWidth `div` 8) $ StructPrimType False $ mapTupR ScalarPrimType tp
+    shardValues :: PrimType (SizedArray (Struct e))
+    shardValues = ArrayPrimType (shardAmount * cacheWidth `div` 8) $ StructPrimType False $ mapTupR ScalarPrimType tp
+    shardIndexes :: PrimType (SizedArray Word64)
+    shardIndexes = ArrayPrimType (shardAmount * cacheWidth `div` 8) $ ScalarPrimType scalarType
+    shardStartIndexes :: PrimType (SizedArray Word64)
+    shardStartIndexes = ArrayPrimType (shardAmount * cacheWidth `div` 8) $ ScalarPrimType scalarType
     identity
       | Just s <- seed
       , if descending then isRightIdentity fun s else isLeftIdentity fun s
