@@ -252,7 +252,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
 
   -- Sequential mode needs to be false here, as it is only used in 
   -- a scan operation and this scheduler is never used for scans
-  doWork (boolean False) workIdx (Just shardIdx)
+  doWork (boolean False) workIdx (Just shardToWorkOn)
 
   _ <- br inner
 

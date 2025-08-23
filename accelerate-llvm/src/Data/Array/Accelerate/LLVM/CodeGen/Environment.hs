@@ -107,7 +107,7 @@ data Envs env idxEnv = Envs
   -- (iterating from high indices to low indices)
   , envsDescending :: Bool
   , envsShardIdx :: Maybe (Operand Word64)
-  , envsTileCount :: Operand Word64
+  , envsTileCount :: Operand Int
   }
 
 initEnv

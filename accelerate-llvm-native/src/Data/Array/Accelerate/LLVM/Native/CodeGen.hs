@@ -138,7 +138,7 @@ codegen name env cluster args
           let envs' = envs{
             envsLoopDepth = 0,
             envsDescending = isDescending direction,
-            envsTileCount = tileCount
+            envsTileCount = tileCount'
           }
 
           -- Kernel memory
@@ -740,20 +740,19 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
         -- finished <- instr' $ Select notenoughTiles tileDiff (integral TypeWord64 0)
         -- _ <- instr' $ Store NonVolatile finishedShards finished
 
-        (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 (OP_Word64 tileCount) (A.liftWord64 shardAmount)
-        imapFromStepTo [Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 idx) -> do
-          shardStart <- A.mul numType (OP_Word64 idx) (OP_Word64 shardMinSize)
-          addRemainder <- A.min singleType (OP_Word64 idx) remainder
-          OP_Word64 shard <- A.add numType shardStart addRemainder
-          shardInt <- instr' $ BitCast scalarTypeInt shard
+        (OP_Int shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeInt (OP_Int tileCount) (A.liftInt $ fromIntegral shardAmount)
+        imapFromStepTo [Loop.LoopNonEmpty] (A.liftInt 0) (A.liftInt 1) (A.liftInt $ fromIntegral shardAmount) (\(OP_Int idx) -> do
+          shardStart <- A.mul numType (OP_Int idx) (OP_Int shardMinSize)
+          addRemainder <- A.min singleType (OP_Int idx) remainder
+          OP_Int shard <- A.add numType shardStart addRemainder
 
           -- Multiply the index by the cache width in bytes to ensure every shard is on a seperate cache line.
-          OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 idx) (A.liftWord64 (cacheWidth `div` 8))
+          OP_Int idxCacheWidth <- A.mul numType (OP_Int idx) (A.liftInt $ fromIntegral $ valuesPerCacheLine scalarTypeInt)
           shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
-          _ <- instr' $ Store NonVolatile shardIdxArr shardInt
+          _ <- instr' $ Store Volatile shardIdxArr shard
 
           shardStartIdxArr <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
-          _ <- instr' $ Store NonVolatile shardStartIdxArr shardInt
+          _ <- instr' $ Store NonVolatile shardStartIdxArr shard
 
           return ()
           )
@@ -798,10 +797,10 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
         ptrs <- tuplePtrs' memoryTp ptr
         
         case ptrs of
-          TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes) -> do
+          TupRpair (TupRpair (TupRsingle _) (TupRsingle _)) (TupRsingle shardStartIndexes) -> do
             let shardIdx = fromMaybe (internalError "Missing shard index") $ envsShardIdx envs
             shardIdxPtr <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
-            idx <- instr $ Load scalarTypeInt Volatile shardIdxPtr
+            idx <- instr $ Load scalarTypeInt NonVolatile shardIdxPtr
             isFirst <- A.eq singleType idx (envsTileIndex envs)
 
             A.ifThenElse' (tp, isFirst)
@@ -884,7 +883,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   (\ptr envs -> do
     ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
-      TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes) -> do
+      TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle _)) (TupRsingle _) -> do
         initValue <- tupleLoadArray tp shardValues (integral TypeWord64 0)
         value <- iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 1) (A.liftWord64 1) (A.liftWord64 shardAmount) initValue (
           \idx accum -> do 
