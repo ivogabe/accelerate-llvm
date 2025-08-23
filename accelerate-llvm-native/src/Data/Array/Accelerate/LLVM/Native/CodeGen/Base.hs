@@ -4,6 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies        #-}
 {-# LANGUAGE TypeOperators       #-}
+{-# LANGUAGE FlexibleInstances #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 -- Copyright   : [2015..2020] The Accelerate Team
@@ -29,6 +30,7 @@ import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import Data.Array.Accelerate.LLVM.Native.Foreign                    ()
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.Representation.Elt (bytesElt)
 import Data.Array.Accelerate.Type
 import Data.Primitive.Vec
 
@@ -47,6 +49,19 @@ shardAmount = 64
 
 cacheWidth :: Word64
 cacheWidth = 64
+
+-- Calculates how many values are needed to fill a cache line
+class CalcValuesPerCacheLine t where
+  valuesPerCacheLine :: t a -> Word64
+
+instance CalcValuesPerCacheLine PrimType where
+  valuesPerCacheLine tp = cacheWidth `div` fromIntegral (fst (primSizeAlignment tp))
+
+instance CalcValuesPerCacheLine ScalarType where
+  valuesPerCacheLine tp = valuesPerCacheLine $ ScalarPrimType tp
+
+instance CalcValuesPerCacheLine TypeR where
+  valuesPerCacheLine tp = cacheWidth `div` fromIntegral (bytesElt tp)
 
 -- The struct passed as argument to a call contains:
 --  * work_function: ptr

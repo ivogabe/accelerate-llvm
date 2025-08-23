@@ -21,7 +21,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
   readBuffer,
   writeBuffer,
 
-  tupleAlloca, tuplePtrs, tuplePtrs', tupleStore, tupleLoad, tupleStoreArray,
+  tupleAlloca, tuplePtrs, tuplePtrs', tupleStore, tupleLoad, tupleStoreArray, tupleLoadArray,
 
   intOfIndex
 
@@ -308,9 +308,8 @@ tupleStoreArray t a idx v = go t a v TupleIdxSelf
   where 
     go :: forall e'. TypeR e' -> Operand (Ptr (SizedArray (Struct e))) -> Operands e' -> TupleIdx e e' -> CodeGen arch ()
     go TupRunit _ _ _ = return ()
-    go (TupRpair t1 t2) array (OP_Pair v1 v2) i = do
-      go t1 array v1 (tupleLeft i)
-      go t2 array v2 (tupleRight i)
+    go (TupRpair t1 t2) array (OP_Pair v1 v2) i = 
+      go t1 array v1 (tupleLeft i) >> go t2 array v2 (tupleRight i)
     go (TupRsingle tp) array value i 
       | Refl <- reprIsSingle @ScalarType @e' @Ptr tp = do
         ptr <- instr' $ GetElementPtr $ GEP array (integral TypeWord64 0) $ GEPArray idx $ GEPStruct (ScalarPrimType tp) i GEPEmpty
@@ -325,6 +324,17 @@ tupleLoad (TupRsingle tp) (TupRsingle ptr)
   | Refl <- reprIsSingle @ScalarType @e @Ptr tp
   = instr $ Load tp NonVolatile ptr
 tupleLoad _ _ = internalError "Tuple mismatch"
+
+tupleLoadArray :: forall e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand Word64 -> CodeGen arch (Operands e)
+tupleLoadArray t a idx = go t a TupleIdxSelf
+  where go :: forall e'. TypeR e' -> Operand (Ptr (SizedArray (Struct e))) -> TupleIdx e e' -> CodeGen arch (Operands e')
+        go TupRunit _ _ = return OP_Unit
+        go (TupRpair t1 t2) array i = 
+          OP_Pair <$> go t1 array (tupleLeft i) <*> go t2 array (tupleRight i)
+        go (TupRsingle tp) array i 
+          | Refl <- reprIsSingle @ScalarType @e' @Ptr tp = do
+            ptr <- instr' $ GetElementPtr $ GEP array (integral TypeWord64 0) $ GEPArray idx $ GEPStruct (ScalarPrimType tp) i GEPEmpty
+            instr $ Load tp NonVolatile ptr
 
 -- | Convert a multidimensional array index into a linear index
 --

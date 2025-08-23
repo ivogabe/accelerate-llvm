@@ -46,7 +46,7 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
-import Data.Array.Accelerate.LLVM.CodeGen.Loop (imapFromStepTo)
+import Data.Array.Accelerate.LLVM.CodeGen.Loop (imapFromStepTo, iterFromStepTo)
 import Data.Array.Accelerate.LLVM.CodeGen.Default
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
@@ -137,7 +137,8 @@ codegen name env cluster args
 
           let envs' = envs{
             envsLoopDepth = 0,
-            envsDescending = isDescending direction
+            envsDescending = isDescending direction,
+            envsTileCount = tileCount
           }
 
           -- Kernel memory
@@ -151,7 +152,7 @@ codegen name env cluster args
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
 
             when useSharded $ initShards shardIndexes shardSizes workassistIndex (OP_Word64 tileCount)
-  
+
             -- Decide whether tileCount is large enough
             OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
             value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
@@ -180,7 +181,7 @@ codegen name env cluster args
           -- only used in one tile loop. These arrays can also be stored as a
           -- single value.
           envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
-          
+
           let processTile :: (Operand Bool -> Operand Word64 -> Maybe (Operand Word64) -> CodeGen Native ())
               processTile seqMode tileIdx' shardIdx = do
                 -- workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
@@ -282,7 +283,7 @@ codegen name env cluster args
                   )
                 return ()
 
-          if useSharded 
+          if useSharded
             then shardedSelfScheduling shardIndexes shardSizes workassistIndex processTile
             else workassistLoop workassistIndex tileCount (\seq tile -> processTile seq tile Nothing)
 
@@ -732,26 +733,41 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   (\ptr envs -> do
     ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
-      TupRpair (TupRpair (TupRpair (TupRpair (TupRsingle intPtr) (TupRsingle shardValues)) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes)) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (integral TypeInt 0)
+      TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes) -> do
+        let tileCount = envsTileCount envs
+        -- OP_Bool notenoughTiles <- A.lt singleType tileCount (A.liftWord64 shardAmount)
+        -- OP_Word64 tileDiff <- A.sub numType (A.liftWord64 shardAmount) tileCount
+        -- finished <- instr' $ Select notenoughTiles tileDiff (integral TypeWord64 0)
+        -- _ <- instr' $ Store NonVolatile finishedShards finished
+
+        (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 (OP_Word64 tileCount) (A.liftWord64 shardAmount)
+        imapFromStepTo [Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 idx) -> do
+          shardStart <- A.mul numType (OP_Word64 idx) (OP_Word64 shardMinSize)
+          addRemainder <- A.min singleType (OP_Word64 idx) remainder
+          OP_Word64 shard <- A.add numType shardStart addRemainder
+          shardInt <- instr' $ BitCast scalarTypeInt shard
+
+          -- Multiply the index by the cache width in bytes to ensure every shard is on a seperate cache line.
+          OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 idx) (A.liftWord64 (cacheWidth `div` 8))
+          shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
+          _ <- instr' $ Store NonVolatile shardIdxArr shardInt
+
+          shardStartIdxArr <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
+          _ <- instr' $ Store NonVolatile shardStartIdxArr shardInt
+
+          return ()
+          )
         case seed of
           Nothing -> return ()
           Just s -> do
             value <- llvmOfExp (compileArrayInstrEnvs envs) s
-            tupleStore tp valuePtrs value
-            imapFromStepTo 
-              [Loop.LoopVectorize, Loop.LoopNonEmpty] 
-              (A.liftWord64 0) 
-              (A.liftWord64 (cacheWidth `div` 8)) 
-              (A.liftWord64 (shardAmount * cacheWidth `div` 8)) 
+            imapFromStepTo
+              [Loop.LoopVectorize, Loop.LoopNonEmpty]
+              (A.liftWord64 0)
+              (A.liftWord64 $ valuesPerCacheLine tp)
+              (A.liftWord64 (shardAmount * valuesPerCacheLine tp))
               (\(OP_Word64 idx) -> do
                 _ <- tupleStoreArray tp shardValues idx value
-                shardIdx <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
-
-                shardStartIdx <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
-                
-                -- shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
-                -- _ <- instr' $ Store NonVolatile shard (op tp value)
                 return ()
               )
       _ -> internalError "Pair impossible"
@@ -765,10 +781,9 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
       Just identity' -> do
         value <- llvmOfExp (compileArrayInstrEnvs envs) identity'
         tupleStore tp accumVar value
-    
   )
   -- Code within the tile loop
-  (\_ accumVar _ envs -> do
+  (\_ accumVar ptr envs -> do
     -- Parallel mode.
     -- Execute the reduce-phase of a parallel chained scan here.
     x <- readArray' envs input index
@@ -779,28 +794,45 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
         else
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      else
-        A.ifThenElse' (tp, envsIsFirst envs)
-          ( do
-            return x
-          )
-          ( do
-            accum <- tupleLoad tp accumVar
-            if envsDescending envs then
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-            else
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-          )
+      else do 
+        ptrs <- tuplePtrs' memoryTp ptr
+        
+        case ptrs of
+          TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes) -> do
+            let shardIdx = fromMaybe (internalError "Missing shard index") $ envsShardIdx envs
+            shardIdxPtr <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
+            idx <- instr $ Load scalarTypeInt Volatile shardIdxPtr
+            isFirst <- A.eq singleType idx (envsTileIndex envs)
+
+            A.ifThenElse' (tp, isFirst)
+              ( do
+                return x
+              )
+              ( do
+                accum <- tupleLoad tp accumVar
+                if envsDescending envs then
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+                else
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+              )
+
+          _ -> internalError "Pair impossible"
+      
     tupleStore tp accumVar new
   )
   -- Code after the tile loop
   (\_ accumVar ptr envs -> do
     ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
-      TupRpair (TupRpair (TupRpair (TupRpair (TupRsingle idxPtr) (TupRsingle shardValues)) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes)) valuePtrs -> do
+      TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes) -> do
+        let shardIdx = fromMaybe (internalError "Missing shard index") $ envsShardIdx envs
+        OP_Word64 shardIdxCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 (valuesPerCacheLine scalarTypeInt))
+        
+        shardIdxPtr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdxCacheWidth GEPEmpty
+
         _ <- Loop.while [] TupRunit
           (\_ -> do
-            idx <- instr $ Load scalarTypeInt Volatile idxPtr
+            idx <- instr $ Load scalarTypeInt Volatile shardIdxPtr
             A.neq singleType idx (envsTileIndex envs)
           )
           (\_ -> return OP_Unit)
@@ -809,16 +841,20 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
 
         local <- tupleLoad tp accumVar
 
+        OP_Word64 shardValueCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 (valuesPerCacheLine tp))
+
         new <-
-          if isNothing seed then
+          if isNothing seed then do
             -- If there is no seed, then write the output directly in the first tiles.
             -- The other tiles must combine their result with the given operator.
-            A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
+            shardStartPtr <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
+            shardStart <- instr' $ Load scalarTypeInt NonVolatile shardStartPtr
+            A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (OP_Int shardStart))
               (do
                 return local
               )
               (do
-                prefix <- tupleLoad tp valuePtrs
+                prefix <- tupleLoadArray tp shardValues shardValueCacheWidth
                 tupleStore tp accumVar prefix
                 if envsDescending envs then
                   app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
@@ -828,17 +864,18 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
           -- If there is a seed, then all tile will combine their local result with
           -- the already available value.
           else do
-            prefix <- tupleLoad tp valuePtrs
+            prefix <- tupleLoadArray tp shardValues shardValueCacheWidth
             tupleStore tp accumVar prefix
             if envsDescending envs then
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
             else
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
-        tupleStore tp valuePtrs new
+        tupleStoreArray tp shardValues shardValueCacheWidth new
+
 
         _ <- instr' $ Fence (CrossThread, Release)
         OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-        _ <- instr' $ Store Volatile idxPtr nextIdx
+        _ <- instr' $ Store Volatile shardIdxPtr nextIdx
         return ()
       _ -> internalError "Pair impossible"
   )
@@ -847,21 +884,31 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   (\ptr envs -> do
     ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair _ valuePtrs -> do
-        value <- tupleLoad tp valuePtrs
+      TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes) -> do
+        initValue <- tupleLoadArray tp shardValues (integral TypeWord64 0)
+        value <- iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 1) (A.liftWord64 1) (A.liftWord64 shardAmount) initValue (
+          \idx accum -> do 
+            OP_Word64 shardIdxCacheWidth <- A.mul numType idx (A.liftWord64 (valuesPerCacheLine tp)) -- TODO: FIX
+            x <- tupleLoadArray tp shardValues shardIdxCacheWidth
+            if envsDescending envs then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+          )
+        -- value <- tupleLoad tp valuePtrs
         codeEnd envs value
+      _ -> internalError "Pair impossible"
   )
   Nothing
   where
-    memoryTp =  TupRsingle (ScalarPrimType scalarTypeInt) `TupRpair` TupRsingle shardValues `TupRpair` TupRsingle shardIndexes `TupRpair` TupRsingle shardStartIndexes `TupRpair` mapTupR ScalarPrimType tp 
+    memoryTp =  TupRsingle shardValues `TupRpair` TupRsingle shardIndexes `TupRpair` TupRsingle shardStartIndexes
     ArgArray _ (ArrayR _ tp) _ _ = input
     shardValues :: PrimType (SizedArray (Struct e))
-    shardValues = ArrayPrimType (shardAmount * cacheWidth `div` 8) $ StructPrimType False $ mapTupR ScalarPrimType tp
-    shardIndexes :: PrimType (SizedArray Word64)
-    shardIndexes = ArrayPrimType (shardAmount * cacheWidth `div` 8) $ ScalarPrimType scalarType
-    shardStartIndexes :: PrimType (SizedArray Word64)
-    shardStartIndexes = ArrayPrimType (shardAmount * cacheWidth `div` 8) $ ScalarPrimType scalarType
+    shardValues = ArrayPrimType (shardAmount * valuesPerCacheLine tp) $ StructPrimType False $ mapTupR ScalarPrimType tp -- TODO: How many actually needed?
+    shardIndexes :: PrimType (SizedArray Int)
+    shardIndexes = ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeInt) $ ScalarPrimType scalarType
+    shardStartIndexes :: PrimType (SizedArray Int)
+    shardStartIndexes = ArrayPrimType shardAmount $ ScalarPrimType scalarType
     identity
       | Just s <- seed
       , if descending then isRightIdentity fun s else isLeftIdentity fun s
