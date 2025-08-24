@@ -70,7 +70,6 @@ data NativeOp t where
   NGenerate    :: NativeOp (Fun' (sh -> t)              -> Out sh  t -> ())
   NPermute     :: NativeOp (Fun' (e -> e -> e)
                          -> Mut sh' e
-                         -> Mut sh' Word8
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
   NPermute'    :: NativeOp (Mut sh' e
@@ -135,21 +134,7 @@ instance DesugarAcc NativeOp where
     = Exec (NScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
     = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
-    | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord8
-    = aletUnique lhs 
-        (Alloc shr scalarTypeWord8 $ groundToExpVar (shapeType shr) sh)
-        $ alet LeftHandSideUnit
-          (Exec NGenerate ( -- TODO: The old pipeline used a 'memset 0' instead, which sounds faster...
-                ArgFun (Lam (LeftHandSideWildcard (shapeType shr)) $ Body $ Const scalarTypeWord8 0)
-            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId) 
-            :>: ArgsNil))
-          (Exec NPermute (
-                weaken w a 
-            :>: weaken w b 
-            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord8)) (weakenVars w sh) (lock weakenId) 
-            :>: weaken w c 
-            :>: ArgsNil))
+  mkPermute (Just a) b c = Exec NPermute (a :>: b :>: c :>: ArgsNil)
   mkPermute Nothing a b = Exec NPermute' (a :>: b :>: ArgsNil)
   mkFold a (Just seed) b c = Exec NFold (a :>: seed :>: b :>: c :>: ArgsNil)
   mkFold a Nothing b c = Exec NFold1 (a :>: b :>: c :>: ArgsNil)
@@ -213,10 +198,10 @@ instance SetOpIndices NativeOp where
     | otherwise
     = Nothing
   setOpIndices _ NFold1 _ _ = error "Missing indices for NFold1"
-  setOpIndices indexVar NPermute (_ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+  setOpIndices indexVar NPermute (_ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
-      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
+      IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
     | otherwise
     = Nothing
     where
@@ -284,7 +269,7 @@ pattern OutDims  l = BackendSpecific (Dims           OutArr l)
 -- pattern OutDepth l = BackendSpecific (DepthPerThread OutArr l)
 
 -- TODO: factor out more common parts of mkGraph
--- TODO: do the TODO's in here, and also do them in the Interpreter\
+-- TODO: do the TODO's in here, and also do them in the Interpreter
 -- TODO: constraints and bounds for the new variable(s)
 instance MakesILP NativeOp where
   type BackendVar NativeOp = NativeILPVar
@@ -321,9 +306,9 @@ instance MakesILP NativeOp where
         <> ILP.c (InDims l) .==. ILP.c (OutDims l)
         <> inrankifmanifest shr l)
       (defaultBounds l)
-  mkGraph NPermute (_ :>: L _ (_, lTargets) :>: L _ (_, lLocks) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
+  mkGraph NPermute (_ :>: L _ (_, lTargets) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
     Graph.Info
-      ( mempty & infusibleEdges .~ Set.map (-?> l) (lTargets <> lLocks)) -- add infusible edges from the producers of target and lock arrays to the permute
+      ( mempty & infusibleEdges .~ Set.map (-?> l) lTargets) -- add infusible edges from the producers of target array to the permute
       (    inputConstraints l lIns
         <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
         <> ILP.c (InDims l) .==. int (rank shr)
@@ -390,7 +375,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. int (_labelId l)
+        <> ILP.c (OutFoldSize l) .==. int (_labelId l)
         <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
         <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
         -- <> foldMap (\lin -> fused lin l .==. int 1) lIns
@@ -400,7 +385,7 @@ instance MakesILP NativeOp where
     Graph.Info
       mempty
       (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. int (_labelId l)
+        <> ILP.c (OutFoldSize l) .==. int (_labelId l)
         <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
         <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
         -- <> foldMap (\lin -> fused lin l .==. int 1) lIns

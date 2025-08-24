@@ -23,7 +23,9 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
 
   tupleAlloca, tuplePtrs, tupleStore, tupleLoad,
 
-  intOfIndex
+  intOfIndex,
+
+  firstArrayPtr
 
 ) where
 
@@ -42,6 +44,7 @@ import LLVM.AST.Type.Metadata
 import Data.Array.Accelerate.AST.Environment
 import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.AST.Partitioned
+import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape
@@ -314,3 +317,11 @@ intOfIndex (ShapeRsnoc shr) (OP_Pair sh sz) (OP_Pair ix i)
         b <- A.mul numType a sz
         c <- A.add numType b i
         return c
+
+firstArrayPtr :: forall arch env idxEnv m sh e. Envs env idxEnv -> Arg env (m sh e) -> CodeGen arch (Operands Int)
+firstArrayPtr envs (ArgArray _ _ _ vars) = case flattenTupR vars of
+  [] -> return $ A.liftInt 0
+  Exists var : _ -> case prjPartial (varIdx var) $ envsGround envs of
+    Just (GroundOperandBuffer (IRBuffer ptr _ _ _ _)) ->
+      instr $ PtrToInt TypeInt ptr
+    _ -> internalError "Buffer not found in firstArrayPtr"

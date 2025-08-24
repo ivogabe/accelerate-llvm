@@ -87,7 +87,7 @@ codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
-  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.flag") $ do
+  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "workassist.flag") $ do
     extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -306,10 +306,8 @@ codegen name env cluster args
       setBlock workBlock
       let ann =
             if parallelDepth /= rank shr then []
-            else if hasPermute then [Loop.LoopInterleave]
-            else [Loop.LoopVectorize]
-
-      tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
+            else {- if hasPermute then -} [Loop.LoopInterleave]
+            -- else [Loop.LoopVectorize]
 
       shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes workassistIndex tileSize parSizes tileCount $ \idx -> do
         let envs' = envs{
@@ -378,213 +376,19 @@ initShards shardIndexes shardSizes finishedShards tileCount = do
     )
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
-opCodeGen (FlatOp NGenerate args idxArgs) = defaultCodeGenGenerate args idxArgs
-opCodeGen (FlatOp NMap args idxArgs) = defaultCodeGenMap args idxArgs
-opCodeGen (FlatOp NBackpermute args idxArgs) = defaultCodeGenBackpermute args idxArgs
-opCodeGen (FlatOp NPermute
-    (combineFun :>: output :>: locks :>: source :>: _)
-    (i1 :>: i2 :>: _ :>: i3 :>: _)) =
-  defaultCodeGenPermute
-    (\envs j _ -> atomically envs locks $ OP_Int j)
-    (combineFun :>: output :>: source :>: ArgsNil)
-    (i1 :>: i2 :>: i3 :>: ArgsNil)
-opCodeGen (FlatOp NPermute' args idxArgs) = defaultCodeGenPermuteUnique args idxArgs
-opCodeGen flatOp@(FlatOp NFold (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _) (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
-  ( depth
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      return var
-    )
-    (\var envs -> do
-      x <- readArray' envs input inputIdx
-      accum <- tupleLoad tp var
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-    )
-    (\var envs -> do
-      value <- tupleLoad tp var
-      writeArray' envs output outputIdx value
-    )
-  )
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
-  -- TODO: Try to find an identity value, and convert to NFold
-  ( depth
-  , OpCodeGenLoop
-    flatOp
-    PeelGuaranteed
-    (\_ -> tupleAlloca tp)
-    (\var envs -> do
-      x <- readArray' envs input inputIdx
-      -- Note: if the loop peeling is applied (separating the first iteration
-      -- of the loop), then this code will be executed twice. envsIsFirst envs
-      -- will then either be a constant True, or a constant False.
-      -- ifThenElse' (opposed to the version with a prime) will then generate
-      -- code for only one branch, and thus also without conditional jumps.
-      new <- A.ifThenElse' (tp, envsIsFirst envs)
-        ( do
-          return x
-        )
-        ( do
-          accum <- tupleLoad tp var
-          if envsDescending envs then
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-        )
-      tupleStore tp var new
-    )
-    (\var envs -> do
-      value <- tupleLoad tp var
-      writeArray' envs output outputIdx value
-    )
-  )
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp (NScan1 _) (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
-  -- TODO: Try to find an identity value to prevent loop peeling / the conditional in the body of the loop.
-  -- Ideally we add a PostScan as primitive, such that we can convert a scan1 into a postscan
-  ( depth - 1
-  , OpCodeGenLoop
-    flatOp
-    PeelConditional
-    (\_ -> tupleAlloca tp)
-    (\var envs -> do
-      x <- readArray' envs input inputIdx
-      new <- A.ifThenElse' (tp, envsIsFirst envs)
-        ( do
-          return x
-        )
-        ( do
-          accum <- tupleLoad tp var
-          if envsDescending envs then
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-        )
-      tupleStore tp var new
-      writeArray' envs output outputIdx new
-    )
-    (\_ _ -> return ())
-  )
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp (NScan' _)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
-    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx depth foldOutputIdx :>: _)) =
-  ( depth
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      return var
-    )
-    (\var envs -> do
-      accum <- tupleLoad tp var
-      writeArray' envs output outputIdx accum
-      x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-    )
-    (\var envs -> do
-      value <- tupleLoad tp var
-      writeArray' envs foldOutput foldOutputIdx value
-    )
-  )
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp (NScan LeftToRight)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
-    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
-  ( depth - 1
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      return var
-    )
-    (\var envs -> do
-      accum <- tupleLoad tp var
-      writeArray' envs output inputIdx accum
-      x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-    )
-    (\var envs -> do
-      value <- tupleLoad tp var
-      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
-      writeArrayAt' envs output rowIdx n' value
-    )
-  )
-  where
-    ArgArray _ (ArrayR _ tp) inputSh _ = input
-    n = case inputSh of
-      TupRpair _ (TupRsingle n') -> n'
-      _ -> internalError "Shape impossible"
-    rowIdx = case inputIdx of
-      TupRpair i _ -> i
-      _ -> internalError "Shape impossible"
-opCodeGen flatOp@(FlatOp (NScan RightToLeft)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
-    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
-  ( depth - 1
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
-      writeArrayAt' envs output rowIdx n' seed'
-      return var
-    )
-    (\var envs -> do
-      accum <- tupleLoad tp var
-      x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-      writeArray' envs output inputIdx new
-    )
-    (\_ _ -> return ())
-  )
-  where
-    ArgArray _ (ArrayR _ tp) inputSh _ = input
-    n = case inputSh of
-      TupRpair _ (TupRsingle n') -> n'
-      _ -> internalError "Shape impossible"
-    rowIdx = case inputIdx of
-      TupRpair i _ -> i
-      _ -> internalError "Shape impossible"
-opCodeGen _ = internalError "Missing indices when generating code for an operation"
+opCodeGen flatOp@(FlatOp op args idxArgs) = case op of
+  NGenerate -> defaultCodeGenGenerate args idxArgs
+  NMap -> defaultCodeGenMap args idxArgs
+  NBackpermute -> defaultCodeGenBackpermute args idxArgs
+  NPermute
+    | (_ :>: output :>: _ :>: _) <- args ->
+      defaultCodeGenPermute (\envs j _ -> atomically envs output $ OP_Int j) args idxArgs
+  NPermute' -> defaultCodeGenPermuteUnique args idxArgs
+  NFold -> defaultCodeGenFold flatOp args idxArgs
+  NFold1 -> defaultCodeGenFold1 flatOp args idxArgs
+  NScan1 dir -> defaultCodeGenScan1 dir flatOp args idxArgs
+  NScan' dir -> defaultCodeGenScan' dir flatOp args idxArgs
+  NScan dir -> defaultCodeGenScan dir flatOp args idxArgs
 
 -- Parallel code generation for one-dimensional collective operations (folds and scans).
 -- Other operations, either OpCodeGenSingle or nested deeper, are handled in opCodeGen
@@ -600,7 +404,7 @@ parCodeGen descending (FlatOp NFold1
 parCodeGen descending (FlatOp (NScan1 _)
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenScan descending False fun Nothing input inputIdx
+  = Just $ parCodeGenScan descending IsScan fun Nothing input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
@@ -608,7 +412,7 @@ parCodeGen descending (FlatOp (NScan1 _)
 parCodeGen descending (FlatOp (NScan' _)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx _ foldOutputIdx :>: _))
-  = Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
+  = Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
     (\_ _ -> return ())
@@ -617,7 +421,7 @@ parCodeGen descending (FlatOp (NScan dir)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
   = case dir of
-      LeftToRight -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
+      LeftToRight -> Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
         (\_ _ -> return ())
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
@@ -625,13 +429,13 @@ parCodeGen descending (FlatOp (NScan dir)
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
-      RightToLeft -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
-        (\envs result -> writeArray' envs output inputIdx result)
-        (\_ _ -> return ())
+      RightToLeft -> Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
         (\envs result -> do
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
+        (\_ _ -> return ())
+        (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
   where
     ArgArray _ _ inputSh _ = input
@@ -664,7 +468,7 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
   , Just i <- identity
   = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
   | otherwise
-  = parCodeGenScan descending True fun seed input inputIdx
+  = parCodeGenScan descending IsFold fun seed input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\_ _ -> return ())
@@ -775,11 +579,13 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
     memoryTp = TupRsingle scalarTypeWord8 `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input
 
+data FoldOrScan = IsFold | IsScan deriving Eq
+
 parCodeGenScan
   :: Bool -- Whether the loop is descending
   -- Whether this is a fold. Folds use similar code generation as scans, hence
   -- it is handled here. Commutative folds are handled separately.
-  -> Bool
+  -> FoldOrScan
   -> Fun env (e -> e -> e)
   -> Maybe (Exp env e) -- Seed
   -> Arg env (In (sh, Int) e)
@@ -795,12 +601,12 @@ parCodeGenScan
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenScan descending isFold fun Nothing input index codeSeed codePre codePost codeEnd
+parCodeGenScan descending foldOrScan fun Nothing input index codeSeed codePre codePost codeEnd
   | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
-  = parCodeGenScan descending isFold fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
+  = parCodeGenScan descending foldOrScan fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
+parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
   -- If we know an identity value, we can implement this without loop peeling
   (isNothing identity)
   -- In kernel memory, store the index of the block we must now handle and the
@@ -972,7 +778,7 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
   -- In the first iteration, the first tile loop will then start without a prefix value,
   -- and we thus should do loop peeling there.
   -- Not executed when this tile is executed in the sequential mode.
-  (if isFold then Nothing else
+  (if foldOrScan == IsFold then Nothing else
     Just (isNothing seed, \accumVar _ envs -> do
       x <- readArray' envs input index
       if isJust seed then do
