@@ -83,8 +83,15 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle (ArrayPrimType shardAmount primType)
   `TupRpair` TupRsingle primType
 
-
-type KernelType env = Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)) -> Word64 -> Word8
+type KernelType env
+  -- Ptr to the kernel struct
+  = Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word))
+  -- Ptr to the locks array (for any permutes)
+  -> Ptr Word8
+  -- first_index, or a magic value for single-threaded initialization or finalization
+  -> Word64
+  -- Only in initialization, this function returns whether the kernel should run sequentially or in parallel
+  -> Word8
 
 bindHeaderEnv
   :: forall env. Env AccessGroundR env

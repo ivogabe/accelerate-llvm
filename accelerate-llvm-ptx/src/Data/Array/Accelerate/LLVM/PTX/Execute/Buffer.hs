@@ -41,20 +41,27 @@ data PTXBuffer t = PTXBuffer !Int !(Lifetime (CUDA.DevicePtr t))
 
 mallocDevice :: ScalarType t -> Int -> Par (PTXBuffer t)
 mallocDevice tp size = do
-  let byteSize = bytesElt (TupRsingle tp) * size
+  -- Zero-sized allocations are not allowed.
+  -- We could return null here (and we might want to do that in the future),
+  -- but that would make zeros-sized allocations an edge case in many places.
+  -- For now we just change them to a 1-byte allocation for simplicity.
+  -- Since zero-sized arrays are not that common, this is probably fine.
+  let size' = max size 1
+  let byteSize = bytesElt (TupRsingle tp) * size'
   array <- liftIO $ CUDA.mallocArray byteSize
   lifetime <- liftIO $ newLifetime $ CUDA.castDevPtr (array :: CUDA.DevicePtr Word8)
   liftIO $ addFinalizer lifetime $ CUDA.free array
-  return $ PTXBuffer size lifetime
+  return $ PTXBuffer size' lifetime
 
 copyToDevice :: ScalarType t -> Buffer t -> Par (PTXBuffer t)
 copyToDevice tp buffer@(Buffer hostPtr) = do
   byteSize <- liftIO $ withForeignPtr hostPtr (memoryByteSize . castPtr)
-  devicePtr <- liftIO (CUDA.mallocArray $ fromIntegral byteSize)
+  let byteSize' = max 1 $ fromIntegral byteSize
+  devicePtr <- liftIO (CUDA.mallocArray byteSize')
   stream <- asks ptxStream
   hostPtr1 <- liftIO $ withForeignPtr hostPtr (return . castPtr)
-  hostPtr2 <- liftIO $ CUDA.registerArray [] (fromIntegral byteSize) hostPtr1
-  liftIO $ CUDA.pokeArrayAsync (fromIntegral byteSize) hostPtr2 devicePtr (Just stream)
+  hostPtr2 <- liftIO $ CUDA.registerArray [] byteSize' hostPtr1
+  liftIO $ CUDA.pokeArrayAsync byteSize' hostPtr2 devicePtr (Just stream)
 
   -- Call 'CUDA.unregisterArray hostPtr2' when we next block (sync CPU with GPU)
   cleanUpUnregisterHostPtr hostPtr2

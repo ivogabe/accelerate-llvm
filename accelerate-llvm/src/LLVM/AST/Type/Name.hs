@@ -110,11 +110,11 @@ makeAccPreludeLabel s = Label (SBS8.pack "accprelude_" <> s)
 --
 nameToPrettyS :: Name a -> LLVM.Symbol
 nameToPrettyS (Name s) = LLVM.Symbol (SBS8.unpack s)
-nameToPrettyS (UnName n) = LLVM.Symbol ("tollpr_s_" ++ show n)
+nameToPrettyS (UnName n) = LLVM.Symbol ("s_" ++ show n)
 
 nameToPrettyI :: Name a -> LLVM.Ident
 nameToPrettyI (Name s) = LLVM.Ident (SBS8.unpack s)
-nameToPrettyI (UnName n) = LLVM.Ident ("tollpr_i_" ++ show n)
+nameToPrettyI (UnName n) = LLVM.Ident ("_" ++ show n)
 
 labelToPrettyS :: Label -> LLVM.Symbol
 labelToPrettyS (Label s) = LLVM.Symbol (SBS8.unpack s)
