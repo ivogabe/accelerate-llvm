@@ -754,16 +754,14 @@ alignTo align ptr = do
 -- Requires compute capability >= 7.0
 --
 nanosleep :: Operands Int32 -> CodeGen PTX ()
-nanosleep ns =
-  let
-      -- attrs = [NoUnwind, Convergent]
-      asm   = InlineAssembly "nanosleep.u32 $0;" "r" True False ATTDialect
-  in
-  -- TODO: put [NoUnwind, Convergent] on this call
+nanosleep ns = do
+  -- This is an acc prelude function because it requires inline assembly, and
+  -- llvm-pretty does not yet support caling inline assembly snippets. Thus we
+  -- manually wrap the assembly in an inlineable function and call that.
+  let label = makeAccPreludeLabel "nanosleep"
   void $ instr $ Call
-    (lamUnnamed primType $ Body VoidType (Just Tail) (CallAssembly asm))
+    (lamUnnamed primType $ Body VoidType (Just Tail) (CallGlobal label))
     (ArgumentsCons (op integralType ns) [] ArgumentsNil)
---    [NoUnwind, Convergent]
 
 -- Global kernel definitions
 -- -------------------------

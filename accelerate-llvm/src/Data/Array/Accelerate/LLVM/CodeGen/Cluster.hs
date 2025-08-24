@@ -546,7 +546,7 @@ genParallel ptr envs tupleIdx = \case
         ptIn = GenOp d opC $ ptIn loop
       }
     let loopSeq' = loopSeq{
-        ptIn = GenOp d opC $ ptIn loop
+        ptIn = GenOp d opC $ ptIn loopSeq
       }
     return $ ParTileLoops loop' loops loopSeq' exit
   ParGenTileLoopBoundary next -> do

@@ -18,7 +18,7 @@ extra-deps:
 - MIP-0.2.0.0
 
 - github: tomsmeding/llvm-pretty
-  commit: 16fb617f282bde97a090b8b08cbd2dcf5e259ad3
+  commit: a253a7fc1c62f4825ffce6b2507eebc5dadff32c
 
 - monadLib-3.10.3@sha256:026ba169762e63f0fe5f5c78829808f522a28730043bc3ad9b7c146baedf709f,637
 

@@ -216,7 +216,6 @@ test-suite nofib-llvm-native
         -with-rtsopts=-n4M
         -with-rtsopts=-N
 
-
 source-repository head
   type:                 git
   location:             https://github.com/AccelerateHS/accelerate-llvm.git
