@@ -55,13 +55,13 @@ class CalcValuesPerCacheLine t where
   valuesPerCacheLine :: t a -> Word64
 
 instance CalcValuesPerCacheLine PrimType where
-  valuesPerCacheLine tp = cacheWidth `div` fromIntegral (fst (primSizeAlignment tp))
+  valuesPerCacheLine tp = max 1 cacheWidth `div` fromIntegral (fst (primSizeAlignment tp))
 
 instance CalcValuesPerCacheLine ScalarType where
   valuesPerCacheLine tp = valuesPerCacheLine $ ScalarPrimType tp
 
 instance CalcValuesPerCacheLine TypeR where
-  valuesPerCacheLine tp = cacheWidth `div` fromIntegral (bytesElt tp)
+  valuesPerCacheLine tp = max 1 cacheWidth `div` fromIntegral (bytesElt tp)
 
 -- The struct passed as argument to a call contains:
 --  * work_function: ptr

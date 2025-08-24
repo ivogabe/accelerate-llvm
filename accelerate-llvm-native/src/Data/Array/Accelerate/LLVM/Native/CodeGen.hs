@@ -126,7 +126,7 @@ codegen name env cluster args
                   -- step of the chained scan).
                   1024 * 2
                 else if useSharded then
-                  1024 -- Use smaller tile size when we are using sharded self scheduling
+                  1 -- Use smaller tile size when we are using sharded self scheduling
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
@@ -735,10 +735,6 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
     case ptrs of
       TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes) -> do
         let tileCount = envsTileCount envs
-        -- OP_Bool notenoughTiles <- A.lt singleType tileCount (A.liftWord64 shardAmount)
-        -- OP_Word64 tileDiff <- A.sub numType (A.liftWord64 shardAmount) tileCount
-        -- finished <- instr' $ Select notenoughTiles tileDiff (integral TypeWord64 0)
-        -- _ <- instr' $ Store NonVolatile finishedShards finished
 
         (OP_Int shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeInt (OP_Int tileCount) (A.liftInt $ fromIntegral shardAmount)
         imapFromStepTo [Loop.LoopNonEmpty] (A.liftInt 0) (A.liftInt 1) (A.liftInt $ fromIntegral shardAmount) (\(OP_Int idx) -> do
@@ -763,8 +759,8 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
             imapFromStepTo
               [Loop.LoopVectorize, Loop.LoopNonEmpty]
               (A.liftWord64 0)
-              (A.liftWord64 $ valuesPerCacheLine tp)
-              (A.liftWord64 (shardAmount * valuesPerCacheLine tp))
+              (A.liftWord64 $ valuesPerCacheLine shardStruct)
+              (A.liftWord64 (shardAmount * valuesPerCacheLine shardStruct))
               (\(OP_Word64 idx) -> do
                 _ <- tupleStoreArray tp shardValues idx value
                 return ()
@@ -840,7 +836,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
 
         local <- tupleLoad tp accumVar
 
-        OP_Word64 shardValueCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 (valuesPerCacheLine tp))
+        OP_Word64 shardValueCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 (valuesPerCacheLine shardStruct))
 
         new <-
           if isNothing seed then do
@@ -884,10 +880,15 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
     ptrs <- tuplePtrs' memoryTp ptr
     case ptrs of
       TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle _)) (TupRsingle _) -> do
+        let tileCount = envsTileCount envs
+        tileCountWord64 <- instr' $ BitCast scalarType tileCount
+
+        loopAmount <- A.min singleType (OP_Word64 tileCountWord64) (A.liftWord64 shardAmount)
+
         initValue <- tupleLoadArray tp shardValues (integral TypeWord64 0)
-        value <- iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 1) (A.liftWord64 1) (A.liftWord64 shardAmount) initValue (
+        value <- iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 1) (A.liftWord64 1) loopAmount initValue (
           \idx accum -> do 
-            OP_Word64 shardIdxCacheWidth <- A.mul numType idx (A.liftWord64 (valuesPerCacheLine tp)) -- TODO: FIX
+            OP_Word64 shardIdxCacheWidth <- A.mul numType idx (A.liftWord64 (valuesPerCacheLine shardStruct)) -- TODO: FIX
             x <- tupleLoadArray tp shardValues shardIdxCacheWidth
             if envsDescending envs then
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
@@ -903,7 +904,9 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
     memoryTp =  TupRsingle shardValues `TupRpair` TupRsingle shardIndexes `TupRpair` TupRsingle shardStartIndexes
     ArgArray _ (ArrayR _ tp) _ _ = input
     shardValues :: PrimType (SizedArray (Struct e))
-    shardValues = ArrayPrimType (shardAmount * valuesPerCacheLine tp) $ StructPrimType False $ mapTupR ScalarPrimType tp -- TODO: How many actually needed?
+    shardValues = ArrayPrimType (shardAmount * valuesPerCacheLine shardStruct) shardStruct
+    shardStruct :: PrimType (Struct e)
+    shardStruct = StructPrimType False $ mapTupR ScalarPrimType tp
     shardIndexes :: PrimType (SizedArray Int)
     shardIndexes = ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeInt) $ ScalarPrimType scalarType
     shardStartIndexes :: PrimType (SizedArray Int)
