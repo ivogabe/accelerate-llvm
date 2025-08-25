@@ -285,6 +285,8 @@ tuplePtrs tp ptr = go TupleIdxSelf tp
       | Refl <- reprIsSingle @ScalarType @e @Ptr t
       = TupRsingle <$> instr' (GetElementPtr $ gepStruct (ScalarPrimType t) ptr tupleIdx)
 
+-- | Alternative version of tuplePtrs that works for PrimType
+-- 
 tuplePtrs' :: forall full arch. TupR PrimType full -> Operand (Ptr (Struct full)) -> CodeGen arch (TupR Operand (Distribute Ptr full))
 tuplePtrs' tp ptr = go TupleIdxSelf tp
   where
@@ -306,6 +308,8 @@ tupleStore (TupRsingle tp) (TupRsingle ptr) value
     return ()
 tupleStore _ _ _ = internalError "Tuple mismatch"
 
+-- | Store a tuple value into an array of tuples at the given index
+-- 
 tupleStoreArray :: forall e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand Word64 -> Operands e -> CodeGen arch ()
 tupleStoreArray t a idx v = go t a v TupleIdxSelf
   where 
@@ -319,7 +323,6 @@ tupleStoreArray t a idx v = go t a v TupleIdxSelf
         _ <- instr' $ Store NonVolatile ptr $ op tp value
         return ()
 
-
 tupleLoad :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> CodeGen arch (Operands e)
 tupleLoad TupRunit _ = return OP_Unit
 tupleLoad (TupRpair t1 t2) (TupRpair p1 p2) = OP_Pair <$> tupleLoad t1 p1 <*> tupleLoad t2 p2
@@ -328,6 +331,8 @@ tupleLoad (TupRsingle tp) (TupRsingle ptr)
   = instr $ Load tp NonVolatile ptr
 tupleLoad _ _ = internalError "Tuple mismatch"
 
+-- | Load a tuple value from an array of tuples at the given index
+--
 tupleLoadArray :: forall e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand Word64 -> CodeGen arch (Operands e)
 tupleLoadArray t a idx = go t a TupleIdxSelf
   where go :: forall e'. TypeR e' -> Operand (Ptr (SizedArray (Struct e))) -> TupleIdx e e' -> CodeGen arch (Operands e')

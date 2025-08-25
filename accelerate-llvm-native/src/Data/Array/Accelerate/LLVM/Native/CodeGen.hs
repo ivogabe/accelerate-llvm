@@ -98,7 +98,7 @@ codegen name env cluster args
     workBlock <- newBlock "work"
     _ <- switch (OP_Word64 flag) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
-    let useSharded = hasFold flat -- Probably check if scan
+    let useSharded = hasFold flat && not (hasScan flat)
 
     if parallelDepth == 0 && rank shr /= 0 then do
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -126,7 +126,7 @@ codegen name env cluster args
                   -- step of the chained scan).
                   1024 * 2
                 else if useSharded then
-                  1 -- Use smaller tile size when we are using sharded self scheduling
+                  256 -- Use smaller tile size when we are using sharded self scheduling
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
@@ -470,11 +470,13 @@ parCodeGenSharded :: Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (ParLoo
 parCodeGenSharded descending (FlatOp NFold
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenFold descending fun (Just seed) input output inputIdx outputIdx
+  = Just $ parCodeGenFoldSharded descending fun (Just seed) input inputIdx 
+    (\envs result -> writeArray' envs output outputIdx result)
 parCodeGenSharded descending (FlatOp NFold1
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenFold descending fun Nothing input output inputIdx outputIdx
+  = Just $ parCodeGenFoldSharded descending fun Nothing input inputIdx
+    (\envs result -> writeArray' envs output outputIdx result)
 parCodeGenSharded _ _ = Nothing
 
 parCodeGenFold
@@ -491,14 +493,17 @@ parCodeGenFold descending fun Nothing input output inputIdx outputIdx
   = parCodeGenFold descending fun (Just $ mkConstant tp identity) input output inputIdx outputIdx
   where
     ArgArray _ (ArrayR _ tp) _ _ = output
--- Specialized version for commutative folds with identity
 parCodeGenFold descending fun seed input output inputIdx outputIdx
   | isCommutative fun
   , Just s <- seed
   , Just i <- identity
+  -- Specialized version for commutative folds with identity
   = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
   | otherwise
-  = parCodeGenFoldSharded descending fun seed input inputIdx
+  = parCodeGenScan descending IsFold fun seed input inputIdx
+    (\_ _ -> return ())
+    (\_ _ -> return ())
+    (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
   where
     ArgArray _ (ArrayR _ tp) _ _ = output
@@ -511,6 +516,8 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
       | otherwise
       = Nothing
 
+-- Version of fold that uses multiple indexes and values to reduce contention on
+-- the variables (sharding). Must be executed with sharded self scheduling.
 parCodeGenFoldSharded
   :: forall env idxEnv sh e.
      Bool -- Whether the loop is descending
@@ -540,6 +547,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
       TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle shardIndexes)) (TupRsingle shardStartIndexes) -> do
         let tileCount = envsTileCount envs
 
+        -- Initialize shardIndexes and shardStartIndexes the same way as in initShards.        
         (OP_Int shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeInt (OP_Int tileCount) (A.liftInt $ fromIntegral shardAmount)
         imapFromStepTo [Loop.LoopNonEmpty] (A.liftInt 0) (A.liftInt 1) (A.liftInt $ fromIntegral shardAmount) (\(OP_Int idx) -> do
           shardStart <- A.mul numType (OP_Int idx) (OP_Int shardMinSize)
@@ -551,15 +559,18 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
           shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
           _ <- instr' $ Store Volatile shardIdxArr shard
 
+          -- Shard start indexes can be stored without multiplying by the cache width, as they are only read.
           shardStartIdxArr <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray idx GEPEmpty
           _ <- instr' $ Store NonVolatile shardStartIdxArr shard
 
           return ()
           )
-        case seed of
+        -- Initialize shardValues with the identity value, if we know it.
+        -- We need the idenity instead of the seed, as sharded self scheduling
+        case identity of
           Nothing -> return ()
-          Just s -> do
-            value <- llvmOfExp (compileArrayInstrEnvs envs) s
+          Just i -> do
+            value <- llvmOfExp (compileArrayInstrEnvs envs) i
             imapFromStepTo
               [Loop.LoopVectorize, Loop.LoopNonEmpty]
               (A.liftWord64 0)
@@ -583,8 +594,6 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
   )
   -- Code within the tile loop
   (\_ accumVar ptr envs -> do
-    -- Parallel mode.
-    -- Execute the reduce-phase of a parallel chained scan here.
     x <- readArray' envs input index
     new <-
       if isJust identity then do
@@ -598,6 +607,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
         
         case ptrs of
           TupRpair (TupRpair (TupRsingle _) (TupRsingle _)) (TupRsingle shardStartIndexes) -> do
+            -- TODO: Load in before the tile loop
             let shardIdx = fromMaybe (internalError "Missing shard index") $ envsShardIdx envs
             shardIdxPtr <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
             idx <- instr $ Load scalarTypeInt NonVolatile shardIdxPtr
@@ -643,9 +653,10 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
         OP_Word64 shardValueCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 (valuesPerCacheLine shardStruct))
 
         new <-
-          if isNothing seed then do
-            -- If there is no seed, then write the output directly in the first tiles.
+          if isNothing identity then do
+            -- If there is no identity, then write the output directly in the first tiles.
             -- The other tiles must combine their result with the given operator.
+            -- For sharded 
             shardStartPtr <- instr' $ GetElementPtr $ GEP shardStartIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
             shardStart <- instr' $ Load scalarTypeInt NonVolatile shardStartPtr
             A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (OP_Int shardStart))
@@ -687,26 +698,34 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
         let tileCount = envsTileCount envs
         tileCountWord64 <- instr' $ BitCast scalarType tileCount
 
+        -- If no seed, not empty
         loopAmount <- A.min singleType (OP_Word64 tileCountWord64) (A.liftWord64 shardAmount)
 
-        initValue <- tupleLoadArray tp shardValues (integral TypeWord64 0)
-        value <- iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 1) (A.liftWord64 1) loopAmount initValue (
-          \idx accum -> do 
-            OP_Word64 shardIdxCacheWidth <- A.mul numType idx (A.liftWord64 (valuesPerCacheLine shardStruct)) -- TODO: FIX
-            x <- tupleLoadArray tp shardValues shardIdxCacheWidth
-            if envsDescending envs then
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-            else
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-          )
-        -- value <- tupleLoad tp valuePtrs
+        let loop idx accum = do 
+              OP_Word64 shardIdxCacheWidth <- A.mul numType idx (A.liftWord64 (valuesPerCacheLine shardStruct))
+              x <- tupleLoadArray tp shardValues shardIdxCacheWidth
+              if envsDescending envs then
+                app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+              else
+                app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+        
+        value <- case seed of
+          Just s -> do
+            initValue <- llvmOfExp (compileArrayInstrEnvs envs) s
+            iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 0) (A.liftWord64 1) loopAmount initValue loop
+
+          Nothing -> do
+            initValue <- tupleLoadArray tp shardValues (integral TypeWord64 0)
+            iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 1) (A.liftWord64 1) loopAmount initValue loop
+
         codeEnd envs value
       _ -> internalError "Pair impossible"
   )
   Nothing
   where
-    memoryTp =  TupRsingle shardValues `TupRpair` TupRsingle shardIndexes `TupRpair` TupRsingle shardStartIndexes
+    memoryTp = TupRsingle shardValues `TupRpair` TupRsingle shardIndexes `TupRpair` TupRsingle shardStartIndexes
     ArgArray _ (ArrayR _ tp) _ _ = input
+    -- TODO: Combine arrays
     shardValues :: PrimType (SizedArray (Struct e))
     shardValues = ArrayPrimType (shardAmount * valuesPerCacheLine shardStruct) shardStruct
     shardStruct :: PrimType (Struct e)
@@ -723,7 +742,6 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
       = Just $ mkConstant tp v
       | otherwise
       = Nothing
-
 
 parCodeGenFoldCommutative
   :: Bool
@@ -1081,4 +1099,16 @@ hasFold (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
     go (FlatOpsBind _ _ _ ops) = go ops
     go (FlatOpsOp (FlatOp NFold _ _) _) = True
     go (FlatOpsOp (FlatOp NFold1 _ _) _) = True
+    go (FlatOpsOp _ ops) = go ops
+
+-- Checks if the cluster has a scan.
+hasScan :: FlatCluster NativeOp env -> Bool
+hasScan (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
+  where
+    go :: FlatOps NativeOp env idxEnv -> Bool
+    go FlatOpsNil = False
+    go (FlatOpsBind _ _ _ ops) = go ops
+    go (FlatOpsOp (FlatOp (NScan _) _ _) _) = True
+    go (FlatOpsOp (FlatOp (NScan' _) _ _) _) = True
+    go (FlatOpsOp (FlatOp (NScan1 _) _ _) _) = True
     go (FlatOpsOp _ ops) = go ops
