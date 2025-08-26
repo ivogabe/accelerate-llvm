@@ -182,6 +182,7 @@ codegen name env cluster args
           -- single value.
           envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
 
+          -- Function called by the scheduling function for every tile
           let processTile :: (Operand Bool -> Operand Word64 -> Maybe (Operand Word64) -> CodeGen Native ())
               processTile seqMode tileIdx' shardIdx = do
                 -- workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
@@ -696,27 +697,28 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
     case ptrs of
       TupRpair (TupRpair (TupRsingle shardValues) (TupRsingle _)) (TupRsingle _) -> do
         let tileCount = envsTileCount envs
-        tileCountWord64 <- instr' $ BitCast scalarType tileCount
 
-        -- If no seed, not empty
-        loopAmount <- A.min singleType (OP_Word64 tileCountWord64) (A.liftWord64 shardAmount)
+        loopAmount <- A.min singleType (OP_Int tileCount) (A.liftInt $ fromIntegral shardAmount)
 
         let loop idx accum = do 
-              OP_Word64 shardIdxCacheWidth <- A.mul numType idx (A.liftWord64 (valuesPerCacheLine shardStruct))
+              OP_Int shardIdxCacheWidth <- A.mul numType idx (A.liftInt $ fromIntegral (valuesPerCacheLine shardStruct))
               x <- tupleLoadArray tp shardValues shardIdxCacheWidth
               if envsDescending envs then
                 app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
               else
                 app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
         
+        -- If we have a seed, the loop might be empty, thus start from the seed.
+        -- If we do not have a seed, we assume the loop is never empty, 
+        -- thus start from the first value.
         value <- case seed of
           Just s -> do
             initValue <- llvmOfExp (compileArrayInstrEnvs envs) s
-            iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 0) (A.liftWord64 1) loopAmount initValue loop
+            iterFromStepTo [] tp (A.liftInt 0) (A.liftInt 1) loopAmount initValue loop
 
           Nothing -> do
             initValue <- tupleLoadArray tp shardValues (integral TypeWord64 0)
-            iterFromStepTo [Loop.LoopNonEmpty] tp (A.liftWord64 1) (A.liftWord64 1) loopAmount initValue loop
+            iterFromStepTo [] tp (A.liftInt 1) (A.liftInt 1) loopAmount initValue loop
 
         codeEnd envs value
       _ -> internalError "Pair impossible"

@@ -310,7 +310,7 @@ tupleStore _ _ _ = internalError "Tuple mismatch"
 
 -- | Store a tuple value into an array of tuples at the given index
 -- 
-tupleStoreArray :: forall e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand Word64 -> Operands e -> CodeGen arch ()
+tupleStoreArray :: forall i e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand i -> Operands e -> CodeGen arch ()
 tupleStoreArray t a idx v = go t a v TupleIdxSelf
   where 
     go :: forall e'. TypeR e' -> Operand (Ptr (SizedArray (Struct e))) -> Operands e' -> TupleIdx e e' -> CodeGen arch ()
@@ -333,7 +333,7 @@ tupleLoad _ _ = internalError "Tuple mismatch"
 
 -- | Load a tuple value from an array of tuples at the given index
 --
-tupleLoadArray :: forall e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand Word64 -> CodeGen arch (Operands e)
+tupleLoadArray :: forall i e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand i -> CodeGen arch (Operands e)
 tupleLoadArray t a idx = go t a TupleIdxSelf
   where go :: forall e'. TypeR e' -> Operand (Ptr (SizedArray (Struct e))) -> TupleIdx e e' -> CodeGen arch (Operands e')
         go TupRunit _ _ = return OP_Unit
