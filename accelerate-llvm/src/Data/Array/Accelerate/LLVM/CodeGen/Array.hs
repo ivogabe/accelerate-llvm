@@ -310,17 +310,27 @@ tupleStore _ _ _ = internalError "Tuple mismatch"
 
 -- | Store a tuple value into an array of tuples at the given index
 -- 
-tupleStoreArray :: forall i e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand i -> Operands e -> CodeGen arch ()
-tupleStoreArray t a idx v = go t a v TupleIdxSelf
+tupleStoreArray :: forall idx struct input arch. TypeR input 
+                                              -> Volatility
+                                              -> Operand (Ptr (SizedArray (Struct struct))) 
+                                              -> Operand idx 
+                                              -> TupleIdx struct input 
+                                              -> Operands input 
+                                              -> CodeGen arch ()
+tupleStoreArray t vol a idx structIdx v = go t a v structIdx
   where 
-    go :: forall e'. TypeR e' -> Operand (Ptr (SizedArray (Struct e))) -> Operands e' -> TupleIdx e e' -> CodeGen arch ()
+    go :: forall input'. TypeR input' 
+                      -> Operand (Ptr (SizedArray (Struct struct))) 
+                      -> Operands input' 
+                      -> TupleIdx struct input' 
+                      -> CodeGen arch ()
     go TupRunit _ _ _ = return ()
     go (TupRpair t1 t2) array (OP_Pair v1 v2) i = 
       go t1 array v1 (tupleLeft i) >> go t2 array v2 (tupleRight i)
     go (TupRsingle tp) array value i 
-      | Refl <- reprIsSingle @ScalarType @e' @Ptr tp = do
+      | Refl <- reprIsSingle @ScalarType @input' @Ptr tp = do
         ptr <- instr' $ GetElementPtr $ GEP array (integral TypeWord64 0) $ GEPArray idx $ GEPStruct (ScalarPrimType tp) i GEPEmpty
-        _ <- instr' $ Store NonVolatile ptr $ op tp value
+        _ <- instr' $ Store vol ptr $ op tp value
         return ()
 
 tupleLoad :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> CodeGen arch (Operands e)
@@ -331,18 +341,27 @@ tupleLoad (TupRsingle tp) (TupRsingle ptr)
   = instr $ Load tp NonVolatile ptr
 tupleLoad _ _ = internalError "Tuple mismatch"
 
--- | Load a tuple value from an array of tuples at the given index
+-- | Load a tuple value from an array of tuples at the given index of the array and the given index of the struct
 --
-tupleLoadArray :: forall i e arch. TypeR e -> Operand (Ptr (SizedArray (Struct e))) -> Operand i -> CodeGen arch (Operands e)
-tupleLoadArray t a idx = go t a TupleIdxSelf
-  where go :: forall e'. TypeR e' -> Operand (Ptr (SizedArray (Struct e))) -> TupleIdx e e' -> CodeGen arch (Operands e')
-        go TupRunit _ _ = return OP_Unit
-        go (TupRpair t1 t2) array i = 
-          OP_Pair <$> go t1 array (tupleLeft i) <*> go t2 array (tupleRight i)
-        go (TupRsingle tp) array i 
-          | Refl <- reprIsSingle @ScalarType @e' @Ptr tp = do
-            ptr <- instr' $ GetElementPtr $ GEP array (integral TypeWord64 0) $ GEPArray idx $ GEPStruct (ScalarPrimType tp) i GEPEmpty
-            instr $ Load tp NonVolatile ptr
+tupleLoadArray :: forall idx struct output arch. TypeR output 
+                                              -> Volatility
+                                              -> Operand (Ptr (SizedArray (Struct struct))) 
+                                              -> Operand idx 
+                                              -> TupleIdx struct output 
+                                              -> CodeGen arch (Operands output)
+tupleLoadArray t vol a idx = go t a
+  where 
+    go :: forall output'. TypeR output' 
+                       -> Operand (Ptr (SizedArray (Struct struct))) 
+                       -> TupleIdx struct output' 
+                       -> CodeGen arch (Operands output')
+    go TupRunit _ _ = return OP_Unit
+    go (TupRpair t1 t2) array i = 
+      OP_Pair <$> go t1 array (tupleLeft i) <*> go t2 array (tupleRight i)
+    go (TupRsingle tp) array i 
+      | Refl <- reprIsSingle @ScalarType @output' @Ptr tp = do
+        ptr <- instr' $ GetElementPtr $ GEP array (integral TypeWord64 0) $ GEPArray idx $ GEPStruct (ScalarPrimType tp) i GEPEmpty
+        instr $ Load tp vol ptr
 
 -- | Convert a multidimensional array index into a linear index
 --
