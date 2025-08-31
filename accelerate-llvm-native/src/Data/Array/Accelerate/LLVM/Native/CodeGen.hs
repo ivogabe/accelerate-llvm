@@ -564,6 +564,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
           )
         -- Initialize shardValues with the identity value, if we know it.
         -- We need the idenity instead of the seed, as sharded self scheduling
+        -- does not combine all the tiles in order.
         case identity of
           Nothing -> return ()
           Just i -> do
