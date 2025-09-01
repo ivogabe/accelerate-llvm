@@ -284,9 +284,11 @@ codegen name env cluster args
       let tileSize = if parallelDepth == rank shr then chunkSize parallelShr else chunkSizeOne parallelShr
       let parSizes = parallelIterSize parallelShr loops
 
+      -- Calculate tileCount outside of init, as we need it in work block
+      tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
+
       setBlock initBlock
 
-      tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
       tileCount' <- shapeSize parallelShr tileCount
 
       -- We are not using kernel memory, so no need to initialize it.
