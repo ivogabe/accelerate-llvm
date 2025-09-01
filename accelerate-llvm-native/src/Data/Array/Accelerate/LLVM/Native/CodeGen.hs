@@ -96,7 +96,6 @@ codegen name env cluster args
     initBlock <- newBlock "init"
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
-    _ <- switch (OP_Word64 flag) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
     let useSharded = hasFold flat && not (hasScan flat)
 
@@ -145,6 +144,8 @@ codegen name env cluster args
           let memoryTp' = parCodeGenMemory parCodes
           let memoryTp = StructPrimType False memoryTp'
           kernelMem <- instr' $ PtrCast (PtrPrimType memoryTp defaultAddrSpace) kernelMem'
+
+          _ <- switch (OP_Word64 flag) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
 
           setBlock initBlock
           do
@@ -303,6 +304,8 @@ codegen name env cluster args
       -- The work per iteration is probably large enough.
       let tileSize = if parallelDepth == rank shr then chunkSize parallelShr else chunkSizeOne parallelShr
       let parSizes = parallelIterSize parallelShr loops
+
+      _ <- switch (OP_Word64 flag) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
 
       setBlock initBlock
 

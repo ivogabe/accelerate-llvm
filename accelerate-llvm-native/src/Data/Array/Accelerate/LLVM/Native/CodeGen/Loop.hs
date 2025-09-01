@@ -234,7 +234,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
   OP_Word64 shardToWorkOn <- A.rem TypeWord64 nextShard' (A.liftWord64 shardAmount)
 
   -- Get shard from shards array, to do this we need to multiply by cache width as every shards is on a seperate cache line.
-  OP_Word64 shardIdx <- A.mul numType (A.liftWord64 (cacheWidth `div` 8)) (OP_Word64 shardToWorkOn)
+  OP_Word64 shardIdx <- A.mul numType (A.liftWord64 $ valuesPerCacheLine scalarTypeWord64) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
   
   shardSizeIdx <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty
