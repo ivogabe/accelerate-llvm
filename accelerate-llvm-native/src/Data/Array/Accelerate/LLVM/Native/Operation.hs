@@ -59,6 +59,7 @@ import qualified Data.Set as S
 import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Control.Monad.State.Strict
 import Data.Foldable (fold)
+import Data.Array.Accelerate.Analysis.Match ((:~:)(Refl))
 
 data NativeOp t where
   NMap         :: NativeOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
@@ -301,7 +302,7 @@ instance MakesILP NativeOp where
     fusionILP.bounds %= (<> defaultBounds mempty c bsOut)
     -- No input, so no in-place paths.
 
-  mkGraph c NMap (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c NMap (L (ArgFun fun) _ :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
@@ -310,7 +311,9 @@ instance MakesILP NativeOp where
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
       <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
-    fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut)
+    fusionILP.inplacePaths %= case isIdentity fun of
+      Just Refl -> (<> mkUnitInplacePaths (Number nComps * Number nComps) c lIn lOut)
+      _         -> (<> mkUnitInplacePaths 1 c lIn lOut)
 
   mkGraph c NPermute (_fun :>: L _ lTargets :>: L _ lLocks :>: ArgsNil) = do
     let bsTargets = getLabelArrDeps lTargets
