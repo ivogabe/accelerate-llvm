@@ -130,7 +130,7 @@ void accelerate_ref_retain(void **ref);
 void hs_try_putmvar(int32_t, void*);
 
 inline uintptr_t accelerate_pack(void *pointer, uint16_t tag) {
-  const uintptr_t MASK = ~(1ULL << 48);
+  const uintptr_t MASK = (1ULL << 48) - 1;
   uintptr_t result = (uintptr_t) pointer & MASK;
   return result | (((uintptr_t) tag) << 48);
 }

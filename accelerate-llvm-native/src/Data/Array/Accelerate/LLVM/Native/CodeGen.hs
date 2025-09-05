@@ -130,11 +130,6 @@ codegen name env cluster args
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
-          -- Number of tiles
-          sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
-          OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
-          tileCount <- instr' $ BitCast scalarType tileCount'
-
           let envs' = envs{
             envsLoopDepth = 0,
             envsDescending = isDescending direction,
@@ -148,6 +143,10 @@ codegen name env cluster args
 
           setBlock initBlock
           do
+            -- Number of tiles
+            sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
+            OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
+
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
 
@@ -170,6 +169,10 @@ codegen name env cluster args
             retval_ $ scalar (scalarType @Word8) 0
 
           setBlock workBlock
+          -- Number of tiles
+          sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
+          OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
+          tileCount <- instr' $ BitCast scalarType tileCount'
 
           -- Emit code to initialize a thread, and get the codes for the tile loops
           tileLoops <- genParallel kernelMem envs' TupleIdxSelf parCodes
