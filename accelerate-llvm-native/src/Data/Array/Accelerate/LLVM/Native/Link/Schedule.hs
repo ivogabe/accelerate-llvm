@@ -1601,7 +1601,9 @@ callBufferRetain ptr = do
     []
   return ()
 
-callRefRetain :: Operand (Ptr t) -> CodeGen Native ()
+-- Note that this function gets a pointer to a Ref,
+-- so a pointer to a pointer
+callRefRetain :: Operand (Ptr (Ptr t)) -> CodeGen Native ()
 callRefRetain ptr = do
   ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
   _ <- callLocal
@@ -1764,11 +1766,10 @@ awhileParRetainInput structVars input remainder = do
         return ()
       else do
         ptrPtr <- getPtr structVars idx
-        ptr <- instr' $ LoadPtr NonVolatile ptrPtr 
         -- Note: we call buffer_retain multiple times (instead of retaining the buffer
         -- with multiple increments at once). 'retainCount' will generally be very small,
         -- usually 1, so no point in optimizing for this. It is bounded by the size of the input,
-        replicateM_ retainCount $ callRefRetain ptr
+        replicateM_ retainCount $ callRefRetain ptrPtr
 
     handleGroup _ = internalError "Expected non-empty list containing variables of buffer references"
 
