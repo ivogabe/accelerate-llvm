@@ -630,7 +630,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd = Exists $ ParLoop
             startIdx <- tupleLoadArray (TupRsingle scalarTypeInt) NonVolatile shardArray idxCacheWidth shardStartIdxIdx
             isFirst <- A.eq singleType startIdx (envsTileIndex envs)
 
-            A.ifThenElse' (tp, isFirst)
+            A.ifThenElse (tp, A.land isFirst $ envsIsFirst envs)
               ( do
                 return x
               )
