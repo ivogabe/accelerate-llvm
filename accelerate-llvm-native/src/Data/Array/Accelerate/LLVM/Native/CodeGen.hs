@@ -518,7 +518,8 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
   , Just s <- seed
   , Just i <- identity
   -- Specialized version for commutative folds with identity
-  = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
+  = parCodeGenFoldCommutative descending fun s i input inputIdx 
+    (\envs result -> writeArray' envs output outputIdx result)
   | otherwise
   = parCodeGenScan descending IsFold fun seed input inputIdx
     (\_ _ -> return ())
@@ -558,7 +559,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
   , Just s <- seed
   , Just i <- identity
   -- Specialized version for commutative folds with identity
-  = parCodeGenFoldShardedCommutative descending fun s i input index codeEnd
+  = parCodeGenFoldCommutative descending fun s i input index codeEnd
   | otherwise = Exists $ ParLoopCodeGen
   -- If we know an identity value, we can implement this without loop peeling
   (isNothing identity)
@@ -764,9 +765,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
       | otherwise
       = Nothing
 
--- Version of fold that uses multiple indexes and values to reduce contention on
--- the variables (sharding). Must be executed with sharded self scheduling.
-parCodeGenFoldShardedCommutative
+parCodeGenFoldCommutative
   :: forall env idxEnv sh e.
      Bool -- Whether the loop is descending
   -> Fun env (e -> e -> e)
@@ -777,145 +776,7 @@ parCodeGenFoldShardedCommutative
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenFoldShardedCommutative _ fun seed identity input index codeEnd = Exists $ ParLoopCodeGen
-  False
-  -- In kernel memory, store the index of the block we must now handle and the
-  -- reduced value so far. 'Handle' here means that we should now add the value
-  -- of that block.
-  memoryTp
-  -- Initialize kernel memory
-  (\ptr envs -> do
-    ptrs <- tuplePtrs' memoryTp ptr
-    case ptrs of
-      TupRsingle shardArray -> do
-        -- Initialize lock for each shard        
-        imapFromStepTo [Loop.LoopNonEmpty] (A.liftInt 0) (A.liftInt 1) (A.liftInt $ fromIntegral shardAmount) (\(OP_Int idx) -> do
-          -- Multiply the index by the cache width in bytes to ensure every shard is on a seperate cache line.
-          OP_Int idxCacheWidth <- A.mul numType (OP_Int idx) (A.liftInt $ fromIntegral $ valuesPerCacheLine shardType)
-          _ <- tupleStoreArray (TupRsingle scalarTypeWord8) NonVolatile shardArray idxCacheWidth shardLockIdx (A.liftWord8 0)
-
-          return ()
-          )
-        -- Initialize shardValues with the identity value, if we know it.
-        -- We need the idenity instead of the seed, as sharded self scheduling
-        -- does not combine all the tiles in order.
-        value <- llvmOfExp (compileArrayInstrEnvs envs) identity
-        imapFromStepTo
-          [Loop.LoopVectorize, Loop.LoopNonEmpty]
-          (A.liftWord64 0)
-          (A.liftWord64 $ valuesPerCacheLine shardType)
-          (A.liftWord64 (shardAmount * valuesPerCacheLine shardType))
-          (\(OP_Word64 idx) -> do
-            _ <- tupleStoreArray tp NonVolatile shardArray idx shardValueIdx value
-            return ()
-          )
-  )
-  -- Initialize a thread
-  (\_ _ -> tupleAlloca tp)
-  -- Code before the tile loop
-  (\_ accumVar _ envs -> do
-    value <- llvmOfExp (compileArrayInstrEnvs envs) identity
-    tupleStore tp accumVar value
-    )
-  -- Code within the tile loop
-  (\_ accumVar _ envs -> do
-    x <- readArray' envs input index
-    accum <- tupleLoad tp accumVar
-    new <-
-      if envsDescending envs then
-        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-      else
-        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      
-    tupleStore tp accumVar new
-  )
-  -- Code after the tile loop
-  (\_ accumVar ptr envs -> do
-    ptrs <- tuplePtrs' memoryTp ptr
-    case ptrs of
-      TupRsingle shardArray -> do
-        let shardIdx = fromMaybe (internalError "Missing shard index") $ envsShardIdx envs
-        OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 (valuesPerCacheLine shardType))
-        lock <- instr' $ GetElementPtr $ GEP shardArray (integral TypeWord64 0) $ GEPArray idxCacheWidth $ GEPStruct (ScalarPrimType scalarTypeWord8) shardLockIdx GEPEmpty
-
-        _ <- Loop.while [] TupRunit
-          (\_ -> do
-            -- While the lock is taken
-            old <- instr $ AtomicRMW numType NonVolatile Exchange lock (scalar scalarTypeWord8 1) (CrossThread, Acquire)
-            A.neq singleType old (A.liftWord8 0)
-          )
-          (\_ -> return OP_Unit)
-          OP_Unit
-
-        local <- tupleLoad tp accumVar
-
-        old <- tupleLoadArray tp NonVolatile shardArray idxCacheWidth shardValueIdx
-        new <-
-          if envsDescending envs then
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local old
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
-        tupleStoreArray tp NonVolatile shardArray idxCacheWidth shardValueIdx new
-
-
-        _ <- instr' $ Fence (CrossThread, Release)
-        _ <- instr' $ Store Volatile lock (scalar scalarTypeWord8 0) -- unlock
-        return ()
-  )
-  -- Code at the end of a thread
-  (\_ _ _ -> return ())
-  -- Code after the loop
-  (\ptr envs -> do
-    ptrs <- tuplePtrs' memoryTp ptr
-    case ptrs of
-      TupRsingle shardArray -> do
-        let tileCount = envsTileCount envs
-
-        loopAmount <- A.min singleType (OP_Int tileCount) (A.liftInt $ fromIntegral shardAmount)
-
-        initValue <- llvmOfExp (compileArrayInstrEnvs envs) seed
-        value <- iterFromStepTo [] tp (A.liftInt 0) (A.liftInt 1) loopAmount initValue (\idx accum -> do
-          OP_Int shardIdxCacheWidth <- A.mul numType idx (A.liftInt $ fromIntegral (valuesPerCacheLine shardType))
-          x <- tupleLoadArray tp NonVolatile shardArray shardIdxCacheWidth shardValueIdx
-          if envsDescending envs then
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-          )
-
-        codeEnd envs value
-  )
-  Nothing
-  where
-    memoryTp = TupRsingle shardArray
-    ArgArray _ (ArrayR _ tp) _ _ = input
-    -- Each element of the array contains a struct storing the result value, 
-    -- the current index of the shard and the start index of the shard
-    shardType :: PrimType (Struct (e, Word8))
-    shardType = StructPrimType False $ 
-      mapTupR ScalarPrimType tp `TupRpair`
-      TupRsingle (ScalarPrimType scalarTypeWord8) -- Lock
-    -- The array size is multiplied by the cache width so that each shard 
-    -- is on a seperate cache line to avoid false sharing
-    shardArray :: PrimType (SizedArray (Struct (e, Word8)))
-    shardArray = ArrayPrimType (shardAmount * valuesPerCacheLine shardType) shardType
-    -- Indexes for accessing the fields from the struct stored in the array
-    shardValueIdx :: TupleIdx (e, Word8) e
-    shardValueIdx = tupleLeft TupleIdxSelf
-    shardLockIdx :: TupleIdx (e, Word8) Word8
-    shardLockIdx = tupleRight TupleIdxSelf
-
-parCodeGenFoldCommutative
-  :: Bool
-  -> Fun env (e -> e -> e)
-  -> Exp env e
-  -> Exp env e
-  -> Arg env (In (sh, Int) e)
-  -> Arg env (Out sh e)
-  -> ExpVars idxEnv (sh, Int)
-  -> ExpVars idxEnv sh
-  -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = Exists $ ParLoopCodeGen
+parCodeGenFoldCommutative _ fun seed identity input index codeEnd = Exists $ ParLoopCodeGen
   False
   -- In kernel memory, store a lock (Word8) and the
   -- reduced value so far. The lock must be acquired to read or update the total value.
@@ -942,7 +803,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
   (\_ _ _ _ -> return ())
   -- Code within the tile loop
   (\_ accumVar _ envs -> do
-    x <- readArray' envs input inputIdx
+    x <- readArray' envs input index
     accum <- tupleLoad tp accumVar
     new <-
       if envsDescending envs then
@@ -993,7 +854,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair _ valuePtrs -> do
         value <- tupleLoad tp valuePtrs
-        writeArray' envs output outputIdx value
+        codeEnd envs value
   )
   Nothing
   where
