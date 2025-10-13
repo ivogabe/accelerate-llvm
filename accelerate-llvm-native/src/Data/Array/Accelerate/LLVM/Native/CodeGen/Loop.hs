@@ -27,6 +27,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
+import Data.Array.Accelerate.LLVM.CodeGen.Profile
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as Loop
 
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
@@ -288,16 +289,22 @@ atomicAdd ordering ptr increment = do
   instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)
 
 ---- debugging tools ----
+printf :: IsPrim a => String -> Operand a -> CodeGen Native (Operands Int)
+printf format val = do
+  (nm, l) <- global_string format
+  let strPtr = ConstantOperand $ derefGlobalString l nm
+  call (lamUnnamed primType $ lamUnnamed primType $ Body (PrimType primType) Nothing (Label "printf"))
+       (ArgumentsCons strPtr []
+         $ ArgumentsCons val []
+           ArgumentsNil)
+       []
+
+putInt :: Operands Int -> CodeGen Native ()
+putInt x = void $ printf "%d" (op TypeInt x)
+
 putchar :: Operands Int -> CodeGen Native (Operands Int)
 putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar")) 
                  (ArgumentsCons (op TypeInt x) [] ArgumentsNil) 
                  []
-putcharA, putcharB, putcharC, putcharD, putcharE, putcharF, putcharG, putcharH :: StateT s (CodeGen Native) ()
-putcharA = void $ lift $ putchar $ liftInt 65
-putcharB = void $ lift $ putchar $ liftInt 66
-putcharC = void $ lift $ putchar $ liftInt 67
-putcharD = void $ lift $ putchar $ liftInt 68
-putcharE = void $ lift $ putchar $ liftInt 69
-putcharF = void $ lift $ putchar $ liftInt 70
-putcharG = void $ lift $ putchar $ liftInt 71
-putcharH = void $ lift $ putchar $ liftInt 72
+putString :: String -> CodeGen Native ()
+putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)
