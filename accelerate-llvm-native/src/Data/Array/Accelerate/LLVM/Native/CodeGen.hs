@@ -300,8 +300,10 @@ codegen name env cluster args
                   return ()
 
             if useSharded
-              then shardedSelfScheduling shardIndexes shardSizes workassistIndex processTile
-              else workassistLoop workassistIndex tileCount (\seq tile -> processTile seq tile Nothing)
+              then shardedSelfScheduling shardIndexes shardSizes workassistIndex
+                   (\seq tile shard -> processTile seq tile (Just shard))
+              else workassistLoop workassistIndex tileCount
+                   (\seq tile -> processTile seq tile Nothing)
 
             ptExit tileLoops envs'
 
@@ -348,7 +350,7 @@ codegen name env cluster args
               else {- if hasPermute then -} [Loop.LoopInterleave]
               -- else [Loop.LoopVectorize]
 
-        shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes workassistIndex tileSize parSizes tileCount $ \idx -> do
+        shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes workassistIndex tileSize parSizes tileCount $ \idx _ -> do
           let envs' = envs{
               envsLoopDepth = parallelDepth,
               envsIdx =

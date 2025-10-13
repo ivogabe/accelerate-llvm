@@ -17,7 +17,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Profile (
 
   zone_begin, zone_begin_alloc,
   zone_end,
-
+  global_string, derefGlobalString,
 ) where
 
 import LLVM.AST.Type.Constant

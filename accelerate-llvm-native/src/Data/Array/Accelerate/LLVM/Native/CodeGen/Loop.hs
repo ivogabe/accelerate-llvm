@@ -29,6 +29,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
+import Data.Array.Accelerate.LLVM.CodeGen.Profile
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as Loop
 
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
@@ -187,7 +188,7 @@ shardedSelfScheduling
     :: Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- combined: high 32 bits = next shard index, low 32 bits = finished shard count
-    -> (Operand Bool -> Operand Word64 -> Maybe (Operand Word64) -> CodeGen Native ())
+    -> (Operand Bool -> Operand Word64 -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
 shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = do
   entry    <- getBlock
@@ -254,7 +255,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
 
   -- Sequential mode needs to be false here, as it is only used in 
   -- a scan operation and this scheduler is never used for scans
-  doWork (boolean False) workIdx (Just shardToWorkOn)
+  doWork (boolean False) workIdx shardToWorkOn
 
   _ <- br inner
 
@@ -277,7 +278,7 @@ shardedSelfSchedulingChunked
     -> sh 
     -> Operands sh
     -> Operands sh
-    -> (Operands sh -> CodeGen Native ()) 
+    -> (Operands sh -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
 shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShardFinishedShards chunkSz' sh chunkCounts doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
@@ -286,7 +287,7 @@ shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShardFinishedSh
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex
     end <- chunkEnd shr sh chunkSz start
-    imapNestFromTo [] ann shr start end sh (\ix _ -> doWork ix)
+    imapNestFromTo [] ann shr start end sh (\ix _ -> doWork ix shardIdx)
 
 workassistLoop
     :: Operand (Ptr Word64)                 -- index into work
@@ -406,16 +407,22 @@ atomicLoad ordering ptr = do
   instr' $ LoadAtomic scalarType NonVolatile ptr ordering 8
 
 ---- debugging tools ----
+printf :: IsPrim a => String -> Operand a -> CodeGen Native (Operands Int)
+printf format val = do
+  (nm, l) <- global_string format
+  let ptr = ConstantOperand $ derefGlobalString l nm
+  call (lamUnnamed primType $ lamUnnamed primType $ Body (PrimType primType) Nothing (Label "printf"))
+       (ArgumentsCons ptr []
+         $ ArgumentsCons val []
+           ArgumentsNil)
+       []
+
+putInt :: Operands Int -> CodeGen Native (Operands Int)
+putInt x = printf "%d" (op TypeInt x)
+
 putchar :: Operands Int -> CodeGen Native (Operands Int)
 putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar")) 
                  (ArgumentsCons (op TypeInt x) [] ArgumentsNil) 
                  []
-putcharA, putcharB, putcharC, putcharD, putcharE, putcharF, putcharG, putcharH :: CodeGen Native ()
-putcharA = void $ putchar $ liftInt 65
-putcharB = void $ putchar $ liftInt 66
-putcharC = void $ putchar $ liftInt 67
-putcharD = void $ putchar $ liftInt 68
-putcharE = void $ putchar $ liftInt 69
-putcharF = void $ putchar $ liftInt 70
-putcharG = void $ putchar $ liftInt 71
-putcharH = void $ putchar $ liftInt 72
+putString :: String -> CodeGen Native ()
+putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)
