@@ -352,7 +352,7 @@ instance MakesILP NativeOp where
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
       <> inputConstraints c wsIn
-      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId))
     fusionILP.bounds %= (<> foldMap (equal dir . (`ReadDir` c)) bsIn
                          <> foldMap (equal dir . WriteDir c) (bsOut1 <> bsOut2))
     fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut1)
@@ -363,7 +363,7 @@ instance MakesILP NativeOp where
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
       <> inputConstraints c wsIn
-      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
+      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId)
       <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
@@ -374,7 +374,7 @@ instance MakesILP NativeOp where
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
       <> inputConstraints c wsIn
-      <> ILP.var (InFoldSize c) .==. ILP.int (c^.nodeId)
+      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId)
       <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
