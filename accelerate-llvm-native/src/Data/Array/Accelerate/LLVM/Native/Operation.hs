@@ -248,23 +248,6 @@ instance SetOpIndices NativeOp where
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
   getOpLoopDirections _ _ _ = []
 
-                -- vvvv old vvv
-                  -- 0 means maximal parallelism; each thread only gets 1 element, e.g. output of the first stage of 1-dimensional fold
-                  -- 1 is segmented along the innermost dimension into nthreads equal parts, e.g. input of the first stage of 1-dimensional fold
-                  -- 2 is one row for each thread
-                  -- 3 is segmented along the second dimension, e.g. input of a fused folddim followed by first stage of 1-dimensional fold
-                  -- 4 is 2 dimensions per thread, etc
-                  -- note that this is about _logical_ threads; if there are less physical ones present then they will perform work stealing, so this is really the (minimum) size of each bucket in the work stealing queue
-                -- ^^^^ old ^^^
--- data NativeILPVar = Dims InOut (Node Comp)
---                   | DepthPerThread InOut Node
---   deriving (Eq, Ord, Show)
--- pattern InDims, OutDims {- InDepth, OutDepth -}:: Node Comp -> Graph.Var NativeOp
--- pattern InDims   l = BackendSpecific (Dims            InArr l)
--- pattern OutDims  l = BackendSpecific (Dims           OutArr l)
--- pattern InDepth  l = BackendSpecific (DepthPerThread  InArr l)
--- pattern OutDepth l = BackendSpecific (DepthPerThread OutArr l)
-
 -- TODO: factor out more common parts of mkGraph
 -- TODO: do the TODO's in here, and also do them in the Interpreter
 -- TODO: constraints and bounds for the new variable(s)
