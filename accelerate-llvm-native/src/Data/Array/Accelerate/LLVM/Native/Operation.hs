@@ -125,11 +125,11 @@ instance DesugarAcc NativeOp where
   mkMap         a b c   = Exec NMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec NBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec NGenerate    (a :>: b :>:             ArgsNil)
-  mkScan dir f (Just seed) i@(ArgArray In (ArrayR shr ty) sh buf) o
+  mkScan dir f (Just seed) i o
     = Exec (NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
-  mkScan dir f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
+  mkScan dir f Nothing i o
     = Exec (NScan1 dir) (f :>: i :>: o :>: ArgsNil)
-  mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
+  mkScan' dir f seed i o1 o2
     = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
   mkPermute (Just a) b c = Exec NPermute (a :>: b :>: c :>: ArgsNil)
   mkPermute Nothing a b = Exec NPermute' (a :>: b :>: ArgsNil)
@@ -298,16 +298,16 @@ instance MakesILP NativeOp where
       Just Refl -> (<> mkUnitInplacePaths (Number nComps * Number nComps) c lIn lOut)
       _         -> (<> mkUnitInplacePaths 1 c lIn lOut)
 
-  mkGraph c NPermute (_fun :>: L _ lTargets :>: L _ lLocks :>: ArgsNil) = do
+  mkGraph c NPermute (_fun :>: L _ lTargets :>: L _ lIn :>: ArgsNil) = do
     let bsTargets = getLabelArrDeps lTargets
-    let bsLocks   = getLabelArrDeps lLocks
+    let bsIn      = getLabelArrDeps lIn
     wsTargets <- use $ allWriters bsTargets
-    wsLocks   <- use $ allWriters bsLocks
-    fusionILP %= (wsTargets <> wsLocks) `allBefore` c
+    wsIn      <- use $ allWriters bsIn
+    fusionILP %= (wsTargets <> wsIn) `allBefore` c
     fusionILP.constraints %= (
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
-    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsLocks)
-                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsLocks))
+    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
+                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsIn))
     -- No output, so no in-place paths.
 
   mkGraph c NPermute' (L _ lTargets :>: L _ lIn :>: ArgsNil) = do
@@ -417,8 +417,3 @@ instance ShrinkArg (BackendClusterArg NativeOp) where
 shrToTypeR :: ShapeR sh -> TypeR sh
 shrToTypeR ShapeRz = TupRunit
 shrToTypeR (ShapeRsnoc shr) = TupRpair (shrToTypeR shr) (TupRsingle scalarType)
-
-
-dirToInt :: Direction -> Int
-dirToInt LeftToRight = -2
-dirToInt RightToLeft = -1
