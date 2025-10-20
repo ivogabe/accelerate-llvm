@@ -309,7 +309,7 @@ codegen name env cluster args
       setBlock workBlock
 
       tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
-
+      
       let ann =
             if parallelDepth /= rank shr then []
             else {- if hasPermute then -} [Loop.LoopInterleave]

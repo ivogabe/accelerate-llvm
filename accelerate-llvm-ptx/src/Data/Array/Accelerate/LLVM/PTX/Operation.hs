@@ -10,6 +10,7 @@
 {-# LANGUAGE TypeFamilies      #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TupleSections #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Accelerate
@@ -55,7 +56,9 @@ import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver hiding ( c )
 import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver as ILP
 import Lens.Micro
+import Lens.Micro.Mtl
 import qualified Data.Map as M
+import qualified Data.Set as S
 import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Trafo.Desugar (desugarAlloc)
 
@@ -63,6 +66,8 @@ import Data.Array.Accelerate.AST.Idx (Idx(..))
 import Data.Array.Accelerate.Pretty.Operation (prettyFun)
 import Data.Array.Accelerate.Pretty.Exp (Val (Push))
 import Unsafe.Coerce (unsafeCoerce)
+
+import Control.Monad.State.Strict
 
 data PTXOp t where
   PTXMap       :: PTXOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
@@ -76,7 +81,7 @@ data PTXOp t where
   PTXPermute'  :: PTXOp (Mut sh' e
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
-  {- PTXScan      :: Direction
+  PTXScan      :: Direction
                -> PTXOp (Fun' (e -> e -> e)
                          -> Exp' e
                          -> In (sh, Int) e
@@ -102,7 +107,7 @@ data PTXOp t where
   PTXFold1     :: PTXOp (Fun' (e -> e -> e)
                          -> In (sh, Int) e
                          -> Out sh e
-                         -> ()) -}
+                         -> ())
 
 instance PrettyOp PTXOp where
   prettyOp PTXMap         = "map"
@@ -110,7 +115,7 @@ instance PrettyOp PTXOp where
   prettyOp PTXGenerate    = "generate"
   prettyOp PTXPermute     = "permute"
   prettyOp PTXPermute'    = "permuteUnique"
-  {- prettyOp (PTXScan dir) = case dir of
+  prettyOp (PTXScan dir) = case dir of
     LeftToRight -> "scanl"
     RightToLeft -> "scanr"
   prettyOp (PTXScan1 dir) = case dir of
@@ -120,7 +125,7 @@ instance PrettyOp PTXOp where
     LeftToRight -> "scanl'"
     RightToLeft -> "scanr'"
   prettyOp PTXFold        = "fold"
-  prettyOp PTXFold1       = "fold1"-}
+  prettyOp PTXFold1       = "fold1"
 
 instance NFData' PTXOp where
   rnf' !_ = ()
@@ -171,14 +176,14 @@ instance EncodeOperation PTXOp where
   encodeOperation PTXGenerate    = intHost $(hashQ ("Generate" :: String))
   encodeOperation PTXPermute     = intHost $(hashQ ("Permute" :: String))
   encodeOperation PTXPermute'    = intHost $(hashQ ("Permute'" :: String))
-  {-encodeOperation (PTXScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
+  encodeOperation (PTXScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
   encodeOperation (PTXScan RightToLeft)  = intHost $(hashQ ("Scanr" :: String))
   encodeOperation (PTXScan1 LeftToRight) = intHost $(hashQ ("Scanl1" :: String))
   encodeOperation (PTXScan1 RightToLeft) = intHost $(hashQ ("Scanr1" :: String))
   encodeOperation (PTXScan' LeftToRight) = intHost $(hashQ ("Scanl'" :: String))
   encodeOperation (PTXScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
   encodeOperation PTXFold        = intHost $(hashQ ("Fold" :: String))
-  encodeOperation PTXFold1       = intHost $(hashQ ("Fold1" :: String))-}
+  encodeOperation PTXFold1       = intHost $(hashQ ("Fold1" :: String))
 
 instance SetOpIndices PTXOp where
   setOpIndices _ PTXGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
@@ -186,7 +191,7 @@ instance SetOpIndices PTXOp where
     = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
   setOpIndices _ PTXMap _ _ = error "Missing indices for PTXMap"
   setOpIndices _ PTXBackpermute _ _ = Just $ Left IsBackpermute
-  {-setOpIndices _ (PTXScan _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  setOpIndices _ (PTXScan _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     -- Annotate the input with an index.
     -- Don't annotate the output. We don't fuse over the output of a normal scan,
     -- as the output of a scan is one longer than the input.
@@ -212,7 +217,7 @@ instance SetOpIndices PTXOp where
       IdxArgNone :>: IdxArgIdx (d + 1) (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx d i :>: ArgsNil
     | otherwise
     = Nothing
-  setOpIndices _ PTXFold1 _ _ = error "Missing indices for PTXFold1" -}
+  setOpIndices _ PTXFold1 _ _ = error "Missing indices for PTXFold1"
   setOpIndices indexVar PTXPermute (_ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
@@ -242,7 +247,7 @@ instance SetOpIndices PTXOp where
         = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
         | otherwise = Nothing
 
-  {- getOpLoopDirections (PTXScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
+  getOpLoopDirections (PTXScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
     where
       dir' = case dir of
@@ -263,65 +268,51 @@ instance SetOpIndices PTXOp where
   getOpLoopDirections PTXFold _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
   getOpLoopDirections PTXFold1 _ (_ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)] -}
+    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
   getOpLoopDirections _ _ _ = []
 
-                -- vvvv old vvv
-                  -- 0 means maximal parallelism; each thread only gets 1 element, e.g. output of the first stage of 1-dimensional fold
-                  -- 1 is segmented along the innermost dimension into nthreads equal parts, e.g. input of the first stage of 1-dimensional fold
-                  -- 2 is one row for each thread
-                  -- 3 is segmented along the second dimension, e.g. input of a fused folddim followed by first stage of 1-dimensional fold
-                  -- 4 is 2 dimensions per thread, etc
-                  -- note that this is about _logical_ threads; if there are less physical ones present then they will perform work stealing, so this is really the (minimum) size of each bucket in the work stealing queue
-                -- ^^^^ old ^^^
-data PTXILPVar = Dims InOut Label
-                  -- | DepthPerThread InOut Label
-  deriving (Eq, Ord, Show)
-pattern InDims, OutDims {- InDepth, OutDepth -}:: Label -> Graph.Var PTXOp
-pattern InDims   l = BackendSpecific (Dims            InArr l)
-pattern OutDims  l = BackendSpecific (Dims           OutArr l)
--- pattern InDepth  l = BackendSpecific (DepthPerThread  InArr l)
--- pattern OutDepth l = BackendSpecific (DepthPerThread OutArr l)
-
--- TODO: factor out more common parts of mkGraph
--- TODO: do the TODO's in here, and also do them in the Interpreter\
--- TODO: constraints and bounds for the new variable(s)
 instance MakesILP PTXOp where
-  type BackendVar PTXOp = PTXILPVar
+  type BackendVar PTXOp = ()
   type BackendArg PTXOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
   defaultBA = 0
   data BackendClusterArg PTXOp a = BCAN
 
-  mkGraph PTXBackpermute (_ :>: L (ArgArray In (ArrayR _shrI _) _ _) (_, lIns) :>: L (ArgArray Out (ArrayR shrO _) _ _) _ :>: ArgsNil) l@(Label i _) =
-    Graph.Info
-      mempty
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
-        <> ILP.c (InDir l) .==. int i
-        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
-        <> inrankifmanifest shrO l
-          -- .+. timesN (int 3 .+. c (OutDir l)) 
-          -- When we switch to gather, like in the paper, we need to add this term.
-          -- 4 + dir is always positive, and this is exactly why we (elsewhere) define `n` as `5+(size nodes)`
-          -- problem: this clashes with the assumption in 'inputConstraints' and 'finalise' that orders are at most n,
-          -- so if we want this we need to change inputConstraints and finalise
-        )-- <> c (InDims l) .+. int (rank shrO) .==. c (OutDims l) .+. int (rank shrI))
-      (defaultBounds l)
-  mkGraph PTXGenerate (_ :>: L (ArgArray Out (ArrayR shr _) _ _) _ :>: ArgsNil) l =
-    Graph.Info
-      mempty
-      (outrankifmanifest shr l)
-      (defaultBounds l)
-  mkGraph PTXMap (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
-    Graph.Info
-      mempty
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
-        <> ILP.c (InDir  l) .==. ILP.c (OutDir  l)
-        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
-        <> inrankifmanifest shr l)
-      (defaultBounds l)
-  mkGraph PTXPermute (_ :>: L _ (_, lTargets) :>: L _ (_, lLocks) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
+  mkGraph :: Node Comp
+          -> PTXOp args
+          -> LabelledArgs env args
+          -> State (BackendGraphState PTXOp env) ()
+  mkGraph c@(Node i _) PTXBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+    let bsIn  = getLabelArrDeps lIn
+    let bsOut = getLabelArrDeps lOut
+    wsIn <- use $ allWriters bsIn
+    fusionILP.constraints %= (
+      <> inputConstraints c wsIn
+      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
+      <> allEqual ([ILP.int i] <>  readDirs (S.map (,c) bsIn))
+      <> allEqual (               writeDirs (S.map (c,) bsOut)))
+    fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
+    -- Different order, so no in-place paths.
+
+  mkGraph c PTXGenerate (_fun :>: L _ lOut :>: ArgsNil) = do
+    let bsOut = getLabelArrDeps lOut
+    fusionILP.constraints %= (<> allEqual (writeDirs (S.map (c,) bsOut)))
+    fusionILP.bounds %= (<> defaultBounds mempty c bsOut)
+    -- No input, so no in-place paths.
+
+  mkGraph c PTXMap (L (ArgFun fun) _ :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+    let bsIn  = getLabelArrDeps lIn
+    let bsOut = getLabelArrDeps lOut
+    wsIn <- use $ allWriters $ getLabelArrDeps lIn
+    fusionILP.constraints %= (
+      <> inputConstraints c wsIn
+      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
+      <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
+    fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
+    fusionILP.inplacePaths %= case isIdentity fun of
+      Just Refl -> (<> mkUnitInplacePaths (Number nComps * Number nComps) c lIn lOut)
+      _         -> (<> mkUnitInplacePaths 1 c lIn lOut)
+
+  {- mkGraph PTXPermute (_ :>: L _ (_, lTargets) :>: L _ (_, lLocks) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
     Graph.Info
       ( mempty & infusibleEdges .~ Set.map (-?> l) (lTargets <> lLocks)) -- add infusible edges from the producers of target and lock arrays to the permute
       (    inputConstraints l lIns
@@ -330,112 +321,109 @@ instance MakesILP PTXOp where
         <> ILP.c (InDir  l) .==. int (-2)
         <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
       ( lower (-2) (InDir l)
-      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). 
-  mkGraph PTXPermute' (L _ (_, lTargets) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
-    Graph.Info
-      ( mempty & infusibleEdges .~ Set.map (-?> l) lTargets) -- add infusible edges from the producers of target array to the permute
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
-        <> ILP.c (InDims l) .==. int (rank shr)
-        <> ILP.c (InDir  l) .==. int (-2)
-        <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
-      ( lower (-2) (InDir l)
-      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). 
-  {-mkGraph (PTXScan dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: L _ (_, lOut) :>: ArgsNil) l =
-    Graph.Info
-      -- Scan cannot fuse with its consumer, as the output is one larger than the input
-      mempty
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
-        <> ILP.c (InDir  l) .==. int dir'
-        <> ILP.c (OutDir l) .==. int (-3)
-        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
-        <> ILP.c (InDims l) .==. int (rank shr))
-      ( lower (-2) (InDir l) <> lower (-3) (OutDir l) <> lower 0 (InDims l) <> lower 0 (OutDims l) )
-    where
-      dir' = case dir of
-        LeftToRight -> -2
-        RightToLeft -> -1
-  mkGraph (PTXScan1 dir) (_ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
-    Graph.Info
-      mempty
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
-        <> ILP.c (InDir  l) .==. int dir'
-        <> ILP.c (OutDir l) .==. int dir'
-        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
-        <> ILP.c (InDims l) .==. int (rank shr))
-      (defaultBounds l)
-    where
-      dir' = case dir of
-        LeftToRight -> -2
-        RightToLeft -> -1
-  mkGraph (PTXScan' dir) (_ :>: _ :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: _ :>: _ :>: ArgsNil) l =
-    Graph.Info
-      mempty
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
-        <> ILP.c (InDir  l) .==. int dir'
-        -- TODO: Does this give a problem for the second output of scan' (the reduced values)?
-        -- That array is one dimension lower.
-        <> ILP.c (OutDir l) .==. int dir'
-        <> ILP.c (InDims l) .==. ILP.c (OutDims l)
-        <> ILP.c (InDims l) .==. int (rank shr))
-      (defaultBounds l)
-    where
-      dir' = case dir of
-        LeftToRight -> -2
-        RightToLeft -> -1
-  mkGraph PTXFold (_ :>: _ :>: L (ArgArray In (ArrayR (ShapeRsnoc shr) _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
-    Graph.Info
-      mempty
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. int (_labelId l)
-        <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
-        <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
-        -- <> foldMap (\lin -> fused lin l .==. int 1) lIns
-        <> inrankifmanifest (ShapeRsnoc shr) l)
-      (defaultBounds l)
-  mkGraph PTXFold1 (_ :>: L (ArgArray In (ArrayR (ShapeRsnoc shr) _) _ _) (_, lIns) :>: _ :>: ArgsNil) l =
-    Graph.Info
-      mempty
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. int (_labelId l)
-        <> ILP.c (InDir  l) .==. ILP.c (OutDir l)
-        <> ILP.c (InDims l) .==. int 1 .+. ILP.c (OutDims l)
-        -- <> foldMap (\lin -> fused lin l .==. int 1) lIns
-        <> inrankifmanifest (ShapeRsnoc shr) l)
-      (defaultBounds l) -}
+      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). -}
 
-  labelLabelledArg :: M.Map (Graph.Var PTXOp) Int -> Label -> LabelledArg env a -> LabelledArgOp PTXOp env a
-  labelLabelledArg vars l (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! InDir  l)
-  labelLabelledArg vars l (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! OutDir l)
+  mkGraph c PTXPermute (_fun :>: L _ lTargets :>: L _ lLocks :>: L _ lIn :>: ArgsNil) = do
+    let bsTargets = getLabelArrDeps lTargets
+    let bsLocks   = getLabelArrDeps lLocks
+    let bsIn      = getLabelArrDeps lIn
+    wsTargets <- use $ allWriters bsTargets
+    wsLocks   <- use $ allWriters bsLocks
+    wsIn      <- use $ allWriters bsIn
+    fusionILP %= (wsTargets <> wsLocks <> wsIn) `allBefore` c
+    fusionILP.constraints %= (
+      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsLocks <> bsIn)
+                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsLocks <> bsIn))
+
+  mkGraph c PTXPermute' (L _ lTargets :>: L _ lIn :>: ArgsNil) = do
+    let bsTargets = getLabelArrDeps lTargets
+    let bsIn      = getLabelArrDeps lIn
+    wsTargets <- use $ allWriters bsTargets
+    wsIn      <- use $ allWriters bsIn
+    fusionILP %= wsTargets `allBefore` c
+    fusionILP.constraints %= (
+      <> inputConstraints c wsIn
+      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
+                         <> foldMap (equal (-3) . WriteDir c) bsTargets)
+
+  mkGraph c (PTXScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+    let bsIn  = getLabelArrDeps lIn
+    let bsOut = getLabelArrDeps lOut
+    wsIn <- use $ allWriters $ getLabelArrDeps lIn
+    fusionILP.constraints %= (
+      <> inputConstraints c wsIn
+      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+    fusionILP.bounds %= (<> foldMap (equal dir  . (`ReadDir` c)) bsIn
+                         <> foldMap (equal (-3) . WriteDir c) bsOut)
+    -- Output size is one larger, so no in-place paths.
+
+  mkGraph c (PTXScan1 (dirToInt -> dir)) (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+    let bsIn  = getLabelArrDeps lIn
+    let bsOut = getLabelArrDeps lOut
+    wsIn <- use $ allWriters bsIn
+    fusionILP.constraints %= (
+      <> inputConstraints c wsIn
+      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+    fusionILP.bounds %= (<> foldMap (equal dir . (`ReadDir` c)) bsIn
+                         <> foldMap (equal dir . WriteDir c) bsOut)
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut)
+
+  mkGraph c (PTXScan' (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut1 :>: L _ lOut2 :>: ArgsNil) = do
+    let bsIn   = getLabelArrDeps lIn
+    let bsOut1 = getLabelArrDeps lOut1
+    let bsOut2 = getLabelArrDeps lOut2
+    wsIn <- use $ allWriters $ getLabelArrDeps lIn
+    fusionILP.constraints %= (
+      <> inputConstraints c wsIn
+      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId))
+    fusionILP.bounds %= (<> foldMap (equal dir . (`ReadDir` c)) bsIn
+                         <> foldMap (equal dir . WriteDir c) (bsOut1 <> bsOut2))
+    fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut1)
+
+  mkGraph c PTXFold (_fun :>: _exp :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+    let bsIn  = getLabelArrDeps lIn
+    let bsOut = getLabelArrDeps lOut
+    wsIn <- use $ allWriters bsIn
+    fusionILP.constraints %= (
+      <> inputConstraints c wsIn
+      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId)
+      <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
+    fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
+    -- Not the same shape, so no in-place paths.
+
+  mkGraph c PTXFold1 (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+    let bsIn  = getLabelArrDeps lIn
+    let bsOut = getLabelArrDeps lOut
+    wsIn <- use $ allWriters bsIn
+    fusionILP.constraints %= (
+      <> inputConstraints c wsIn
+      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId)
+      <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
+    fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
+    -- Not the same shape, so no in-place paths.
+
+  labelLabelledArg :: M.Map (Graph.Var PTXOp) Int -> Node Comp -> LabelledArg env a -> LabelledArgOp PTXOp env a
+  labelLabelledArg vars c (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! ReadDir  (getLabelArrDep y) c)
+  labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
   labelLabelledArg _ _ (L x y) = LOp x y 0
 
   getClusterArg :: LabelledArgOp PTXOp env a -> BackendClusterArg PTXOp a
   getClusterArg (LOp _ _ _) = BCAN
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
-  finalize = foldMap $ \l -> timesN (manifest l) .>. ILP.c (OutDir l)
+  finalize g = foldMap (\(w,b) -> timesN (manifest b) .>. ILP.var (WriteDir w b)) (g^.writeEdges)
 
   encodeBackendClusterArg (BCAN) = intHost $(hashQ ("BCAN" :: String))
 
-inputConstraints :: Label -> Labels -> Constraint PTXOp
-inputConstraints l = foldMap $ \lIn -> 
-                timesN (fused lIn l) .>=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
-    <> (-1) .*. timesN (fused lIn l) .<=. ILP.c (InDims l) .-. ILP.c (OutDims lIn)
-    <>          timesN (fused lIn l) .>=. ILP.c (InFoldSize l) .-. ILP.c (OutFoldSize lIn)
-    <> (-1) .*. timesN (fused lIn l) .<=. ILP.c (InFoldSize l) .-. ILP.c (OutFoldSize lIn)
+inputConstraints :: Node Comp -> Nodes Comp -> Constraint PTXOp
+inputConstraints c = foldMap $ \wIn ->
+                timesN (fused (wIn, c)) .>=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
+    <> (-1) .*. timesN (fused (wIn, c)) .<=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
 
-inrankifmanifest :: ShapeR sh -> Label -> Constraint PTXOp
-inrankifmanifest shr l = ILP.int (rank shr) .+. timesN (manifest l) .>=. ILP.c (InDims l)
-                      <> ILP.int (rank shr) .-. timesN (manifest l) .<=. ILP.c (InDims l)
-
-outrankifmanifest :: ShapeR sh -> Label -> Constraint PTXOp
-outrankifmanifest shr l = ILP.int (rank shr) .+. timesN (manifest l) .>=. ILP.c (OutDims l)
-                       <> ILP.int (rank shr) .-. timesN (manifest l) .<=. ILP.c (OutDims l)
-
-defaultBounds :: Label -> Bounds PTXOp
-defaultBounds l = lower (-2) (InDir l) <> lower (-2) (OutDir l) <> lower 0 (InDims l) <> lower 0 (OutDims l)
+defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds PTXOp
+defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
+                          <> foldMap (lower (-2) . WriteDir c) bsOut
 
 instance NFData' (BackendClusterArg PTXOp) where
   rnf' !_ = ()
