@@ -142,16 +142,17 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
-// locks: an array of locks that can be used by any permutes in the kernel.
-// This array is global, i.e. all kernels use the same array of locks, and is
-// taken from Workers.locks.
-typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint8_t *locks, uint32_t first_index);
+#define SHARD_AMOUNT 64
+#define CACHE_LINE_WIDTH 64
+
+typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint8_t *locks, uint32_t flag);
 struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;
   uint32_t program_continuation;
   _Atomic int32_t active_threads;
-  _Atomic uint64_t work_index;
-  // In the future, perhaps also store a uint32_t work_size
+  _Atomic uint64_t shards[SHARD_AMOUNT * CACHE_LINE_WIDTH / 8];
+  uint64_t shard_sizes[SHARD_AMOUNT];
+  _Atomic uint64_t index;
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
 };
