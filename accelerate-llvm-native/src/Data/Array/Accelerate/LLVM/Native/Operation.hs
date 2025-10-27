@@ -59,6 +59,8 @@ import Lens.Micro
 import qualified Data.Map as M
 import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Trafo.Desugar (desugarAlloc)
+import Data.Array.Accelerate.Trafo.Exp.Bounds.ArrayInstr
+import Data.Array.Accelerate.Trafo.Exp.Bounds.Optimize.ArrayInstr
 
 import Data.Array.Accelerate.AST.Idx (Idx(..))
 import Data.Array.Accelerate.Pretty.Operation (prettyFun)
@@ -166,6 +168,18 @@ instance SLVOperation NativeOp where
   slvOperation NMap         = defaultSlvMap         NMap
   slvOperation NBackpermute = defaultSlvBackpermute NBackpermute
   slvOperation _ = Nothing
+
+instance BCOperation NativeOp where
+  bcOperation NGenerate    = defaultBCGenerate NGenerate
+  bcOperation NMap         = defaultBCMap NMap
+  bcOperation NBackpermute = defaultBCBackpermute NBackpermute
+  bcOperation NPermute     = defaultBCPermuteWithIndices NPermute
+  bcOperation NPermute'    = defaultBCPermuteUnique NPermute'
+  bcOperation (NScan dir)  = defaultBCScan (NScan dir)
+  bcOperation (NScan1 dir) = defaultBCScan1 (NScan1 dir)
+  bcOperation (NScan' dir) = defaultBCScan' (NScan' dir)
+  bcOperation NFold        = defaultBCFold NFold
+  bcOperation NFold1       = defaultBCFold1 NFold1
 
 instance EncodeOperation NativeOp where
   encodeOperation NMap         = intHost $(hashQ ("Map" :: String))
