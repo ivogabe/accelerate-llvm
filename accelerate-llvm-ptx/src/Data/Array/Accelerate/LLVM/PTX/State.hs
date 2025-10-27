@@ -27,7 +27,7 @@ import Data.Array.Accelerate.Error
 
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.PTX.Target
-import qualified Data.Array.Accelerate.LLVM.PTX.Array.Table         as MT
+-- import qualified Data.Array.Accelerate.LLVM.PTX.Array.Table         as MT
 import qualified Data.Array.Accelerate.LLVM.PTX.Context             as CT
 import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
 import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Stream      as ST
@@ -89,10 +89,10 @@ createTarget
     -> IO PTX
 createTarget dev prp raw = do
   ctx <- CT.raw dev prp raw
-  mt  <- MT.new ctx
+  -- mt  <- MT.new ctx
   lc  <- LC.new
   st  <- ST.new ctx
-  return $! PTX ctx mt lc st
+  return $! PTX ctx lc st
 
 
 -- Shared execution contexts

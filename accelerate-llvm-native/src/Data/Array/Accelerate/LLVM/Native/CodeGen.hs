@@ -29,20 +29,16 @@
 --
 
 module Data.Array.Accelerate.LLVM.Native.CodeGen
--- (
---   codegen
---   )
+  ( codegen )
   where
 
 -- accelerate
-import Data.Array.Accelerate.Trafo.Operation.LiveVars
 import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Shape (shapeRFromRank, shapeType, ShapeR(..), rank)
+import Data.Array.Accelerate.Representation.Shape (shapeRFromRank, shapeType, rank)
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Partitioned as P hiding (combine)
 import Data.Array.Accelerate.Analysis.Exp
-import Data.Array.Accelerate.Eval
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Error
 import qualified Data.Array.Accelerate.AST.Environment as Env
@@ -50,10 +46,10 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
+import Data.Array.Accelerate.LLVM.CodeGen.Default
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
-import Data.Typeable
 import Data.Maybe
 
 import LLVM.AST.Type.Module
@@ -62,46 +58,22 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW
-import LLVM.AST.Type.AddrSpace
-import qualified LLVM.AST.Type.Instruction.Compare as Compare
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
-import Unsafe.Coerce (unsafeCoerce)
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
-import Data.Array.Accelerate.Trafo.Desugar (ArrayDescriptor(..))
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
-import Data.Array.Accelerate.Analysis.Match (matchShapeR)
-import Data.Array.Accelerate.Trafo.Exp.Substitution (compose)
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically)
-import Control.Monad.State (StateT(..), lift, execStateT)
-import qualified Data.Map as M
-import Data.ByteString.Short ( ShortByteString )
-import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists), lhsToTupR)
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels (Label)
-import Data.Array.Accelerate.LLVM.CodeGen.Constant (constant)
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph (MakesILP(..))
-import Data.Coerce (coerce)
-import Data.Functor.Compose
+import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists))
 import Control.Monad
-import Data.Bifunctor (Bifunctor(..))
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
+import qualified Text.LLVM as LP
 
-traceIfDebugging :: String -> a -> a
-traceIfDebugging _ a = a --Debug.Trace.trace str a
-
--- Temporary flag to enable the new (currently sequential) code generator.
--- I'm keeping both code generators functional for now, such that we can
--- evaluate them easily and then decide which code generator we want to keep.
--- At that point, we can remove the code of the other code generator.
-newCodeGen :: Bool
-newCodeGen = True
-
-codegen :: ShortByteString
+codegen :: String
         -> Env AccessGroundR env
         -> Clustered NativeOp args
         -> Args env args
@@ -109,11 +81,10 @@ codegen :: ShortByteString
            ( Int -- The size of the kernel data, shared by all threads working on this kernel.
            , Module (KernelType env))
 codegen name env cluster args
- | newCodeGen
- , flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
+ | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
-  codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
+  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "workassist.first_index") $ do
     extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -122,7 +93,7 @@ codegen name env cluster args
     initBlock <- newBlock "init"
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
-    switch (OP_Word32 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
+    _ <- switch (OP_Word64 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
 
     if parallelDepth == 0 && rank shr /= 0 then do
@@ -148,11 +119,6 @@ codegen name env cluster args
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
-          -- Number of tiles
-          sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
-          OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
-          tileCount <- instr' $ Trunc boundedType boundedType tileCount'
-
           let envs' = envs{
             envsLoopDepth = 0,
             envsDescending = isDescending direction
@@ -165,6 +131,10 @@ codegen name env cluster args
 
           setBlock initBlock
           do
+            -- Number of tiles
+            sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
+            OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
+
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
             -- Decide whether tileCount is large enough
@@ -185,14 +155,23 @@ codegen name env cluster args
             retval_ $ scalar (scalarType @Word8) 0
 
           setBlock workBlock
+          -- Number of tiles
+          sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
+          OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
+          tileCount <- instr' $ BitCast scalarType tileCount'
 
           -- Emit code to initialize a thread, and get the codes for the tile loops
           tileLoops <- genParallel kernelMem envs' TupleIdxSelf parCodes
 
           -- Declare fused away arrays
-          envs'' <- bindLocalsInTile 1 tileSize envs'
-          workassistLoop workassistIndex workassistFirstIndex workassistActivitiesSlot tileCount $ \seqMode tileIdx' -> do
-            tileIdx <- instr' $ Ext boundedType boundedType tileIdx'
+          -- Declare as a tile array if there are multiple tile loops,
+          -- otherwise as a single value.
+          -- TODO: We can make this more precise by tracking whether arrays are
+          -- only used in one tile loop. These arrays can also be stored as a
+          -- single value.
+          envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
+          workassistLoop workassistIndex workassistFirstIndex tileCount $ \seqMode tileIdx' -> do
+            tileIdx <- instr' $ BitCast scalarType tileIdx'
 
             tileIdxAbsolute <-
               -- For a scanr, convert low-to-high indices to high-to-low indices:
@@ -246,7 +225,7 @@ codegen name env cluster args
                       envsIsFirst = isFirst,
                       envsTileLocalIndex = localIdx
                     }
-                  genSequential envs'''' loops $ ptIn tileLoop
+                  genSequential envs'''' loops' $ ptIn tileLoop
                 ptAfter tileLoop envs'''
                 return OP_Unit
               )
@@ -264,7 +243,12 @@ codegen name env cluster args
                         -- The first tile loop only does a reduction, others will perform a scan.
                         -- Loops containing permute (not permuteUnique) can
                         -- also not be vectorized.
-                        ++ [ if isFirstTileLoop && not hasPermute then Loop.LoopVectorize else Loop.LoopInterleave ]
+                        -- Reduction cannot always be vectorized. This might in particular fail
+                        -- on reductions of multiple values (tuples/pairs). For now, we thus do
+                        -- not request vectorization, until we can reliably know whether LLVM can
+                        -- vectorize something, or generate our code in a form that LLVM can
+                        -- definitely vectorize.
+                        ++ [ Loop.LoopInterleave ] -- Loop.LoopVectorize
                         -- We can use LoopNonEmpty since we
                         -- know that each tile is non-empty.
                         ++ [ Loop.LoopNonEmpty ]
@@ -315,8 +299,11 @@ codegen name env cluster args
       retval_ $ scalar (scalarType @Word8) 0
 
       setBlock workBlock
-      let ann = [if hasPermute then Loop.LoopInterleave else Loop.LoopVectorize]
-      workassistChunked ann parallelShr workassistIndex workassistFirstIndex workassistActivitiesSlot tileSize parSizes $ \idx -> do
+      let ann =
+            if parallelDepth /= rank shr then []
+            else {- if hasPermute then -} [Loop.LoopInterleave]
+            -- else [Loop.LoopVectorize]
+      workassistChunked ann parallelShr workassistIndex workassistFirstIndex tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -330,312 +317,29 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, workassistIndex, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True
     isDescending _ = False
 
-codegen name env (Clustered c b) args =
-  codeGenFunction name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "workassist.first_index" . LLVM.Lam primType "workassist.activities_slot") $ do
-    extractEnv
-
-    -- Before the parallel work of a kernel is started, we first run the function once.
-    -- This first call will initialize kernel memory (SEE: Kernel Memory)
-    -- and decide whether the runtime may try to let multiple threads work on this kernel.
-    init <- instr $ Cmp singleType Compare.EQ workassistFirstIndex (scalar scalarType 0xFFFFFFFF)
-    initBlock <- newBlock "init"
-    workBlock <- newBlock "work"
-    _ <- cbr init initBlock workBlock
-
-    setBlock initBlock
-    retval_ $ scalar (scalarType @Word8) 1
-
-    setBlock workBlock
-
-    let b' = mapArgs BCAJA b
-    (acc, loopsize) <- execStateT (evalCluster (toOnlyAcc c) b' args gamma ()) (mempty, LS ShapeRz OP_Unit)
-    _acc' <- operandsMapToPairs acc $ \(accTypeR, toOp, fromOp) -> fmap fromOp $ flip execStateT (toOp acc) $ case loopsize of
-      LS loopshr loopsh -> 
-        workassistChunked' loopshr workassistIndex workassistFirstIndex workassistActivitiesSlot (flipShape loopshr loopsh) accTypeR
-          (body loopshr toOp fromOp, -- the LoopWork
-          StateT $ \op -> second toOp <$> runStateT (foo (A.liftInt 0) []) (fromOp op)) -- the action to run after the outer loop
-    -- acc'' <- flip execStateT acc' $ foo (liftInt 0) []
-    pure 0
-    where
-      ba = makeBackendArg @NativeOp args gamma c b
-      (argTp, extractEnv, workassistIndex, workassistFirstIndex, workassistActivitiesSlot, _, gamma) = bindHeaderEnv env
-      body :: ShapeR sh -> (Accumulated -> a) -> (a -> Accumulated) -> LoopWork sh (StateT a (CodeGen Native))
-      body ShapeRz _ _ = LoopWorkZ
-      body (ShapeRsnoc shr) toOp fromOp = LoopWorkSnoc (body shr toOp fromOp) (\i is -> StateT $ \op -> second toOp <$> runStateT (foo i is) (fromOp op))
-      foo :: Operands Int -> [Operands Int] -> StateT Accumulated (CodeGen Native) ()
-      foo linix ixs = do
-        let d = length ixs -- TODO check: this or its inverse (i.e. totalDepth - length ixs)?
-        let i = (d, linix, ixs)
-        newInputs <- readInputs @_ @_ @NativeOp i args ba gamma
-        outputs <- evalOps @NativeOp i c newInputs args gamma
-        writeOutputs @_ @_ @NativeOp i args outputs gamma
+linkage :: Maybe LP.Linkage
+linkage = Just LP.DLLExport
 
 opCodeGen :: FlatOp NativeOp env idxEnv -> (LoopDepth, OpCodeGen Native NativeOp env idxEnv)
-opCodeGen (FlatOp NGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    let idxs' = envsPrjIndices idxs envs
-    r <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) idxs'
-    writeArray' envs array idxs r
-  )
-opCodeGen (FlatOp NMap (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth idxs :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    x <- readArray' envs input idxs
-    r <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) x
-    writeArray' envs output idxs r
-  )
-opCodeGen (FlatOp NBackpermute (_ :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    -- Note that the index transformation (the function in the first argument)
-    -- is already executed and part of the idxEnv. The index transformation is
-    -- thus now given by 'inputIdx' and 'outputIdx'.
-    x <- readArray' envs input inputIdx
-    writeArray' envs output outputIdx x
-  )
-opCodeGen (FlatOp NPermute
-    (ArgFun combine :>: output :>: locks :>: source :>: _)
-    (_ :>: _ :>: _ :>: IdxArgIdx depth sourceIdx :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    -- project element onto the destination array and (atomically) update
-    x' <- readArray' envs source sourceIdx
-    A.when (A.isJust x') $ do
-      let idxx = A.fromJust x'
-      let idx = A.fst idxx
-      let x = A.snd idxx
-      let sh' = envsPrjParameters (shapeExpVars shr sh) envs
-      j <- intOfIndex shr sh' idx
-      -- TODO: Rewrite the function below to take Envs as argument instead of Gamma,
-      -- and then get rid of envsGamma
-      let gamma = envsGamma envs
-      atomically gamma locks j $ do
-        y <- readArray TypeInt gamma output j
-        r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combine) x y
-        writeArray TypeInt gamma output j r
-  )
-  where
-    ArgArray _ (ArrayR shr tp) sh _ = output
-opCodeGen (FlatOp NPermute'
-    (output :>: source :>: _)
-    (_ :>: IdxArgIdx depth sourceIdx :>: _)) =
-  ( depth
-  , OpCodeGenSingle $ \envs -> do
-    x' <- readArray' envs source sourceIdx
-    A.when (A.isJust x') $ do
-      let idxx = A.fromJust x'
-      let idx = A.fst idxx
-      let x = A.snd idxx
-      let sh' = envsPrjParameters (shapeExpVars shr sh) envs
-      j <- intOfIndex shr sh' idx
-      let gamma = envsGamma envs
-      writeArray TypeInt gamma output j x
-  )
-  where
-    ArgArray _ (ArrayR shr tp) sh _ = output
-opCodeGen flatOp@(FlatOp NFold (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _) (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
-  ( depth
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      return var
-    )
-    (\var envs -> do
-      x <- readArray' envs input inputIdx
-      accum <- tupleLoad tp var
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-    )
-    (\var envs -> do
-      value <- tupleLoad tp var
-      writeArray' envs output outputIdx value
-    )
-  )
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp NFold1 (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _)) =
-  -- TODO: Try to find an identity value, and convert to NFold
-  ( depth
-  , OpCodeGenLoop
-    flatOp
-    PeelGuaranteed
-    (\_ -> tupleAlloca tp)
-    (\var envs -> do
-      x <- readArray' envs input inputIdx
-      -- Note: if the loop peeling is applied (separating the first iteration
-      -- of the loop), then this code will be executed twice. envsIsFirst envs
-      -- will then either be a constant True, or a constant False.
-      -- ifThenElse' (opposed to the version with a prime) will then generate
-      -- code for only one branch, and thus also without conditional jumps.
-      new <- A.ifThenElse' (tp, envsIsFirst envs)
-        ( do
-          return x
-        )
-        ( do
-          accum <- tupleLoad tp var
-          if envsDescending envs then
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-        )
-      tupleStore tp var new
-    )
-    (\var envs -> do
-      value <- tupleLoad tp var
-      writeArray' envs output outputIdx value
-    )
-  )
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp (NScan1 _) (ArgFun fun :>: input :>: output :>: _) (_ :>: IdxArgIdx depth inputIdx :>: IdxArgIdx _ outputIdx :>: _)) =
-  -- TODO: Try to find an identity value to prevent loop peeling / the conditional in the body of the loop.
-  -- Ideally we add a PostScan as primitive, such that we can convert a scan1 into a postscan
-  ( depth - 1
-  , OpCodeGenLoop
-    flatOp
-    PeelConditional
-    (\_ -> tupleAlloca tp)
-    (\var envs -> do
-      x <- readArray' envs input inputIdx
-      new <- A.ifThenElse' (tp, envsIsFirst envs)
-        ( do
-          return x
-        )
-        ( do
-          accum <- tupleLoad tp var
-          if envsDescending envs then
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-        )
-      tupleStore tp var new
-      writeArray' envs output outputIdx new
-    )
-    (\_ _ -> return ())
-  )
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp (NScan' _)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
-    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx depth foldOutputIdx :>: _)) =
-  ( depth
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      return var
-    )
-    (\var envs -> do
-      accum <- tupleLoad tp var
-      writeArray' envs output outputIdx accum
-      x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-    )
-    (\var envs -> do
-      value <- tupleLoad tp var
-      writeArray' envs foldOutput foldOutputIdx value
-    )
-  )
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-opCodeGen flatOp@(FlatOp (NScan LeftToRight)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
-    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
-  ( depth - 1
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      return var
-    )
-    (\var envs -> do
-      accum <- tupleLoad tp var
-      writeArray' envs output inputIdx accum
-      x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-    )
-    (\var envs -> do
-      value <- tupleLoad tp var
-      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
-      writeArrayAt' envs output rowIdx n' value
-    )
-  )
-  where
-    ArgArray _ (ArrayR _ tp) inputSh _ = input
-    n = case inputSh of
-      TupRpair _ (TupRsingle n') -> n'
-      _ -> internalError "Shape impossible"
-    rowIdx = case inputIdx of
-      TupRpair i _ -> i
-      _ -> internalError "Shape impossible"
-opCodeGen flatOp@(FlatOp (NScan RightToLeft)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
-    (_ :>: _ :>: IdxArgIdx depth inputIdx :>: _ :>: _)) =
-  ( depth - 1
-  , OpCodeGenLoop
-    flatOp
-    PeelNot
-    (\envs -> do
-      var <- tupleAlloca tp
-      seed' <- llvmOfExp (compileArrayInstrEnvs envs) seed
-      tupleStore tp var seed'
-      let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
-      writeArrayAt' envs output rowIdx n' seed'
-      return var
-    )
-    (\var envs -> do
-      accum <- tupleLoad tp var
-      x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-      tupleStore tp var new
-      writeArray' envs output inputIdx new
-    )
-    (\_ _ -> return ())
-  )
-  where
-    ArgArray _ (ArrayR _ tp) inputSh _ = input
-    n = case inputSh of
-      TupRpair _ (TupRsingle n') -> n'
-      _ -> internalError "Shape impossible"
-    rowIdx = case inputIdx of
-      TupRpair i _ -> i
-      _ -> internalError "Shape impossible"
-opCodeGen _ = internalError "Missing indices when generating code for an operation"
+opCodeGen flatOp@(FlatOp op args idxArgs) = case op of
+  NGenerate -> defaultCodeGenGenerate args idxArgs
+  NMap -> defaultCodeGenMap args idxArgs
+  NBackpermute -> defaultCodeGenBackpermute args idxArgs
+  NPermute
+    | (_ :>: output :>: _ :>: _) <- args ->
+      defaultCodeGenPermute (\envs j _ -> atomically envs output $ OP_Int j) args idxArgs
+  NPermute' -> defaultCodeGenPermuteUnique args idxArgs
+  NFold -> defaultCodeGenFold flatOp args idxArgs
+  NFold1 -> defaultCodeGenFold1 flatOp args idxArgs
+  NScan1 dir -> defaultCodeGenScan1 dir flatOp args idxArgs
+  NScan' dir -> defaultCodeGenScan' dir flatOp args idxArgs
+  NScan dir -> defaultCodeGenScan dir flatOp args idxArgs
 
 -- Parallel code generation for one-dimensional collective operations (folds and scans).
 -- Other operations, either OpCodeGenSingle or nested deeper, are handled in opCodeGen
@@ -650,8 +354,8 @@ parCodeGen descending (FlatOp NFold1
   = Just $ parCodeGenFold descending fun Nothing input output inputIdx outputIdx
 parCodeGen descending (FlatOp (NScan1 _)
     (ArgFun fun :>: input :>: output :>: _)
-    (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx depth outputIdx :>: _))
-  = Just $ parCodeGenScan descending False fun Nothing input inputIdx
+    (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
+  = Just $ parCodeGenScan descending IsScan fun Nothing input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
@@ -659,7 +363,7 @@ parCodeGen descending (FlatOp (NScan1 _)
 parCodeGen descending (FlatOp (NScan' _)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx _ foldOutputIdx :>: _))
-  = Just $ parCodeGenScan descending False fun (Just seed) input inputIdx
+  = Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
     (\_ _ -> return ())
     (\envs result -> writeArray' envs output outputIdx result)
     (\_ _ -> return ())
@@ -668,7 +372,7 @@ parCodeGen descending (FlatOp (NScan dir)
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
   = case dir of
-      LeftToRight -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
+      LeftToRight -> Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
         (\_ _ -> return ())
         (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
@@ -676,16 +380,16 @@ parCodeGen descending (FlatOp (NScan dir)
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
-      RightToLeft -> Just $ parCodeGenScan False descending fun (Just seed) input inputIdx
-        (\envs result -> writeArray' envs output inputIdx result)
-        (\_ _ -> return ())
+      RightToLeft -> Just $ parCodeGenScan descending IsScan fun (Just seed) input inputIdx
         (\envs result -> do
           let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
           writeArrayAt' envs output rowIdx n' result
         )
+        (\_ _ -> return ())
+        (\envs result -> writeArray' envs output inputIdx result)
         (\_ _ -> return ())
   where
-    ArgArray _ (ArrayR _ tp) inputSh _ = input
+    ArgArray _ _ inputSh _ = input
     n = case inputSh of
       TupRpair _ (TupRsingle n') -> n'
       _ -> internalError "Shape impossible"
@@ -715,7 +419,7 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
   , Just i <- identity
   = parCodeGenFoldCommutative descending fun s i input output inputIdx outputIdx
   | otherwise
-  = parCodeGenScan descending True fun seed input inputIdx
+  = parCodeGenScan descending IsFold fun seed input inputIdx
     (\_ _ -> return ())
     (\_ _ -> return ())
     (\_ _ -> return ())
@@ -741,7 +445,7 @@ parCodeGenFoldCommutative
   -> ExpVars idxEnv (sh, Int)
   -> ExpVars idxEnv sh
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenFoldCommutative descending fun seed identity input output inputIdx outputIdx = Exists $ ParLoopCodeGen
+parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = Exists $ ParLoopCodeGen
   False
   -- In kernel memory, store a lock (Word8) and the
   -- reduced value so far. The lock must be acquired to read or update the total value.
@@ -758,7 +462,7 @@ parCodeGenFoldCommutative descending fun seed identity input output inputIdx out
         tupleStore tp valuePtrs value
   )
   -- Initialize a thread
-  (\ptr envs -> do
+  (\_ envs -> do
     accumVar <- tupleAlloca tp
     value <- llvmOfExp (compileArrayInstrEnvs envs) identity
     tupleStore tp accumVar value
@@ -826,11 +530,13 @@ parCodeGenFoldCommutative descending fun seed identity input output inputIdx out
     memoryTp = TupRsingle scalarTypeWord8 `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input
 
+data FoldOrScan = IsFold | IsScan deriving Eq
+
 parCodeGenScan
   :: Bool -- Whether the loop is descending
   -- Whether this is a fold. Folds use similar code generation as scans, hence
   -- it is handled here. Commutative folds are handled separately.
-  -> Bool
+  -> FoldOrScan
   -> Fun env (e -> e -> e)
   -> Maybe (Exp env e) -- Seed
   -> Arg env (In (sh, Int) e)
@@ -846,12 +552,12 @@ parCodeGenScan
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (ParLoopCodeGen Native env idxEnv)
-parCodeGenScan descending isFold fun Nothing input index codeSeed codePre codePost codeEnd
+parCodeGenScan descending foldOrScan fun Nothing input index codeSeed codePre codePost codeEnd
   | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
-  = parCodeGenScan descending isFold fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
+  = parCodeGenScan descending foldOrScan fun (Just $ mkConstant tp identity) input index codeSeed codePre codePost codeEnd
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
+parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codePost codeEnd = Exists $ ParLoopCodeGen
   -- If we know an identity value, we can implement this without loop peeling
   (isNothing identity)
   -- In kernel memory, store the index of the block we must now handle and the
@@ -873,7 +579,7 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
             tupleStore tp valuePtrs value
   )
   -- Initialize a thread
-  (\ptr envs -> tupleAlloca tp)
+  (\_ _ -> tupleAlloca tp)
   -- Code before the tile loop
   (\singleThreaded accumVar ptr envs ->
     if singleThreaded then do
@@ -882,7 +588,7 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
       ptrs <- tuplePtrs memoryTp ptr
       case ptrs of
         TupRsingle _ -> internalError "Pair impossible"
-        TupRpair (TupRsingle idxPtr) valuePtrs -> do
+        TupRpair _ valuePtrs -> do
           prefix <- tupleLoad tp valuePtrs
           tupleStore tp accumVar prefix
           -- Note: on the first tile, we read an undefined value if there is no
@@ -1023,8 +729,8 @@ parCodeGenScan descending isFold fun seed input index codeSeed codePre codePost 
   -- In the first iteration, the first tile loop will then start without a prefix value,
   -- and we thus should do loop peeling there.
   -- Not executed when this tile is executed in the sequential mode.
-  (if isFold then Nothing else
-    Just (isNothing seed, \accumVar ptr envs -> do
+  (if foldOrScan == IsFold then Nothing else
+    Just (isNothing seed, \accumVar _ envs -> do
       x <- readArray' envs input index
       if isJust seed then do
         accum <- tupleLoad tp accumVar
@@ -1075,431 +781,3 @@ hasNPermute (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
     go (FlatOpsOp (FlatOp NPermute _ _) _) = True
     go (FlatOpsOp (FlatOp NPermute' _ _) _) = True
     go (FlatOpsOp _ ops) = go ops
-
--- Old, EvalOp based implementation
-
--- We use some unsafe coerces in the context of the accumulators. 
--- Some, in this function, are very local. Others, like in evalOp, 
--- just deal with the assumption that the specific operand stored at index l indeed belongs to operation l.
-operandsMapToPairs
-  :: Accumulated
-  -> (forall accR. ( TypeR accR
-     , Accumulated -> Operands accR
-     , Operands accR -> Accumulated) -> r)
-  -> r
-operandsMapToPairs acc k
-  = case existentialStuff of
-    (Exists accR, toR, fromR) -> k ( accR
-                                   , unsafeUnExists . toR . map (fst.snd) . M.toList
-                                   , M.fromList . zip labels . fromR . Exists)
-  where
-  (labels, (_, existentialStuff)) = second (second (foldr
-      (\(Exists newR) (Exists accR, toR, fromR) ->
-        ( Exists (TupRpair newR accR)
-        , \(Exists this : rest') -> case toR rest' of Exists rest -> Exists $ OP_Pair this rest
-        , \(Exists hastobepair) -> case unsafeCoerce hastobepair of OP_Pair this rest -> (Exists this, Exists newR) : fromR (Exists rest)))
-      (   Exists TupRunit
-        , \[] -> Exists OP_Unit
-        , const [])) -- should always get "Exists OP_Unit" as argument
-    . unzip)
-    . unzip
-    $ M.toList acc
-  unsafeUnExists :: Exists f -> f a
-  unsafeUnExists (Exists fa) = unsafeCoerce fa
-
--- type family ShapeMinus big small where
---   ShapeMinus sh () = sh
---   ShapeMinus (sh, Int) (sh', Int) = ShapeMinus sh sh'
-
-
-
--- TODO: we need to only consider each _in-order_ vertical argument
--- TODO: we ignore backpermute currently. Could use this function to check the outputs and vertical, and the staticclusteranalysis evalI for the inputs.
--- e.g. backpermute . fold: shape of backpermute output plus the extra dimension of fold.
--- loopsizeOutVertical :: forall args env. Cluster NativeOp args -> Gamma env -> Args env args -> Loopsizes
--- loopsizeOutVertical = undefined
--- loopsizeOutVertical (Cluster _ (Cluster' io _)) gamma args = go io args
---   where
---     go :: ClusterIO a i o -> Args env a -> Loopsizes
---     go Empty ArgsNil = LS ShapeRz OP_Unit
---     go (Input io')                     (ArgArray _ (ArrayR shr _) sh _ :>: args') = go io' args' -- $ \x -> combine x (shr, aprjParameters (unsafeToExpVars sh) gamma) k
---     go (Output _ _ _ io')              (ArgArray _ (ArrayR shr _) sh _ :>: args') = combine (go io' args') $ LS shr (aprjParameters (unsafeToExpVars sh) gamma)
---     go (Trivial io')                   (ArgArray _ (ArrayR shr _) sh _ :>: args') = combine (go io' args') $ LS shr (aprjParameters (unsafeToExpVars sh) gamma)
---     go (Vertical _ (ArrayR shr _) io') (ArgVar sh                      :>: args') = combine (go io' args') $ LS shr (aprjParameters                  sh  gamma)
---     go (MutPut io')                    (_                              :>: args') = go io' args'
---     go (ExpPut io')                    (_                              :>: args') = go io' args'
---     go (VarPut io')                    (_                              :>: args') = go io' args'
---     go (FunPut io')                    (_                              :>: args') = go io' args'
--- get the largest ShapeR, and the corresponding shape
-combine :: Loopsizes -> Loopsizes -> Loopsizes
-combine x@(LS a _) y@(LS b _) = if rank a > rank b then x else y
-
-
-
-type Accumulated = M.Map Label (Exists Operands, Exists TypeR)
--- type Accumulator = (Accumulated, Block, Block)
-
-instance EvalOp NativeOp where
-  type EvalMonad NativeOp = StateT Accumulated (CodeGen Native) -- should be a ReaderT
-  -- dimension and linear and multidim index. The last has 'trust me, this is the right shape' levels of type safety, but trust me. It is the right shape.
-  type Index NativeOp = (Int, Operands Int, [Operands Int])
-  type Embed' NativeOp = Compose Maybe Operands
-  type EnvF NativeOp = GroundOperand
-
-  embed (GroundOperandParam  x) = Compose $ Just $ ir' x
-  embed (GroundOperandBuffer _) = error "does this ever happen?"
-
-  unit = Compose $ Just OP_Unit
-
-  -- don't need to be in the monad!
-  indexsh vars gamma = pure . CJ $ aprjParameters (unsafeToExpVars vars) gamma
-  indexsh' vars gamma = pure . CJ $ aprjParameters vars gamma
-
-  subtup _ CN = CN
-  subtup SubTupRskip (CJ _) = CJ OP_Unit
-  subtup SubTupRkeep (CJ x) = CJ x
-  subtup (SubTupRpair a b) (CJ (OP_Pair x y)) = CJ $ OP_Pair ((\(CJ z)->z) $ subtup @NativeOp a $ CJ x) ((\(CJ z)->z) $ subtup @NativeOp b $ CJ y)
-
-  writeOutput tp sh (TupRsingle buf) gamma (d,i,_) = \case
-    CN -> pure ()
-    CJ x
-      | Refl <- reprIsSingle @ScalarType @_ @Buffer tp
-      -> lift $ when (sh `isAtDepth` d) $ writeBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) Nothing (op tp x)
-  writeOutput _ _ _ _ _ = error "not single"
-
-  readInput :: forall e env sh. ScalarType e -> GroundVars env sh -> GroundVars env (Buffers e) -> Gamma env -> BackendClusterArg2 NativeOp env (In sh e) -> (Int, Operands Int, [Operands Int]) -> StateT Accumulated (CodeGen Native) (Compose Maybe Operands e)
-  readInput _ _ _ _ _ (d,_,is) | d /= length is = error "fail"
-  readInput tp _ (TupRsingle buf) gamma (BCAN2 Nothing d') (d,i, _)
-    | d /= d' = pure CN
-    | Refl <- reprIsSingle @ScalarType @e @Buffer tp
-    = lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer buf gamma) (op TypeInt i) Nothing
-  readInput tp sh (TupRsingle buf) gamma (BCAN2 (Just (BP shr1 (shr2 :: ShapeR sh2) f _ls)) _) (d,_,ix)
-    | Just Refl <- varsContainsThisShape sh shr2
-    , shr1 `isAtDepth'` d
-    , Refl <- reprIsSingle @ScalarType @e @Buffer tp
-    = lift $ CJ . ir tp <$> do
-      sh2 <- app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) $ multidim shr1 ix
-      let sh' = aprjParameters (groundToExpVar (shapeType shr2) sh) gamma
-      i <- intOfIndex shr2 sh' sh2
-      readBuffer tp TypeInt (aprjBuffer (buf) gamma) (op TypeInt i) Nothing
-    | otherwise = pure CN
-  readInput _ _ (TupRsingle _) _ _ (_,_,_) = error "here"
-  -- assuming no bp, and I'll just make a read at every depth?
-    -- lift $ CJ . ir tp <$> readBuffer tp TypeInt (aprjBuffer (unsafeCoerce buf) gamma) (op TypeInt i)
-    -- second attempt, the above segfaults: never read instead
-    -- pure CN
-    -- also segfaults :(
-    {- weird: this implies that a is a `IsUnit`, but it happens on Int
-    error $ show tp <> case buf of
-    TupRsingle _ -> "single"
-    TupRpair _ _ -> "pair"
-    TupRunit -> "unit" -}
-  readInput _ _ _ _ _ _ = error "not single"
-
-  evalOp  :: (Int, Operands Int, [Operands Int])
-          -> Label
-          -> NativeOp args
-          -> Gamma env
-          -> BackendArgEnv NativeOp env (InArgs args)
-          -> StateT Accumulated (CodeGen Native) (Env (FromArg' NativeOp env) (OutArgs args))
-  -- evalOp _ _ _ _ _ = error "todo: add depth checks to all matches"
-  evalOp (d,_,_) _ NMap gamma (Push (Push (Push Env.Empty (BAE _ _)) (BAE (Value' x' (Shape' shr sh)) (BCAN2 _ d'))) (BAE f _))
-    = lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr sh) <$> case x' of
-      CJ x | d == d' -> CJ <$> traceIfDebugging ("map" <> show d') (app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) x)
-      _   -> pure CN
-  evalOp _ _ NBackpermute _ (Push (Push (Push Env.Empty (BAE (Shape' shr sh) _)) (BAE (Value' x _) _)) _)
-    = lift $ pure $ Push Env.Empty $ FromArg $ Value' x $ Shape' shr sh
-  evalOp (d',_,is) _ NGenerate gamma (Push (Push Env.Empty (BAE (Shape' shr (CJ sh)) _)) (BAE f (BCAN2 Nothing _d)))
-    | shr `isAtDepth'` d' = traceIfDebugging ("generate" <> show d') $ lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr (CJ sh)) . CJ <$> app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) f) (multidim shr is)
-    -- | d' == d = error $ "how come we didn't hit the case above?" <> show (d', d, rank shr)
-    | otherwise        = pure $ Push Env.Empty $ FromArg $ Value' CN (Shape' shr (CJ sh))
-  evalOp (d',_,is) _ NGenerate gamma (Push (Push Env.Empty (BAE (Shape' shr sh) _)) (BAE f (BCAN2 (Just (BP shrO shrI idxTransform _ls)) _d)))
-    | not $ shrO `isAtDepth'` d'
-    = pure $ Push Env.Empty $ FromArg $ Value' CN (Shape' shr sh)
-    | Just Refl <- matchShapeR shrI shr
-    = traceIfDebugging ("generate" <> show d') $ lift $ Push Env.Empty . FromArg . flip Value' (Shape' shr sh) . CJ <$> app1 (llvmOfFun1 @Native (compileArrayInstrGamma gamma) (compose f idxTransform)) (multidim shrO is)
-    | otherwise = error "bp shapeR doesn't match generate's output"
-  -- For Permute, we ignore all the BP info here and simply assume that there is none
-  evalOp (d',_,is) _ NPermute gamma (Push (Push (Push (Push Env.Empty
-    (BAE (Value' x'' (Shape' shrx _))           (BCAN2 _ d))) -- input
-    (BAE (ArrayDescriptor shrl shl bufl, lty)   _)) -- lock
-    (BAE (ArrayDescriptor shrt sht buft, tty)   _)) -- target
-    (BAE (llvmOfFun2 @Native (compileArrayInstrGamma gamma) -> c) _)) -- combination function
-    | CJ x' <- x''
-    , d == d'
-    = traceIfDebugging ("permute" <> show d') $ lift $ do
-        -- project element onto the destination array and (atomically) update
-        A.when (A.isJust x') $ do
-          let ixx = A.fromJust x'
-          let ix = A.fst ixx
-          let x = A.snd ixx
-          let sht' = aprjParameters (unsafeToExpVars sht) gamma
-          j <- intOfIndex shrt sht' ix
-          atomically gamma (ArgArray Mut (ArrayR shrl lty) shl bufl) j $ do
-            y <- readArray TypeInt gamma (ArgArray Mut (ArrayR shrt tty) sht buft) j
-            r <- app2 c x y
-            writeArray TypeInt gamma (ArgArray Mut (ArrayR shrt tty) sht buft) j r
-        pure Env.Empty
-    | d == d' = error "case above?"
-    | otherwise = pure Env.Empty
-  evalOp (d',_,is) _ NPermute' gamma (Push (Push Env.Empty
-    (BAE (Value' x'' (Shape' shrx _))           (BCAN2 _ d))) -- input
-    (BAE (ArrayDescriptor shrt sht buft, tty)   _)) -- target
-    | CJ x' <- x''
-    , d == d'
-    = traceIfDebugging ("permute'" <> show d') $ lift $ do
-        -- project element onto the destination array and (atomically) update
-        A.when (A.isJust x') $ do
-          let ixx = A.fromJust x'
-          let ix = A.fst ixx
-          let x = A.snd ixx
-          let sht' = aprjParameters (unsafeToExpVars sht) gamma
-          j <- intOfIndex shrt sht' ix
-          writeArray TypeInt gamma (ArgArray Mut (ArrayR shrt tty) sht buft) j x
-        pure Env.Empty
-    | d == d' = error "case above?"
-    | otherwise = pure Env.Empty
-  evalOp (d',_,ixs) l (NScan1 LeftToRight) gamma (Push (Push _ (BAE (Value' x' sh) (BCAN2 Nothing d))) (BAE f' _))
-    | f <- llvmOfFun2 @Native (compileArrayInstrGamma gamma) f'
-    , Lam (lhsToTupR -> ty :: TypeR e) _ <- f'
-    , CJ x <- x'
-    , d == d'
-    , inner:_ <- ixs
-    = traceIfDebugging ("scan" <> show d') $ StateT $ \acc -> do
-        let (Exists (unsafeCoerce @(Operands _) @(Operands e) -> accX), eTy) = acc M.! l
-        z <- A.ifThenElse (ty, A.eq singleType inner (constant typerInt 0)) (pure x) (app2 f accX x) -- note: need to apply the accumulator as the _left_ argument to the function
-        pure (Push Env.Empty $ FromArg (Value' (CJ z) sh), M.adjust (const (Exists z, eTy)) l acc)
-    | otherwise = pure $ Push Env.Empty $ FromArg (Value' CN sh)
-  evalOp _ _ (NScan1 _) _ (Push (Push _ (BAE _ (BCAN2 (Just BP{}) _))) (BAE _ _)) = error "backpermuted scan"
-  evalOp _ _ NFold _ _ = error "todo: fold"
-  -- we can ignore the index permutation for folds here
-  evalOp (d',_,ixs) l NFold1 gamma (Push (Push _ (BAE (Value' x' (Shape' (ShapeRsnoc shr') (CJ (OP_Pair sh _)))) (BCAN2 _ d))) (BAE f' _))
-    | f <- llvmOfFun2 @Native (compileArrayInstrGamma gamma) f'
-    , Lam (lhsToTupR -> ty :: TypeR e) _ <- f'
-    , CJ x <- x'
-    , d == d'
-    , inner:_ <- ixs
-    = traceIfDebugging ("fold2work" <> show d') $ StateT $ \acc -> do
-        let (Exists (unsafeCoerce @(Operands _) @(Operands e) -> accX), eTy) = acc M.! l
-        z <- A.ifThenElse (ty, A.eq singleType inner (constant typerInt 0)) (pure x) (app2 f accX x) -- note: need to apply the accumulator as the _left_ argument to the function
-        pure (Push Env.Empty $ FromArg (Value' (CJ z) (Shape' shr' (CJ sh))), M.adjust (const (Exists z, eTy)) l acc)
-    | Lam (lhsToTupR -> _ty :: TypeR e) _ <- f'
-    , d == d'+1 -- the fold was in the iteration above; we grab the result from the accumulator now
-    = traceIfDebugging ("fold2done" <> show d') $ StateT $ \acc -> do
-        let (Exists (unsafeCoerce @(Operands _) @(Operands e) -> x), _) = acc M.! l
-        pure (Push Env.Empty $ FromArg (Value' (CJ x) (Shape' shr' (CJ sh))), acc)
-    | otherwise = pure $ Push Env.Empty $ FromArg (Value' CN (Shape' shr' (CJ sh)))
-  evalOp _ _ _ _ _ = error "unmatched pattern?"
-
-
-instance TupRmonoid Operands where
-  pair' = OP_Pair
-  unpair' (OP_Pair x y) = (x, y)
-
-instance (TupRmonoid f) => TupRmonoid (Compose Maybe f) where
-  pair' (Compose l) (Compose r) = Compose $ pair' <$> l <*> r
-  unpair' (Compose p) = maybe (CN, CN) (bimap CJ CJ . unpair') p
-
-unsafeToExpVars :: GroundVars env sh -> ExpVars env sh
-unsafeToExpVars TupRunit = TupRunit
-unsafeToExpVars (TupRpair l r) = TupRpair (unsafeToExpVars l) (unsafeToExpVars r)
-unsafeToExpVars (TupRsingle (Var g idx)) = case g of
-  GroundRbuffer _ -> error "unsafeToExpVars on a buffer"
-  GroundRscalar t -> TupRsingle (Var t idx)
-
-maybeTy :: TypeR a -> TypeR (PrimMaybe a)
-maybeTy ty = TupRpair (TupRsingle scalarTypeWord8) (TupRpair TupRunit ty)
-
-
-
-
-
-
-
-
-
--- TODO: rename to 'static info' or 'symbolic execution' or so
-newtype JustAccumulator a b = JA (a b)
-
-data Loopsizes where
-  LS :: ShapeR sh -> Operands sh -> Loopsizes
-
-instance Show Loopsizes where
-  show (LS shr _) = "Loop of rank " <> show (rank shr)
-
-merge :: Loopsizes -> GroundVars env sh -> Gamma env -> Loopsizes
-merge ls v gamma = combine ls $ LS (gvarsToShapeR v) (aprjParameters (unsafeToExpVars v) gamma)
-
--- mkls :: Int -> ShapeR sh -> Operands sh -> Bool -> Loopsizes
--- mkls d shr sh b
---   | d == rank shr = LS shr sh b
---   | d > rank shr = mkls d (ShapeRsnoc shr) (multidim (ShapeRsnoc shr) $ foldr (:) [constant typerInt 1] $ multidim' shr sh) b
---   | d < rank shr = case shr of 
---       ShapeRsnoc shr' -> mkls d shr' (multidim shr' $ init $ multidim' shr sh) b
---       _ -> error ""
---   | otherwise = error ""
-
--- merge' :: Loopsizes -> Loopsizes -> Loopsizes
--- merge' ls1@(LS shr1 sh1) ls2@(LS shr2 sh2)
---   | rank shr1 >= rank shr2 && (b1 || not b2) = ls1
---   | rank shr1 <= rank shr2 && (b2 || not b1) = ls2
---   | otherwise = let (big, small) = if rank shr1 > rank shr2 then (ls1,ls2) else (ls2,ls1)
---                 in case (big,small) of
---                   (LS shrB (flipShape shrB -> shB), LS shrS (flipShape shrS -> shS)) 
---                     -> Debug.Trace.traceShow (rank shrB, rank shrS) $ 
---                       LS shrB (multidim shrB $ Prelude.take (rank shrB - rank shrS) (multidim' shrB shB) ++ multidim' shrS shS) 
---                           -- (flipShape shrB . multidim shrB $ multidim' shrS shS ++ drop (rank shrS) (multidim' shrB shB)) 
---                           -- False
---                   _ -> error "huh"
---     where flipShape x y = y
-
-    -- error "todo: take the known indices from the smaller True one, and the rest from the larger False one, call the result False"
-
-instance EvalOp (JustAccumulator NativeOp) where
-  type EvalMonad (JustAccumulator NativeOp) = StateT (Accumulated, Loopsizes) (CodeGen Native)
-  type Index (JustAccumulator NativeOp) = ()
-  type Embed' (JustAccumulator NativeOp) = Both TypeR Operands
-  type EnvF (JustAccumulator NativeOp) = GroundOperand
-
-  unit = Both TupRunit OP_Unit
-  embed = error "not needed"
-  indexsh  vars gamma = pure $ Both (mapTupR varType $ unsafeToExpVars vars) (aprjParameters (unsafeToExpVars vars) gamma)
-  indexsh' vars gamma = pure $ Both (mapTupR varType vars) (aprjParameters vars gamma)
-
-  subtup SubTupRskip _ = Both TupRunit OP_Unit
-  subtup SubTupRkeep x = x
-  subtup (SubTupRpair a b) (Both (TupRpair x y) (OP_Pair x' y')) = case (subtup @(JustAccumulator NativeOp) a (Both x x'), subtup @(JustAccumulator NativeOp) b (Both y y')) of
-    (Both l l', Both r r') -> Both (TupRpair l r) (OP_Pair l' r')
-  subtup _ _ = error "subtup-pair with non-pair TypeR"
-
-  readInput _ _ _ _ (BCA2JA IsUnit) _ = pure $ Both TupRunit OP_Unit
-  readInput ty sh _ gamma (BCA2JA (BCAN2 Nothing               _)) _ = StateT $ \(acc,ls) -> pure (Both (TupRsingle ty) (zeroes $ TupRsingle ty), (acc, merge ls sh gamma))
-  readInput ty _ _  gamma (BCA2JA (BCAN2 (Just (BP _ _ _ ls')) _)) _ = StateT $ \(acc,ls) -> pure (Both (TupRsingle ty) (zeroes $ TupRsingle ty), (acc, merge ls ls' gamma))
-
-  writeOutput _ sh _ gamma _ _ = StateT $ \(acc,ls) -> pure ((), (acc, merge ls sh gamma))
-
-  evalOp () l (JA (NScan1 LeftToRight)) _ (Push (Push _ (BAE (Value' (Both ty x) sh) _)) (BAE _ _))
-    = StateT $ \(acc,ls) -> do
-        let thing = zeroes ty
-        pure (Push Env.Empty $ FromArg (Value' (Both ty x) sh), (M.insert l (Exists thing, Exists ty) acc, ls))
-  evalOp () _ (JA NFold) _ _ = undefined
-  evalOp () l (JA NFold1) _ (Push (Push _ (BAE (Value' (Both ty x) (Shape' (ShapeRsnoc shr) sh)) _)) (BAE _ _))
-    = StateT $ \(acc,ls) -> do
-        let thing = zeroes ty
-        pure (Push Env.Empty $ FromArg (Value' (Both ty x) (Shape' shr (case sh of Both (TupRpair x _) (OP_Pair x' _) -> Both x x'))), (M.insert l (Exists thing, Exists ty) acc, ls))
-  evalOp () _ (JA NMap) _ (Push (Push (Push Env.Empty (BAE _ _)) (BAE (Value' _ (Shape' shr sh)) _)) (BAE f _))
-    = lift $ pure $ Push Env.Empty $ FromArg $ Value' (Both (getOutputType f) (zeroes (getOutputType f))) (Shape' shr sh)
-  evalOp () _ (JA NBackpermute) _ (Push (Push (Push Env.Empty (BAE (Shape' shr sh) _)) (BAE (Value' x _) _)) _)
-    = lift $ pure $ Push Env.Empty $ FromArg $ Value' x $ Shape' shr sh
-  evalOp () _ (JA NGenerate) _ (Push (Push Env.Empty (BAE (Shape' shr sh) _)) (BAE f _))
-    = lift $ pure $ Push Env.Empty $ FromArg $ Value' (Both (getOutputType f) (zeroes (getOutputType f))) (Shape' shr sh)
-  evalOp _ _ (JA NPermute) _ (Push (Push (Push (Push Env.Empty (BAE (Value' _ (Shape' shr (Both _ sh))) _)) _) _) _)
-    = StateT $ \(acc,ls) -> pure (Env.Empty, (acc, combine ls $ LS shr sh))
-  evalOp _ _ (JA NPermute') _ (Push (Push Env.Empty (BAE (Value' _ (Shape' shr (Both _ sh))) _)) _)
-    = StateT $ \(acc,ls) -> pure (Env.Empty, (acc, combine ls $ LS shr sh))
-  evalOp _ _ _ _ _ = error "missing"
-
-getOutputType :: Fun env (i -> o) -> TypeR o
-getOutputType (Lam _ (Body e)) = expType e
-getOutputType _ = error "nope"
-
-instance MakesILP op => MakesILP (JustAccumulator op) where
-  type BackendVar (JustAccumulator op) = BackendVar op
-  type BackendArg (JustAccumulator op) = BackendArg op
-  newtype BackendClusterArg (JustAccumulator op) a = BCAJA (BackendClusterArg op a)
-  mkGraph (JA _) = undefined -- do not want to run the ILP solver again!
-  finalize = undefined
-  labelLabelledArg = undefined
-  getClusterArg = undefined
-  encodeBackendClusterArg = undefined
-  combineBackendClusterArg = undefined
-  defaultBA = undefined
-  -- probably just never running anything here
-  -- this is really just here because MakesILP is a superclass
-
-
-instance (StaticClusterAnalysis op, EnvF (JustAccumulator op) ~ EnvF op) => StaticClusterAnalysis (JustAccumulator op) where
-  newtype BackendClusterArg2 (JustAccumulator op) x y = BCA2JA (BackendClusterArg2 op x y)
-  onOp a b c d   = coerce @(BackendArgs        op _ _) @(BackendArgs        (JustAccumulator op) _ _) $ onOp (coerce a) (coerce b) (coerce c) d
-  def      x y z = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ def x y (coerce z)
-  valueToIn    x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ valueToIn $ coerce x
-  valueToOut   x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ valueToOut $ coerce x
-  inToValue    x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ inToValue $ coerce x
-  inToVar      x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ inToVar $ coerce x
-  outToValue   x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ outToValue $ coerce x
-  outToSh      x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ outToSh $ coerce x
-  shToOut      x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ shToOut $ coerce x
-  shToValue    x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ shToValue $ coerce x
-  varToValue   x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ varToValue $ coerce x
-  varToSh      x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ varToSh $ coerce x
-  outToVar     x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ outToVar $ coerce x
-  shToVar      x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ shToVar $ coerce x
-  shrinkOrGrow a b x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ shrinkOrGrow a b $ coerce x
-  addTup       x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ addTup $ coerce x
-  unitToVar    x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ unitToVar $ coerce x
-  varToUnit    x = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ varToUnit $ coerce x
-  pairinfo a x y = coerce @(BackendClusterArg2 op _ _) @(BackendClusterArg2 (JustAccumulator op) _ _) $ pairinfo a (coerce x) (coerce y)
-  bcaid        x = coerce @(BackendClusterArg op _)    @(BackendClusterArg (JustAccumulator op) _)    $ bcaid $ coerce x
-  
-
-deriving instance (Eq (BackendClusterArg2 op x y)) => Eq (BackendClusterArg2 (JustAccumulator op) x y)
-deriving instance (Show (BackendClusterArg2 op x y)) => Show (BackendClusterArg2 (JustAccumulator op) x y)
-deriving instance (ShrinkArg (BackendClusterArg op)) => ShrinkArg (BackendClusterArg (JustAccumulator op))
-
-
-toOnlyAcc :: Cluster op args -> Cluster (JustAccumulator op) args
-toOnlyAcc (Fused f l r) = Fused f (toOnlyAcc l) (toOnlyAcc r)
-toOnlyAcc (SingleOp (Single op opArgs) l) = SingleOp (Single (JA op) opArgs) l
-
-pattern CJ :: f a -> Compose Maybe f a
-pattern CJ x = Compose (Just x)
-pattern CN :: Compose Maybe f a
-pattern CN = Compose Nothing
-{-# COMPLETE CJ,CN #-}
-
-varsContainsThisShape :: Vars f x sh -> ShapeR sh' -> Maybe (sh :~: sh')
-varsContainsThisShape vs shr
-  | isAtDepth vs (rank shr) = unsafeCoerce $ Just Refl
-  | otherwise = Nothing
-
--- Does this Vars contain exactly `x` variables, i.e., is `sh` `x`-dimensional?
-isAtDepth :: Vars f x sh -> Int -> Bool
-isAtDepth vs x = x == depth vs
-  where
-    depth :: Vars x y z -> Int
-    depth TupRunit = 0
-    depth (TupRpair l r) = depth l + depth r
-    depth TupRsingle{} = 1
-
-isAtDepth' :: ShapeR sh -> Int -> Bool
-isAtDepth' vs x = x == rank vs
-
-
-zeroes :: TypeR a -> Operands a
-zeroes TupRunit = OP_Unit
-zeroes (TupRpair l r) = OP_Pair (zeroes l) (zeroes r)
-zeroes ty@(TupRsingle t) = case t of
-  VectorScalarType _ -> error "todo"
-  SingleScalarType (NumSingleType t) -> case t of
-    IntegralNumType t -> case t of
-      TypeInt    -> constant ty 0
-      TypeInt8   -> constant ty 0
-      TypeInt16  -> constant ty 0
-      TypeInt32  -> constant ty 0
-      TypeInt64  -> constant ty 0
-      TypeWord   -> constant ty 0
-      TypeWord8  -> constant ty 0
-      TypeWord16 -> constant ty 0
-      TypeWord32 -> constant ty 0
-      TypeWord64 -> constant ty 0
-    FloatingNumType t -> case t of
-      TypeHalf   -> constant ty 0
-      TypeFloat  -> constant ty 0
-      TypeDouble -> constant ty 0
-
-gvarsToShapeR :: Vars GroundR x sh -> ShapeR sh
-gvarsToShapeR TupRunit = ShapeRz
-gvarsToShapeR (TupRpair sh (TupRsingle x)) = case x of
-  Var (GroundRscalar (SingleScalarType (NumSingleType (IntegralNumType TypeInt)))) _ -> ShapeRsnoc $ gvarsToShapeR sh
-  _ -> error "not a shape"
-gvarsToShapeR _ = error "not a shape"

@@ -53,8 +53,6 @@ new _ctx = newMVar Seq.empty
 -- work to them, not once they have completed execution of the tasks, we must
 -- check for one which has actually completed.
 --
--- See note: [Finalising execution streams]
---
 {-# INLINEABLE malloc #-}
 malloc :: Reservoir -> IO (Maybe Stream.Stream)
 malloc !ref =
@@ -66,6 +64,9 @@ malloc !ref =
     -- checking they have completed before reusing them, is quicker than having
     -- a finaliser thread block until completion before retiring them.
     --
+    -- TODO: In the new setup, we actually guarantee that streams are
+    -- only added when they have finished, so instead we could just take the
+    -- first one.
     search !acc !rsv =
       case Seq.viewl rsv of
         Seq.EmptyL  -> return (acc, Nothing)

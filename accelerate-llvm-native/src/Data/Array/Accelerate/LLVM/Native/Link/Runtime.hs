@@ -32,6 +32,7 @@ import qualified Data.ByteString.Short.Char8                        as B8
 import Foreign.Ptr
 
 #if defined(mingw32_HOST_OS)
+import Foreign.Ptr                                                  ( castPtrToFunPtr )
 import System.Win32.DLL
 #else
 import System.Posix.DynamicLinker
@@ -48,19 +49,21 @@ loadSharedObject :: HasCallStack => ShortByteString -> FilePath -> IO (FunPtr ()
 loadSharedObject nm path = do
 #if defined(mingw32_HOST_OS)
   -- shims for win32 api compatibility
-  let dlopen path _ = loadLibrary path
+  let dlopen' path' = loadLibrary path'
       dlsym dll sym = castPtrToFunPtr <$> getProcAddress dll sym
       dlclose dll   = freeLibrary dll
+#else
+  let dlopen' path' = dlopen path' [RTLD_LAZY, RTLD_LOCAL]
 #endif
   --
-  so      <- dlopen path [RTLD_LAZY, RTLD_LOCAL]
+  so      <- dlopen' path
 
   let s = B8.unpack $ nm
   Debug.traceM Debug.dump_ld ("ld: looking up symbol " % string) s
   sym <- dlsym so s
   object_code <- newLifetime so
   addFinalizer object_code $ do
-    -- XXX: Should we disable unloading objects in debug mode? Tracy might
+    -- XXX: Should we disable unloading objects in tracy mode? Tracy might
     -- still need access to e.g. embedded string data
     Debug.traceM Debug.dump_gc ("gc: unload module: " % string) (B8.unpack nm)
     dlclose so

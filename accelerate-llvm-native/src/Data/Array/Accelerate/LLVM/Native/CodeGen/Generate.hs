@@ -46,7 +46,6 @@ import LLVM.AST.Type.Name                                      as LLVM
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Module
-import LLVM.AST.Type.AddrSpace
 
 import Data.Typeable
 

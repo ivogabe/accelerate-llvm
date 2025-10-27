@@ -18,8 +18,8 @@
 module Data.Array.Accelerate.LLVM.CodeGen.IR (
 
   Operands(..),
-  IROP(..),
-  ir'
+  IROP(..)
+
 ) where
 
 import LLVM.AST.Type.Name
@@ -31,7 +31,6 @@ import Data.Primitive.Vec
 import Formatting
 
 import qualified Data.ByteString.Short                              as B
-import LLVM.AST.Type.Constant (Constant(..))
 
 
 -- We use a data family to represent sequences of LLVM (scalar) operands
@@ -181,15 +180,3 @@ instance IROP FloatingType where
   ir TypeFloat  = OP_Float
   ir TypeDouble = OP_Double
 
-
-ir' :: Operand a -> Operands a
-ir' x = case x of
-  LocalReference t _ -> ir t x
-  ConstantOperand c -> case c of
-    ScalarConstant t _ -> ir t x
-    BooleanConstant _ -> ir BoolPrimType x
-    UndefConstant t -> ir t x         
-    NullPtrConstant t -> ir t x
-    GlobalReference t _ -> ir t x
-    ConstantGetElementPtr t _ _ -> ir (PrimType $ PtrPrimType (ScalarPrimType t) undefined) x
-    

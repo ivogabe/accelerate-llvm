@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <pthread.h>
 
+#define ACCELERATE_LOCK_ARRAY_SIZE (16 * 1024 * 8)
+
 struct Workers;
 struct Program;
 struct KernelLaunch;
@@ -75,6 +77,11 @@ struct Scheduler {
 struct Workers {
   struct Scheduler scheduler;
   uint64_t thread_count;
+  // Array of locks, to be used by permutes.
+  // The array has ACCELERATE_LOCK_ARRAY_SIZE locks, and each lock is one bit.
+  // A permute will need to map indices of the array to indices in the array of
+  // locks.
+  uint8_t *locks;
 };
 
 struct Signal {
@@ -107,6 +114,9 @@ struct Task accelerate_dequeue(struct Workers *workers);
 
 void accelerate_signal_resolve(struct Workers *workers, struct Signal *signal);
 
+void* accelerate_raw_alloc(uint64_t size, uint64_t align);
+void accelerate_raw_free(void *ptr);
+
 void* accelerate_buffer_alloc(uint64_t byte_size);
 void accelerate_buffer_retain(void* interior);
 void accelerate_buffer_retain_by(void* interior, uint64_t amount);
@@ -120,7 +130,7 @@ void accelerate_ref_retain(void **ref);
 void hs_try_putmvar(int32_t, void*);
 
 inline uintptr_t accelerate_pack(void *pointer, uint16_t tag) {
-  const uintptr_t MASK = ~(1ULL << 48);
+  const uintptr_t MASK = (1ULL << 48) - 1;
   uintptr_t result = (uintptr_t) pointer & MASK;
   return result | (((uintptr_t) tag) << 48);
 }
@@ -132,13 +142,16 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
-typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint32_t first_index, uintptr_t *activities_slot);
+// locks: an array of locks that can be used by any permutes in the kernel.
+// This array is global, i.e. all kernels use the same array of locks, and is
+// taken from Workers.locks.
+typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint8_t *locks, uint32_t first_index);
 struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;
   uint32_t program_continuation;
   _Atomic int32_t active_threads;
-  _Atomic uint32_t work_index;
+  _Atomic uint64_t work_index;
   // In the future, perhaps also store a uint32_t work_size
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
 };

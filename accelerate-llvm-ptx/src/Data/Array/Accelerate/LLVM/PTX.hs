@@ -11,6 +11,7 @@
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -62,10 +63,10 @@ module Data.Array.Accelerate.LLVM.PTX (
   Afunction, AfunctionR,
 
   -- * Synchronous execution
-  run, runWith,
-  run1, run1With,
-  runN, runNWith,
-  stream, streamWith,
+  run, --runWith,
+  run1, --run1With,
+  runN, --runNWith,
+  {- stream, streamWith,
 
   -- * Asynchronous execution
   Async,
@@ -77,17 +78,40 @@ module Data.Array.Accelerate.LLVM.PTX (
 
   -- * Ahead-of-time compilation
   runQ, runQWith,
-  runQAsync, runQAsyncWith,
+  runQAsync, runQAsyncWith, -}
 
   -- * Execution targets
-  PTX, createTargetForDevice, createTargetFromContext,
+  PTX, -- createTargetForDevice, createTargetFromContext,
 
   -- * Controlling host-side allocation
-  registerPinnedAllocatorWith,
+  -- registerPinnedAllocatorWith,
 
+  PTXOp, PTXKernel
 ) where
 
-import Data.Array.Accelerate.AST                                    ( PreOpenAfun(..), arraysR, liftALeftHandSide )
+import Data.Array.Accelerate
+import Data.Array.Accelerate.Trafo.Sharing
+import Data.Array.Accelerate.AST.Schedule.Uniform
+
+import Data.Array.Accelerate.LLVM.PTX.Target
+import Data.Array.Accelerate.LLVM.PTX.Operation
+import Data.Array.Accelerate.LLVM.PTX.Kernel
+import Data.Array.Accelerate.LLVM.PTX.Execute ()
+
+instance Backend PTX where
+  type Schedule PTX = UniformScheduleFun
+  type Kernel PTX = PTXKernel
+
+run :: Arrays a => Acc a -> a
+run = runAt @PTX
+
+run1 :: (Arrays a, Arrays b) => (Acc a -> Acc b) -> a -> b
+run1 = run1At @PTX
+
+runN :: Afunction f => f -> AfunctionR f
+runN = runNAt @PTX
+
+{- import Data.Array.Accelerate.AST                                    ( PreOpenAfun(..), arraysR, liftALeftHandSide )
 import Data.Array.Accelerate.AST.LeftHandSide                       ( lhsToTupR )
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Async                                  ( Async, asyncBound, wait, poll, cancel )
@@ -119,7 +143,7 @@ import Control.Monad.Trans
 import Data.Maybe
 import Formatting                                                   ( shown )
 import System.IO.Unsafe
-import qualified Language.Haskell.TH.Extra                          as TH
+import qualified Data.Array.Accelerate.TH.Compat                    as TH
 
 
 -- Accelerate: LLVM backend for NVIDIA GPUs
@@ -560,3 +584,4 @@ registerPinnedAllocatorWith target =
 dumpStats :: MonadIO m => a -> m a
 dumpStats x = liftIO dumpSimplStats >> return x
 
+-}

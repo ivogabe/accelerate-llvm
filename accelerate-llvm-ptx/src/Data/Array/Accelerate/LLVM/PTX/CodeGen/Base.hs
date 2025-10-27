@@ -1,11 +1,13 @@
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE GADTs               #-}
+{-# LANGUAGE MultiWayIf          #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE ViewPatterns        #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
@@ -20,7 +22,7 @@
 module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
 
   -- Types
-  DeviceProperties, KernelMetadata(..),
+  DeviceProperties, KernelMetadata,
 
   -- Thread identifiers
   blockDim, gridDim, threadIdx, blockIdx, warpSize,
@@ -47,50 +49,48 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
   sharedMemAddrSpace, sharedMemVolatility,
 
   -- Kernel definitions
-  (+++),
-  makeOpenAcc, makeOpenAccWith,
+  codeGenKernel,
 
+  KernelType
 ) where
 
 import Data.Primitive.Vec
 import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Base
+import Data.Array.Accelerate.LLVM.CodeGen.Environment
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.CodeGen.IR
--- import Data.Array.Accelerate.LLVM.CodeGen.Module
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
--- import Data.Array.Accelerate.LLVM.CodeGen.Ptr
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
-import Data.Array.Accelerate.LLVM.Compile.Cache
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
 import Data.Array.Accelerate.LLVM.PTX.Target
-import Data.Array.Accelerate.Representation.Array
+import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.Representation.Elt
-import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant        as A
+import Data.Array.Accelerate (KernelMetadata)
 
 import Foreign.CUDA.Analysis                                        ( Compute(..), computeCapability )
 import qualified Foreign.CUDA.Analysis                              as CUDA
 
-import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function
+import LLVM.AST.Type.GetElementPtr
+import LLVM.AST.Type.Global
 import LLVM.AST.Type.InlineAssembly
 import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction.Atomic
+import qualified LLVM.AST.Type.Instruction.RMW                      as RMW
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Metadata
+import LLVM.AST.Type.Module
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
-import qualified LLVM.AST.Constant                                  as LLVM ( Constant(GlobalReference, Int) )
-import qualified LLVM.AST.Global                                    as LLVM
-import qualified LLVM.AST.Instruction                               as LLVM hiding ( type', alignment )
-import qualified LLVM.AST.Linkage                                   as LLVM
-import qualified LLVM.AST.Name                                      as LLVM
-import qualified LLVM.AST.Operand                                   as LLVM ( Operand(..) )
-import qualified LLVM.AST.Type                                      as LLVM
+import qualified Text.LLVM                                          as LP
 
 import Control.Applicative
 import Control.Monad                                                ( void )
@@ -99,20 +99,9 @@ import Data.Bits
 import Data.Proxy
 import Data.String
 import Foreign.Storable
-import Formatting                                                   hiding ( bytes, int )
 import Prelude                                                      as P
 
 import GHC.TypeLits
-
-#if MIN_VERSION_llvm_hs(10,0,0)
-import qualified LLVM.AST.Type.Instruction.RMW                      as RMW
-import LLVM.AST.Type.Instruction.Atomic
-import Data.Array.Accelerate (KernelMetadata)
-#elif !MIN_VERSION_llvm_hs(9,0,0)
-import Data.String
-import Text.Printf
-#endif
-
 
 -- Thread identifiers
 -- ------------------
@@ -123,7 +112,7 @@ import Text.Printf
 --
 specialPTXReg :: Label -> CodeGen PTX (Operands Int32)
 specialPTXReg f =
-  call (Body type' (Just Tail) f) [NoUnwind, ReadNone]
+  call (Body type' (Just Tail) f) ArgumentsNil [NoUnwind, ReadNone]
 
 blockDim, gridDim, threadIdx, blockIdx, warpSize :: CodeGen PTX (Operands Int32)
 blockDim    = specialPTXReg "llvm.nvvm.read.ptx.sreg.ntid.x"
@@ -205,10 +194,14 @@ gangParam =
 -- | Call a built-in CUDA synchronisation intrinsic
 --
 barrier :: Label -> CodeGen PTX ()
-barrier f = void $ call (Body VoidType (Just Tail) f) [NoUnwind, NoDuplicate, Convergent]
+barrier f = void $ call (Body VoidType (Just Tail) f) ArgumentsNil [NoUnwind, NoDuplicate, Convergent]
 
 barrier_op :: Label -> Operands Int32 -> CodeGen PTX (Operands Int32)
-barrier_op f x = call (Lam primType (op integralType x) (Body type' (Just Tail) f)) [NoUnwind, NoDuplicate, Convergent]
+barrier_op f x =
+  call
+    (lamUnnamed primType $ Body type' (Just Tail) f)
+    (ArgumentsCons (op integralType x) [] ArgumentsNil)
+    [NoUnwind, NoDuplicate, Convergent]
 
 
 -- | Wait until all threads in the thread block have reached this point, and all
@@ -257,15 +250,16 @@ __syncwarp = __syncwarp_mask (liftWord32 0xffffffff)
 --
 __syncwarp_mask :: HasCallStack => Operands Word32 -> CodeGen PTX ()
 __syncwarp_mask mask = do
+  llvmver <- getLLVMversion
   dev <- liftCodeGen $ gets ptxDeviceProperties
-  if computeCapability dev < Compute 7 0
-    then return ()
-    else
-#if !MIN_VERSION_llvm_hs(6,0,0)
-         internalError "LLVM-6.0 or above is required for Volta devices and later"
-#else
-         void $ call (Lam primType (op primType mask) (Body VoidType (Just Tail) "llvm.nvvm.bar.warp.sync")) [NoUnwind, NoDuplicate, Convergent]
-#endif
+  case (computeCapability dev >= Compute 7 0, llvmver >= 6) of
+    (True, True) ->
+      void $ call
+        (lamUnnamed primType $ Body VoidType (Just Tail) "llvm.nvvm.bar.warp.sync")
+        (ArgumentsCons (op primType mask) [] ArgumentsNil)
+        [NoUnwind, NoDuplicate, Convergent]
+    (True, False) -> internalError "LLVM-6.0 or above is required for Volta devices and later"
+    (False, _) -> return ()
 
 
 -- | Ensure that all writes to shared and global memory before the call to
@@ -306,40 +300,13 @@ __threadfence_grid = barrier "llvm.nvvm.membar.gl"
 -- <https://github.com/AccelerateHS/accelerate/issues/363>
 --
 atomicAdd_f :: HasCallStack => FloatingType a -> Operand (Ptr a) -> Operand a -> CodeGen PTX ()
-atomicAdd_f t addr val =
-#if MIN_VERSION_llvm_hs(10,0,0)
-  void . instr' $ AtomicRMW (FloatingNumType t) NonVolatile RMW.Add addr val (CrossThread, AcquireRelease)
-#else
-  let
-      _width :: Int
-      _width =
-        case t of
-          TypeHalf    -> 16
-          TypeFloat   -> 32
-          TypeDouble  -> 64
+atomicAdd_f t addr val = do
+  llvmver <- getLLVMversion
+  if | llvmver >= 10 ->
+         void . instr' $ AtomicRMW (FloatingNumType t) NonVolatile RMW.Add addr val (CrossThread, AcquireRelease)
 
-      (t_addr, t_val, _addrspace) =
-        case typeOf addr of
-          PrimType ta@(PtrPrimType (ScalarPrimType tv) (AddrSpace as))
-            -> (ta, tv, as)
-          _ -> internalError "unexpected operand type"
-
-      t_ret = PrimType (ScalarPrimType t_val)
-#if MIN_VERSION_llvm_hs(9,0,0) || !MIN_VERSION_llvm_hs(6,0,0)
-      asm   =
-        case t of
-          -- assuming .address_size 64
-          TypeHalf   -> InlineAssembly "atom.add.noftz.f16  $0, [$1], $2;" "=c,l,c" True False ATTDialect
-          TypeFloat  -> InlineAssembly "atom.global.add.f32 $0, [$1], $2;" "=f,l,f" True False ATTDialect
-          TypeDouble -> InlineAssembly "atom.global.add.f64 $0, [$1], $2;" "=d,l,d" True False ATTDialect
-  in
-  void $ instr (Call (Lam t_addr addr (Lam (ScalarPrimType t_val) val (Body t_ret (Just Tail) (Left asm)))) [Right NoUnwind])
-#else
-      fun   = fromString $ printf "llvm.nvvm.atomic.load.add.f%d.p%df%d" _width (_addrspace :: Word32) _width
-  in
-  void $ call (Lam t_addr addr (Lam (ScalarPrimType t_val) val (Body t_ret (Just Tail) fun))) [NoUnwind]
-#endif
-#endif
+     | otherwise ->
+         error "atomic fadd not supported on llvm <10"
 
 
 -- Warp shuffle functions
@@ -465,41 +432,42 @@ shfl sop tR val delta = go tR val
             --   3. bitcast to <m+1 x i32>: e.g. bitcast i64 <2 x i32>
             --
             else
-              let raw :: LLVM.Type -> LLVM.Instruction -> CodeGen PTX LLVM.Operand
+              let raw :: LP.Type -> LP.Instr -> CodeGen PTX (LP.Typed LP.Value)
                   raw ty ins = do
-                    name <- downcast <$> freshLocalName
-                    instr_ (name LLVM.:= ins)
-                    return (LLVM.LocalReference ty name)
+                    name <- freshLocalName
+                    instr_ (LP.Result (nameToPrettyI name) ins [])
+                    return (LP.Typed ty (LP.ValIdent (nameToPrettyI name)))
 
-                  md :: LLVM.InstructionMetadata
-                  md = []
+                  rawUp :: Type u -> LP.Instr -> CodeGen PTX (Operand u)
+                  rawUp ty ins = do
+                    name <- freshLocalName
+                    instr_ (LP.Result (nameToPrettyI name) ins [])
+                    return (LocalReference ty name)
 
-                  t0 = LLVM.VectorType { LLVM.nVectorElements = P.fromIntegral w, LLVM.elementType = downcast t }
-                  t1 = LLVM.IntegerType { LLVM.typeBits = P.fromIntegral ((w*bytes) * 8) }
-                  t2 = LLVM.IntegerType { LLVM.typeBits = P.fromIntegral ((m+1) * 4 * 8) }
-                  t3 = LLVM.VectorType { LLVM.nVectorElements = P.fromIntegral (m+1), LLVM.elementType = LLVM.i32 }
 
                   vec :: forall m. KnownNat m => Proxy m -> CodeGen PTX (Operands (Vec n s))
                   vec _ = do
-                    let
+                    let t0Up :: Type (Vec n s)
+                        t0Up = PrimType (ScalarPrimType (VectorScalarType v))
+                        t0 = downcast t0Up
+
+                        t1 = LP.PrimType (LP.Integer (P.fromIntegral ((w*bytes) * 8)))
+                        t2 = LP.PrimType (LP.Integer (P.fromIntegral ((m+1) * 4 * 8)))
+
                         v' :: VectorType (Vec m Int32)
                         v' = VectorType (m+1) (singleType @Int32)
+                        t3Up :: Type (Vec m Int32)
+                        t3Up = PrimType (ScalarPrimType (VectorScalarType v'))
+                        t3 = downcast t3Up
 
-                        upcast :: Type u -> LLVM.Operand -> Operand u
-                        upcast s (LLVM.LocalReference s' (LLVM.UnName x))
-                          = internalCheck (bformat ("couldn't match expected type `" % formatType % "' with actual type `" % shown % "'") s s') (s' == downcast s)
-                          $ LocalReference s (UnName x)
-                        upcast _ _
-                          = internalError "expected local reference"
-
-                    b <- raw t1 (LLVM.BitCast (downcast (op v a)) t1 md)
-                    c <- raw t2 (LLVM.ZExt b t2 md)
-                    d <- raw t3 (LLVM.BitCast c t3 md)
-                    e <- vector v' (ir v' (upcast (PrimType (ScalarPrimType (VectorScalarType v'))) d))
-                    f <- raw t2 (LLVM.BitCast (downcast (op v' e)) t2 md)
-                    g <- raw t1 (LLVM.Trunc f t1 md)
-                    h <- raw t0 (LLVM.BitCast g t0 md)
-                    return (ir v (upcast (PrimType (ScalarPrimType (VectorScalarType v))) h))
+                    b <- raw t1 (LP.Conv LP.BitCast (downcast (op v a)) t1)
+                    c <- raw t2 (LP.Conv LP.ZExt b t2)
+                    d <- rawUp t3Up (LP.Conv LP.BitCast c t3)
+                    e <- vector v' (ir v' d)
+                    f <- raw t2 (LP.Conv LP.BitCast (downcast (op v' e)) t2)
+                    g <- raw t1 (LP.Conv LP.Trunc f t1)
+                    h <- rawUp t0Up (LP.Conv LP.BitCast g t0)
+                    return (ir v h)
                in
                withSomeNat (m+1) vec
 
@@ -552,7 +520,8 @@ shfl_op
     -> Operand Word32               -- delta
     -> Operands a                   -- value to give
     -> CodeGen PTX (Operands a)     -- value received
-shfl_op sop t delta val = do
+shfl_op sop t delta val
+  | Refl <- result t = do
   dev <- liftCodeGen $ gets ptxDeviceProperties
 
   let
@@ -582,10 +551,6 @@ shfl_op sop t delta val = do
 
       useSyncShfl = CUDA.computeCapability dev >= Compute 7 0
 
-      call' = if useSyncShfl
-                 then call . Lam primType mask
-                 else call
-
       sync  = if useSyncShfl then "sync." else ""
       asm   = "llvm.nvvm.shfl."
            <> sync
@@ -602,8 +567,24 @@ shfl_op sop t delta val = do
                 ShuffleInt32 -> primType :: PrimType Int32
                 ShuffleFloat -> primType :: PrimType Float
 
-  call' (Lam t_val (op t_val val) (Lam primType delta (Lam primType width (Body (PrimType t_val) (Just Tail) asm)))) [Convergent, NoUnwind, InaccessibleMemOnly]
-
+  if useSyncShfl then
+    -- Arguments:
+    -- mask, value, delta, width
+    call
+      (lamUnnamed primType $ lamUnnamed t_val $ lamUnnamed primType $ lamUnnamed primType $ Body (PrimType t_val) (Just Tail) asm)
+      (ArgumentsCons mask [] $ ArgumentsCons (op t_val val) [] $ ArgumentsCons delta [] $ ArgumentsCons width [] ArgumentsNil)
+      [Convergent, NoUnwind, InaccessibleMemOnly]
+  else
+    -- Arguments:
+    -- value, delta, width
+    call
+      (lamUnnamed t_val $ lamUnnamed primType $ lamUnnamed primType $ Body (PrimType t_val) (Just Tail) asm)
+      (ArgumentsCons (op t_val val) [] $ ArgumentsCons delta [] $ ArgumentsCons width [] ArgumentsNil)
+      [Convergent, NoUnwind, InaccessibleMemOnly]
+  where
+    result :: ShuffleType a -> a :~: Result a
+    result ShuffleFloat = Refl
+    result ShuffleInt32 = Refl
 
 -- Shared memory
 -- -------------
@@ -618,46 +599,60 @@ sharedMemVolatility = Volatile
 -- Declare a new statically allocated array in the __shared__ memory address
 -- space, with enough storage to contain the given number of elements.
 --
+-- Previously, like initialiseDynamicSharedMemory, this function declared an
+-- external global, e.g. for 1 i64:
+--   @sdata = external addrspace(3) global [1 x i64], align 8
+-- This would correspond to the following CUDA source:
+--   extern __shared__ int64_t sdata[1];
+--
+-- But this CUDA C++ is rejected by Clang. When LLVM is fed LLVM IR, however,
+-- things are more subtle; in the old llvm-hs backend where we linked against
+-- LLVM, with LLVM 15, the above IR (defining @0) was accepted. However,
+-- passing this same IR to Clang 18 with the llvm-pretty backend (yes I'm aware
+-- the clang version is also changing here), clang first calls ptxas and then
+-- nvlink; nvlink complains:
+--   Undefined reference to 'sdata' in '/tmp/test-409abe.cubin'
+-- When linking against LLVM 15, nvlink is never invoked, but instead ptxas is
+-- _not_ given the -c flag and it immediately produces a SASS file.
+--
+-- Because Clang doesn't even accept the corresponding C++ code, but does
+-- accept this:
+--   __shared__ int64_t sdata[1];
+-- the global created in this function was changed to be of internal linkage
+-- instead. The assigned value is 'undef', just like what Clang generates for
+-- the internal sdata C++ declaration.
 staticSharedMem
-    :: TypeR e
+    :: IRBufferScope
+    -> ScalarType e
     -> Word64
-    -> CodeGen PTX (IRArray (Vector e))
-staticSharedMem tp n = do
-  ad    <- go tp
-  return $ IRArray { irArrayRepr       = ArrayR dim1 tp
-                   , irArrayShape      = OP_Pair OP_Unit $ OP_Int $ A.integral integralType $ P.fromIntegral n
-                   , irArrayData       = ad
-                   , irArrayAddrSpace  = sharedMemAddrSpace
-                   , irArrayVolatility = sharedMemVolatility
-                   }
-  where
-    go :: TypeR s -> CodeGen PTX (Operands s)
-    go TupRunit          = return OP_Unit
-    go (TupRpair t1 t2)  = OP_Pair <$> go t1 <*> go t2
-    go tt@(TupRsingle t) = do
-      -- Declare a new global reference for the statically allocated array
-      -- located in the __shared__ memory space.
-      nm <- freshGlobalName
-      sm <- return $ ConstantOperand $ GlobalReference (PrimType (PtrPrimType (ArrayPrimType n t) sharedMemAddrSpace)) nm
-      declare $ LLVM.globalVariableDefaults
-        { LLVM.addrSpace = sharedMemAddrSpace
-        , LLVM.type'     = LLVM.ArrayType n (downcast t)
-        , LLVM.linkage   = LLVM.External
-        , LLVM.name      = downcast nm
-        , LLVM.alignment = 4 `P.max` P.fromIntegral (bytesElt tt)
-        }
+    -> CodeGen PTX (IRBuffer e)
+staticSharedMem scope tp n = do
+  name <- freshGlobalName
+  let arrayTp = ArrayPrimType n (ScalarPrimType tp)
+  let ptrArrayTp = PrimType (PtrPrimType arrayTp sharedMemAddrSpace)
+  let sm = ConstantOperand $ GlobalReference ptrArrayTp name
 
-      -- Return a pointer to the first element of the __shared__ memory array.
-      -- We do this rather than just returning the global reference directly due
-      -- to how __shared__ memory needs to be indexed with the GEP instruction.
-#if MIN_VERSION_llvm_hs(15,0,0)
-      p <- instr' $ GetElementPtr t sm [A.num numType 0 :: Operand Int32]
-#else
-      p <- instr' $ GetElementPtr t sm [A.num numType 0, A.num numType 0 :: Operand Int32]
-#endif
-      q <- instr' $ PtrCast (PtrPrimType (ScalarPrimType t) sharedMemAddrSpace) p
+  declareGlobalVar $ LP.Global
+    { LP.globalSym = nameToPrettyS name
+    , LP.globalAttrs = LP.GlobalAttrs
+        { LP.gaLinkage = Just LP.Internal
+        , LP.gaVisibility = Nothing
+        , LP.gaAddrSpace = sharedMemAddrSpace
+        , LP.gaConstant = False }
+    , LP.globalType = LP.Array n (downcast tp)
+    , LP.globalValue = Just LP.ValUndef
+    , LP.globalAlign = Just (4 `P.max` P.fromIntegral (bytesElt $ TupRsingle tp))
+    , LP.globalMetadata = mempty
+    }
 
-      return $ ir t (unPtr q)
+  -- Return a pointer to the first element of the __shared__ memory array.
+  -- We do this rather than just returning the global reference directly due
+  -- to how __shared__ memory needs to be indexed with the GEP instruction.
+  p <- instr' $ GetElementPtr
+      $ GEP sm (A.num numType 0 :: Operand Int32)
+      $ GEPArray (A.num numType 0 :: Operand Int32) GEPEmpty
+
+  return $ IRBuffer p sharedMemAddrSpace sharedMemVolatility scope Nothing
 
 
 -- External declaration in shared memory address space. This must be declared in
@@ -666,27 +661,32 @@ staticSharedMem tp n = do
 --
 -- > @__shared__ = external addrspace(3) global [0 x i8]
 --
-initialiseDynamicSharedMemory :: CodeGen PTX (Operand (Ptr Word8))
+initialiseDynamicSharedMemory :: CodeGen PTX (Operand (Ptr Int8))
 initialiseDynamicSharedMemory = do
-  declare $ LLVM.globalVariableDefaults
-    { LLVM.addrSpace = sharedMemAddrSpace
-    , LLVM.type'     = LLVM.ArrayType 0 (LLVM.IntegerType 8)
-    , LLVM.linkage   = LLVM.External
-    , LLVM.name      = LLVM.Name "__shared__"
-    , LLVM.alignment = 4
+  declareGlobalVar $ LP.Global
+    { LP.globalSym = LP.Symbol "__shared__"
+    , LP.globalAttrs = LP.GlobalAttrs
+        { LP.gaLinkage = Just LP.External
+        , LP.gaVisibility = Nothing
+        , LP.gaAddrSpace = sharedMemAddrSpace
+        , LP.gaConstant = False }
+    , LP.globalType = LP.Array 0 (LP.PrimType (LP.Integer 8))
+    , LP.globalValue = Nothing
+    , LP.globalAlign = Nothing
+    , LP.globalMetadata = mempty
     }
-  return $ ConstantOperand $ GlobalReference (PrimType (PtrPrimType (ArrayPrimType 0 scalarType) sharedMemAddrSpace)) "__shared__"
+  return $ ConstantOperand
+    $ ConstantGetElementPtr (GEP (GlobalReference (PrimType (PtrPrimType (ArrayPrimType 0 $ ScalarPrimType scalarType) sharedMemAddrSpace)) "__shared__")
+                                 (ScalarConstant (scalarType @Int32) 0)
+                                 (GEPArray (ScalarConstant (scalarType @Int32) 0) GEPEmpty))
 
 
--- Declared a new dynamically allocated array in the __shared__ memory space
--- with enough space to contain the given number of elements.
---
-dynamicSharedMem
+{- dynamicSharedMem
     :: forall e int.
        TypeR e
     -> IntegralType int
     -> Operands int                                 -- number of array elements
-    -> Operands int                                 -- #bytes of shared memory the have already been allocated
+    -> Operands int                                 -- #bytes of shared memory that have already been allocated
     -> CodeGen PTX (IRArray (Vector e))
 dynamicSharedMem tp int n@(op int -> m) (op int -> offset)
   | IntegralDict <- integralDict int = do
@@ -701,11 +701,7 @@ dynamicSharedMem tp int n@(op int -> m) (op int -> offset)
           (i2, p2) <- go t2 i1
           return $ (i2, OP_Pair p2 p1)
         go (TupRsingle t)   i  = do
-#if MIN_VERSION_llvm_hs(15,0,0)
-          p <- instr' $ GetElementPtr scalarType smem [i]
-#else
-          p <- instr' $ GetElementPtr scalarType smem [A.num numTp 0, i] -- TLM: note initial zero index!!
-#endif
+          p <- instr' $ GetElementPtr (GEP1 scalarType smem i)
           q <- instr' $ PtrCast (PtrPrimType (ScalarPrimType t) sharedMemAddrSpace) p
           a <- instr' $ Mul numTp m (A.integral int (P.fromIntegral (bytesElt (TupRsingle t))))
           b <- instr' $ Add numTp i a
@@ -718,8 +714,38 @@ dynamicSharedMem tp int n@(op int -> m) (op int -> offset)
                        , irArrayData       = ad
                        , irArrayAddrSpace  = sharedMemAddrSpace
                        , irArrayVolatility = sharedMemVolatility
-                       }
+                       } -}
 
+-- Declare a new dynamically allocated array in the __shared__ memory space
+-- with enough space to contain the given number of elements.
+--
+dynamicSharedMem
+    :: forall e.
+       IRBufferScope
+    -> ScalarType e
+    -> Operands Int32 -- number of array elements
+    -> Operands Int32 -- #bytes of shared memory that have already been allocated
+    -> CodeGen PTX (Operands Int32, IRBuffer e)
+dynamicSharedMem scope tp n offset = do
+  smem <- initialiseDynamicSharedMemory
+  let tpSize = P.fromIntegral $ bytesElt $ TupRsingle tp
+  -- Align 'offset' to compute start offset & pointer
+  OP_Int32 start <- alignTo tpSize offset
+  startPtr <- instr' $ GetElementPtr (GEP1 smem start)
+  startPtr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType tp) sharedMemAddrSpace) startPtr
+  -- Compute allocated size and end of this allocation
+  size' <- A.mul numType n $ OP_Int32 $ A.integral TypeInt32 $ tpSize
+  end <- A.add numType (OP_Int32 start) size'
+  -- Construct the buffer
+  let buffer = IRBuffer startPtr' sharedMemAddrSpace sharedMemVolatility scope Nothing
+  return (end, buffer) 
+
+-- Align 'ptr' to the given alignment.
+-- Assumes 'align' is a power of 2.
+alignTo :: Int32 -> Operands Int32 -> CodeGen PTX (Operands Int32)
+alignTo align ptr = do
+  x <- A.add numType ptr $ OP_Int32 $ A.integral TypeInt32 $ align - 1
+  A.band TypeInt32 x $ OP_Int32 $ A.integral TypeInt32 $ Data.Bits.complement $ align - 1
 
 -- Other functions
 -- ---------------
@@ -728,79 +754,35 @@ dynamicSharedMem tp int n@(op int -> m) (op int -> offset)
 -- Requires compute capability >= 7.0
 --
 nanosleep :: Operands Int32 -> CodeGen PTX ()
-nanosleep ns =
-  let
-      attrs = [NoUnwind, Convergent]
-      asm   = InlineAssembly "nanosleep.u32 $0;" "r" True False ATTDialect
-  in
-  void $ instr (Call (Lam primType (op integralType ns) (Body VoidType (Just Tail) (Left asm))) (map Right attrs))
-
+nanosleep ns = do
+  -- This is an acc prelude function because it requires inline assembly, and
+  -- llvm-pretty does not yet support caling inline assembly snippets. Thus we
+  -- manually wrap the assembly in an inlineable function and call that.
+  let label = makeAccPreludeLabel "nanosleep"
+  void $ instr $ Call
+    (lamUnnamed primType $ Body VoidType (Just Tail) (CallGlobal label))
+    (ArgumentsCons (op integralType ns) [] ArgumentsNil)
 
 -- Global kernel definitions
 -- -------------------------
 
-data instance KernelMetadata PTX = KM_PTX LaunchConfig
+codeGenKernel
+  :: forall arch f a. (HasCallStack, Target arch, Intrinsic arch, Result f ~ ())
+  => String
+  -> (forall k. Function k () -> Function k f)
+  -> CodeGen arch a
+  -> LLVM arch (a, Module f)
+codeGenKernel name args body =
+  codeGenFunction Nothing name VoidType args $ do
+    addNamedMetadata "nvvm.annotations"
+      [ Just . MetadataPretty $ LP.ValMdValue
+        $ LP.Typed (LP.decFunType $ downcast declare) (LP.ValSymbol ({-labelToPrettyS-} fromString name))
+      , Just . MetadataStringOperand   $ "kernel"
+      , Just . MetadataConstantOperand $ ScalarConstant scalarTypeInt32 1
+      ]
+    body
+  where
+    declare :: GlobalFunction f
+    declare = args $ Body VoidType (Just Tail) (fromString name)
 
--- | Combine kernels into a single program
---
-(+++) :: IROpenAcc PTX aenv a -> IROpenAcc PTX aenv a -> IROpenAcc PTX aenv a
-IROpenAcc k1 +++ IROpenAcc k2 = IROpenAcc (k1 ++ k2)
-
-
--- | Create a single kernel program with the default launch configuration.
---
-makeOpenAcc
-    :: UID
-    -> Label
-    -> [LLVM.Parameter]
-    -> CodeGen PTX ()
-    -> CodeGen PTX (IROpenAcc PTX aenv a)
-makeOpenAcc uid name param kernel = do
-  dev <- liftCodeGen $ gets ptxDeviceProperties
-  makeOpenAccWith (simpleLaunchConfig dev) uid name param kernel
-
--- | Create a single kernel program with the given launch analysis information.
---
-makeOpenAccWith
-    :: LaunchConfig
-    -> UID
-    -> Label
-    -> [LLVM.Parameter]
-    -> CodeGen PTX ()
-    -> CodeGen PTX (IROpenAcc PTX aenv a)
-makeOpenAccWith config uid name param kernel = do
-  body  <- makeKernel config (name <> fromString ('_' : show uid)) param kernel
-  return $ IROpenAcc [body]
-
--- | Create a complete kernel function by running the code generation process
--- specified in the final parameter.
---
-makeKernel
-    :: LaunchConfig
-    -> Label
-    -> [LLVM.Parameter]
-    -> CodeGen PTX ()
-    -> CodeGen PTX (Kernel PTX aenv a)
-makeKernel config name@(Label l) param kernel = do
-  _    <- kernel
-  code <- createBlocks
-  addNamedMetadata "nvvm.annotations"
-    [ Just . MetadataConstantOperand
-      $ LLVM.GlobalReference
-#if !MIN_VERSION_llvm_hs(15,0,0)
-          (LLVM.PointerType (LLVM.FunctionType LLVM.VoidType [ t | LLVM.Parameter t _ _ <- param ] False) (AddrSpace 0))
-#endif
-          (LLVM.Name l)
-    , Just . MetadataStringOperand   $ "kernel"
-    , Just . MetadataConstantOperand $ LLVM.Int 32 1
-    ]
-  return $ Kernel
-    { kernelMetadata = KM_PTX config
-    , unKernel       = LLVM.functionDefaults
-                     { LLVM.returnType  = LLVM.VoidType
-                     , LLVM.name        = downcast name
-                     , LLVM.parameters  = (param, False)
-                     , LLVM.basicBlocks = code
-                     }
-    }
-
+type KernelType env = Ptr (SizedArray Word) -> MarshalFun env

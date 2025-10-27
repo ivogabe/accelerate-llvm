@@ -13,18 +13,16 @@
 module Data.Array.Accelerate.LLVM.PTX.Execute.Event (
 
   Event,
-  create, destroy, query, waypoint, after, block,
+  create, destroy, query, record, waypoint, after, block,
 
 ) where
 
 import Data.Array.Accelerate.Lifetime
-import qualified Data.Array.Accelerate.Array.Remote.LRU             as Remote
 
-import Data.Array.Accelerate.LLVM.PTX.Array.Remote                  ( )
 import Data.Array.Accelerate.LLVM.PTX.Target                        ( PTX(..) )
 import Data.Array.Accelerate.LLVM.State
 import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
-import {-# SOURCE #-} Data.Array.Accelerate.LLVM.PTX.Execute.Stream
+import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
 
 import Foreign.CUDA.Driver.Error
 import qualified Foreign.CUDA.Driver.Event                          as Event
@@ -57,13 +55,13 @@ create = do
 
 create' :: LLVM PTX Event.Event
 create' = do
-  PTX{ptxMemoryTable} <- gets llvmTarget
+  -- PTX{ptxMemoryTable} <- gets llvmTarget
   me      <- attempt "create/new" (liftIO . catchOOM $ Event.create [Event.DisableTiming])
-             `orElse` do
+             {- `orElse` do
                Remote.reclaim ptxMemoryTable
                liftIO $ do
                  message "create/new: failed (purging)"
-                 catchOOM $ Event.create [Event.DisableTiming]
+                 catchOOM $ Event.create [Event.DisableTiming] -}
   case me of
     Just e  -> return e
     Nothing -> liftIO $ do
@@ -107,11 +105,16 @@ waypoint :: Stream -> LLVM PTX Event
 waypoint stream = do
   event <- create
   liftIO $
-    withLifetime stream  $ \s -> do
-      withLifetime event $ \e -> do
-        message ("add waypoint " % formatEvent % " in stream " % formatStream) e s
-        Event.record e (Just s)
-        return event
+    withLifetime event $ \e -> do
+      message ("add waypoint " % formatEvent % " in stream " % formatStream) e stream
+      Event.record e (Just stream)
+      return event
+
+record :: Event -> Stream -> IO ()
+record event stream =
+  withLifetime event $ \e -> do
+    message ("record " % formatEvent % " in stream " % formatStream) e stream
+    Event.record e (Just stream)
 
 -- | Make all future work submitted to the given stream wait until the event
 -- reports completion before beginning execution.
@@ -119,10 +122,9 @@ waypoint stream = do
 {-# INLINEABLE after #-}
 after :: Event -> Stream -> IO ()
 after event stream =
-  withLifetime stream $ \s ->
-  withLifetime event  $ \e -> do
-    message ("after " % formatEvent % " in stream " % formatStream) e s
-    Event.wait e (Just s) []
+  withLifetime event $ \e -> do
+    message ("after " % formatEvent % " in stream " % formatStream) e stream
+    Event.wait e (Just stream) []
 
 -- | Block the calling thread until the event is recorded
 --

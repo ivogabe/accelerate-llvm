@@ -10,8 +10,6 @@
 {-# LANGUAGE TypeFamilies      #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE TupleSections #-}
 
 -- |
@@ -24,7 +22,7 @@
 -- Portability : non-portable (GHC extensions)
 --
 
-module Data.Array.Accelerate.LLVM.Native.Operation
+module Data.Array.Accelerate.LLVM.PTX.Operation
   where
 
 -- accelerate
@@ -32,187 +30,198 @@ module Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Operation
 import Data.Array.Accelerate.AST.Partitioned
+import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.Analysis.Hash.Exp
 import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
+import Data.Array.Accelerate.Error
 
 
-import Data.Array.Accelerate.AST.Environment (weakenId)
+import qualified Data.Set as Set
+import Data.Array.Accelerate.AST.Environment (weakenId, weakenEmpty, weakenSucc' )
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Var (DeclareVars(..), declareVars)
 import Data.Array.Accelerate.Representation.Ground (buffersR)
 import Data.Array.Accelerate.AST.LeftHandSide
-import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken)
+import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken, LHS (..), mkLHS)
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
-import Data.Array.Accelerate.Type (scalarType, Word8, scalarTypeWord8, scalarTypeInt)
+import Data.Array.Accelerate.Type
+import Data.Array.Accelerate.Analysis.Match
+import Data.Maybe (isJust)
+import Data.Array.Accelerate.Interpreter (InOut (..))
 import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver hiding ( var, int )
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver hiding ( c )
 import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver as ILP
 import Lens.Micro
 import Lens.Micro.Mtl
-
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Array.Accelerate.Trafo.Exp.Substitution
-import Control.Monad.State.Strictimport Data.Array.Accelerate.Trafo.Exp.Bounds.ArrayInstr
-import Data.Array.Accelerate.Trafo.Exp.Bounds.Optimize.ArrayInstr
+import Data.Array.Accelerate.Trafo.Desugar (desugarAlloc)
 
-import Data.Foldable (fold)
-import Data.Array.Accelerate.Analysis.Match ((:~:)(Refl))
+import Data.Array.Accelerate.AST.Idx (Idx(..))
+import Data.Array.Accelerate.Pretty.Operation (prettyFun)
+import Data.Array.Accelerate.Pretty.Exp (Val (Push))
+import Unsafe.Coerce (unsafeCoerce)
 
-data NativeOp t where
-  NMap         :: NativeOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
-  NBackpermute :: NativeOp (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
-  NGenerate    :: NativeOp (Fun' (sh -> t)              -> Out sh  t -> ())
-  NPermute     :: NativeOp (Fun' (e -> e -> e)
+import Control.Monad.State.Strict
+
+data PTXOp t where
+  PTXMap       :: PTXOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
+  PTXBackpermute :: PTXOp (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
+  PTXGenerate  :: PTXOp (Fun' (sh -> t)              -> Out sh  t -> ())
+  PTXPermute   :: PTXOp (Fun' (e -> e -> e)
                          -> Mut sh' e
+                         -> Mut sh' Word32
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
-  NPermute'    :: NativeOp (Mut sh' e
+  PTXPermute'  :: PTXOp (Mut sh' e
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
-  NScan        :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
+  PTXScan      :: Direction
+               -> PTXOp (Fun' (e -> e -> e)
                          -> Exp' e
                          -> In (sh, Int) e
                          -> Out (sh, Int) e
                          -> ())
-  NScan1       :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
+  PTXScan1     :: Direction
+               -> PTXOp (Fun' (e -> e -> e)
                          -> In (sh, Int) e
                          -> Out (sh, Int) e
                          -> ())
-  NScan'       :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
+  PTXScan'     :: Direction
+               -> PTXOp (Fun' (e -> e -> e)
                          -> Exp' e
                          -> In (sh, Int) e
                          -> Out (sh, Int) e
                          -> Out sh e
                          -> ())
-  NFold        :: NativeOp (Fun' (e -> e -> e)
+  PTXFold      :: PTXOp (Fun' (e -> e -> e)
                          -> Exp' e
                          -> In (sh, Int) e
                          -> Out sh e
                          -> ())
-  NFold1       :: NativeOp (Fun' (e -> e -> e)
+  PTXFold1     :: PTXOp (Fun' (e -> e -> e)
                          -> In (sh, Int) e
                          -> Out sh e
                          -> ())
 
-instance PrettyOp NativeOp where
-  prettyOp NMap         = "map"
-  prettyOp NBackpermute = "backpermute"
-  prettyOp NGenerate    = "generate"
-  prettyOp NPermute     = "permute"
-  prettyOp NPermute'    = "permuteUnique"
-  prettyOp (NScan dir) = case dir of
+instance PrettyOp PTXOp where
+  prettyOp PTXMap         = "map"
+  prettyOp PTXBackpermute = "backpermute"
+  prettyOp PTXGenerate    = "generate"
+  prettyOp PTXPermute     = "permute"
+  prettyOp PTXPermute'    = "permuteUnique"
+  prettyOp (PTXScan dir) = case dir of
     LeftToRight -> "scanl"
     RightToLeft -> "scanr"
-  prettyOp (NScan1 dir) = case dir of
+  prettyOp (PTXScan1 dir) = case dir of
     LeftToRight -> "scanl1"
     RightToLeft -> "scanr1"
-  prettyOp (NScan' dir) = case dir of
+  prettyOp (PTXScan' dir) = case dir of
     LeftToRight -> "scanl'"
     RightToLeft -> "scanr'"
-  prettyOp NFold        = "fold"
-  prettyOp NFold1       = "fold1"
+  prettyOp PTXFold        = "fold"
+  prettyOp PTXFold1       = "fold1"
 
-instance NFData' NativeOp where
+instance NFData' PTXOp where
   rnf' !_ = ()
 
-instance DesugarAcc NativeOp where
-  mkMap         a b c   = Exec NMap         (a :>: b :>: c :>:       ArgsNil)
-  mkBackpermute a b c   = Exec NBackpermute (a :>: b :>: c :>:       ArgsNil)
-  mkGenerate    a b     = Exec NGenerate    (a :>: b :>:             ArgsNil)
-  mkScan dir f (Just seed) i o
-    = Exec (NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
-  mkScan dir f Nothing i o
-    = Exec (NScan1 dir) (f :>: i :>: o :>: ArgsNil)
-  mkScan' dir f seed i o1 o2
-    = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute (Just a) b c = Exec NPermute (a :>: b :>: c :>: ArgsNil)
-  mkPermute Nothing a b = Exec NPermute' (a :>: b :>: ArgsNil)
-  mkFold a (Just seed) b c = Exec NFold (a :>: seed :>: b :>: c :>: ArgsNil)
-  mkFold a Nothing b c = Exec NFold1 (a :>: b :>: c :>: ArgsNil)
+instance DesugarAcc PTXOp where
+  mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
+  mkBackpermute a b c   = Exec PTXBackpermute (a :>: b :>: c :>:       ArgsNil)
+  mkGenerate    a b     = Exec PTXGenerate    (a :>: b :>:             ArgsNil)
+  {- mkScan dir f (Just seed) i@(ArgArray In (ArrayR shr ty) sh buf) o
+    = Exec (PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
+  mkScan dir f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
+    = Exec (PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
+  mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
+    = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)-}
+  mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
+    | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord32
+    = aletUnique lhs 
+        (Alloc shr scalarTypeWord32 $ groundToExpVar (shapeType shr) sh)
+        $ alet LeftHandSideUnit
+          (Exec PTXGenerate ( -- TODO: The old pipeline used a 'memset 0' instead, which sounds faster...
+                ArgFun (Lam (LeftHandSideWildcard (shapeType shr)) $ Body $ Const scalarTypeWord32 0)
+            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId) 
+            :>: ArgsNil))
+          (Exec PTXPermute (
+                weaken w a 
+            :>: weaken w b 
+            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId) 
+            :>: weaken w c 
+            :>: ArgsNil))
+  mkPermute Nothing a b = Exec PTXPermute' (a :>: b :>: ArgsNil)
+  {-mkFold a (Just seed) b c = Exec PTXFold (a :>: seed :>: b :>: c :>: ArgsNil)
+  mkFold a Nothing b c = Exec PTXFold1 (a :>: b :>: c :>: ArgsNil) -}
 
-instance SimplifyOperation NativeOp where
-  detectCopy NMap         = detectMapCopies
-  detectCopy NBackpermute = detectBackpermuteCopies
-  detectCopy _            = const []
+instance SimplifyOperation PTXOp where
+  detectCopy PTXMap         = detectMapCopies
+  detectCopy PTXBackpermute = detectBackpermuteCopies
+  detectCopy _              = const []
 
-instance SLVOperation NativeOp where
-  slvOperation NGenerate    = defaultSlvGenerate    NGenerate
-  slvOperation NMap         = defaultSlvMap         NMap
-  slvOperation NBackpermute = defaultSlvBackpermute NBackpermute
+instance SLVOperation PTXOp where
+  slvOperation PTXGenerate    = defaultSlvGenerate    PTXGenerate
+  slvOperation PTXMap         = defaultSlvMap         PTXMap
+  slvOperation PTXBackpermute = defaultSlvBackpermute PTXBackpermute
   slvOperation _ = Nothing
 
-instance BCOperation NativeOp where
-  bcOperation NGenerate    = defaultBCGenerate NGenerate
-  bcOperation NMap         = defaultBCMap NMap
-  bcOperation NBackpermute = defaultBCBackpermute NBackpermute
-  bcOperation NPermute     = defaultBCPermuteWithIndices NPermute
-  bcOperation NPermute'    = defaultBCPermuteUnique NPermute'
-  bcOperation (NScan dir)  = defaultBCScan (NScan dir)
-  bcOperation (NScan1 dir) = defaultBCScan1 (NScan1 dir)
-  bcOperation (NScan' dir) = defaultBCScan' (NScan' dir)
-  bcOperation NFold        = defaultBCFold NFold
-  bcOperation NFold1       = defaultBCFold1 NFold1
+instance EncodeOperation PTXOp where
+  encodeOperation PTXMap         = intHost $(hashQ ("Map" :: String))
+  encodeOperation PTXBackpermute = intHost $(hashQ ("Backpermute" :: String))
+  encodeOperation PTXGenerate    = intHost $(hashQ ("Generate" :: String))
+  encodeOperation PTXPermute     = intHost $(hashQ ("Permute" :: String))
+  encodeOperation PTXPermute'    = intHost $(hashQ ("Permute'" :: String))
+  encodeOperation (PTXScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
+  encodeOperation (PTXScan RightToLeft)  = intHost $(hashQ ("Scanr" :: String))
+  encodeOperation (PTXScan1 LeftToRight) = intHost $(hashQ ("Scanl1" :: String))
+  encodeOperation (PTXScan1 RightToLeft) = intHost $(hashQ ("Scanr1" :: String))
+  encodeOperation (PTXScan' LeftToRight) = intHost $(hashQ ("Scanl'" :: String))
+  encodeOperation (PTXScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
+  encodeOperation PTXFold        = intHost $(hashQ ("Fold" :: String))
+  encodeOperation PTXFold1       = intHost $(hashQ ("Fold1" :: String))
 
-instance EncodeOperation NativeOp where
-  encodeOperation NMap         = intHost $(hashQ ("Map" :: String))
-  encodeOperation NBackpermute = intHost $(hashQ ("Backpermute" :: String))
-  encodeOperation NGenerate    = intHost $(hashQ ("Generate" :: String))
-  encodeOperation NPermute     = intHost $(hashQ ("Permute" :: String))
-  encodeOperation NPermute'    = intHost $(hashQ ("Permute'" :: String))
-  encodeOperation (NScan LeftToRight)  = intHost $(hashQ ("Scanl" :: String))
-  encodeOperation (NScan RightToLeft)  = intHost $(hashQ ("Scanr" :: String))
-  encodeOperation (NScan1 LeftToRight) = intHost $(hashQ ("Scanl1" :: String))
-  encodeOperation (NScan1 RightToLeft) = intHost $(hashQ ("Scanr1" :: String))
-  encodeOperation (NScan' LeftToRight) = intHost $(hashQ ("Scanl'" :: String))
-  encodeOperation (NScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
-  encodeOperation NFold        = intHost $(hashQ ("Fold" :: String))
-  encodeOperation NFold1       = intHost $(hashQ ("Fold1" :: String))
-
-instance SetOpIndices NativeOp where
-  setOpIndices _ NGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
-  setOpIndices _ NMap _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+instance SetOpIndices PTXOp where
+  setOpIndices _ PTXGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
+  setOpIndices _ PTXMap _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
-  setOpIndices _ NMap _ _ = error "Missing indices for NMap"
-  setOpIndices _ NBackpermute _ _ = Just $ Left IsBackpermute
-  setOpIndices _ (NScan _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  setOpIndices _ PTXMap _ _ = error "Missing indices for PTXMap"
+  setOpIndices _ PTXBackpermute _ _ = Just $ Left IsBackpermute
+  setOpIndices _ (PTXScan _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     -- Annotate the input with an index.
     -- Don't annotate the output. We don't fuse over the output of a normal scan,
     -- as the output of a scan is one longer than the input.
     -- We do fuse the other scans (scan' and scan1).
     = Just $ Right $ IdxArgNone :>: IdxArgNone :>: IdxArgIdx d i :>: IdxArgNone :>: ArgsNil
-  setOpIndices _ (NScan _) _ _ = error "Missing indices for NScan"
-  setOpIndices _ (NScan1 _) _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  setOpIndices _ (PTXScan _) _ _ = error "Missing indices for PTXScan"
+  setOpIndices _ (PTXScan1 _) _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     = Just $ Right $ IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: ArgsNil
-  setOpIndices _ (NScan1 _) _ _ = error "Missing indices for NScan1"
-  setOpIndices _ (NScan' _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: o :>: ArgsNil)
+  setOpIndices _ (PTXScan1 _) _ _ = error "Missing indices for PTXScan1"
+  setOpIndices _ (PTXScan' _) _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: o :>: ArgsNil)
     = Just $ Right $ IdxArgNone :>: IdxArgNone :>: IdxArgIdx d i :>: IdxArgIdx d i :>: o :>: ArgsNil
-  setOpIndices _ (NScan' _) _ _ = error "Missing indices for NScan'"
-  setOpIndices indexVar NFold _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  setOpIndices _ (PTXScan' _) _ _ = error "Missing indices for PTXScan'"
+  setOpIndices indexVar PTXFold _ (_ :>: _ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     | Just i' <- indexVar d
     = Just $ Right $
       IdxArgNone :>: IdxArgNone :>: IdxArgIdx (d + 1) (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx d i :>: ArgsNil
     | otherwise
     = Nothing
-  setOpIndices _ NFold _ _ = error "Missing indices for NFold"
-  setOpIndices indexVar NFold1 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
+  setOpIndices _ PTXFold _ _ = error "Missing indices for PTXFold"
+  setOpIndices indexVar PTXFold1 _ (_ :>: _ :>: IdxArgIdx d i :>: ArgsNil)
     | Just i' <- indexVar d
     = Just $ Right $
       IdxArgNone :>: IdxArgIdx (d + 1) (i `TupRpair` TupRsingle (Var scalarTypeInt i')) :>: IdxArgIdx d i :>: ArgsNil
     | otherwise
     = Nothing
-  setOpIndices _ NFold1 _ _ = error "Missing indices for NFold1"
-  setOpIndices indexVar NPermute (_ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+  setOpIndices _ PTXFold1 _ _ = error "Missing indices for PTXFold1"
+  setOpIndices indexVar PTXPermute (_ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
-      IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
+      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
     | otherwise
     = Nothing
     where
@@ -223,7 +232,7 @@ instance SetOpIndices NativeOp where
         , Just b <- indexVar (rank shr')
         = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
         | otherwise = Nothing
-  setOpIndices indexVar NPermute' (_ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+  setOpIndices indexVar PTXPermute' (_ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
       IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
@@ -238,50 +247,41 @@ instance SetOpIndices NativeOp where
         = Just $ a `TupRpair` TupRsingle (Var scalarTypeInt b)
         | otherwise = Nothing
 
-  getOpLoopDirections (NScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
+  getOpLoopDirections (PTXScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
-  getOpLoopDirections (NScan1 dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
+  getOpLoopDirections (PTXScan1 dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
-  getOpLoopDirections (NScan' dir) _ (_ :>: _ :>: _ :>: IdxArgIdx _ i :>: _)
+  getOpLoopDirections (PTXScan' dir) _ (_ :>: _ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
-  getOpLoopDirections NFold _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
+  getOpLoopDirections PTXFold _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
-  getOpLoopDirections NFold1 _ (_ :>: IdxArgIdx _ i :>: _)
+  getOpLoopDirections PTXFold1 _ (_ :>: IdxArgIdx _ i :>: _)
     | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
   getOpLoopDirections _ _ _ = []
 
--- TODO: factor out more common parts of mkGraph
--- TODO: do the TODO's in here, and also do them in the Interpreter
--- TODO: constraints and bounds for the new variable(s)
--- TODO: remove commented out old code
-instance MakesILP NativeOp where
-  type BackendVar NativeOp = ()
-  type BackendArg NativeOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
-  defaultBA :: BackendArg NativeOp
+instance MakesILP PTXOp where
+  type BackendVar PTXOp = ()
+  type BackendArg PTXOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
   defaultBA = 0
-  data BackendClusterArg NativeOp a = BCAN
-  combineBackendClusterArg :: BackendClusterArg NativeOp (Out  sh e)
-                           -> BackendClusterArg NativeOp (In   sh e)
-                           -> BackendClusterArg NativeOp (Var' sh)
-  combineBackendClusterArg _ _ = error "combineBackendClusterArg: Shouldn't be able to fuse."
+  data BackendClusterArg PTXOp a = BCAN
 
   mkGraph :: Node Comp
-          -> NativeOp args
+          -> PTXOp args
           -> LabelledArgs env args
-          -> State (BackendGraphState NativeOp env) ()
-  mkGraph c@(Node i _) NBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+          -> State (BackendGraphState PTXOp env) ()
+  mkGraph c@(Node i _) PTXBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
@@ -293,13 +293,13 @@ instance MakesILP NativeOp where
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Different order, so no in-place paths.
 
-  mkGraph c NGenerate (_fun :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c PTXGenerate (_fun :>: L _ lOut :>: ArgsNil) = do
     let bsOut = getLabelArrDeps lOut
     fusionILP.constraints %= (<> allEqual (writeDirs (S.map (c,) bsOut)))
     fusionILP.bounds %= (<> defaultBounds mempty c bsOut)
     -- No input, so no in-place paths.
 
-  mkGraph c NMap (L (ArgFun fun) _ :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c PTXMap (L (ArgFun fun) _ :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
@@ -312,19 +312,31 @@ instance MakesILP NativeOp where
       Just Refl -> (<> mkUnitInplacePaths (Number nComps * Number nComps) c lIn lOut)
       _         -> (<> mkUnitInplacePaths 1 c lIn lOut)
 
-  mkGraph c NPermute (_fun :>: L _ lTargets :>: L _ lIn :>: ArgsNil) = do
+  {- mkGraph PTXPermute (_ :>: L _ (_, lTargets) :>: L _ (_, lLocks) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
+    Graph.Info
+      ( mempty & infusibleEdges .~ Set.map (-?> l) (lTargets <> lLocks)) -- add infusible edges from the producers of target and lock arrays to the permute
+      (    inputConstraints l lIns
+        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
+        <> ILP.c (InDims l) .==. int (rank shr)
+        <> ILP.c (InDir  l) .==. int (-2)
+        <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
+      ( lower (-2) (InDir l)
+      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). -}
+
+  mkGraph c PTXPermute (_fun :>: L _ lTargets :>: L _ lLocks :>: L _ lIn :>: ArgsNil) = do
     let bsTargets = getLabelArrDeps lTargets
+    let bsLocks   = getLabelArrDeps lLocks
     let bsIn      = getLabelArrDeps lIn
     wsTargets <- use $ allWriters bsTargets
+    wsLocks   <- use $ allWriters bsLocks
     wsIn      <- use $ allWriters bsIn
-    fusionILP %= (wsTargets <> wsIn) `allBefore` c
+    fusionILP %= (wsTargets <> wsLocks <> wsIn) `allBefore` c
     fusionILP.constraints %= (
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
-    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
-                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsIn))
-    -- No output, so no in-place paths.
+    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsLocks <> bsIn)
+                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsLocks <> bsIn))
 
-  mkGraph c NPermute' (L _ lTargets :>: L _ lIn :>: ArgsNil) = do
+  mkGraph c PTXPermute' (L _ lTargets :>: L _ lIn :>: ArgsNil) = do
     let bsTargets = getLabelArrDeps lTargets
     let bsIn      = getLabelArrDeps lIn
     wsTargets <- use $ allWriters bsTargets
@@ -335,9 +347,8 @@ instance MakesILP NativeOp where
       <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
     fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
                          <> foldMap (equal (-3) . WriteDir c) bsTargets)
-    -- No output, so no in-place paths.
 
-  mkGraph c (NScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c (PTXScan (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
@@ -348,7 +359,7 @@ instance MakesILP NativeOp where
                          <> foldMap (equal (-3) . WriteDir c) bsOut)
     -- Output size is one larger, so no in-place paths.
 
-  mkGraph c (NScan1 (dirToInt -> dir)) (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c (PTXScan1 (dirToInt -> dir)) (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
@@ -359,7 +370,7 @@ instance MakesILP NativeOp where
                          <> foldMap (equal dir . WriteDir c) bsOut)
     fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut)
 
-  mkGraph c (NScan' (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut1 :>: L _ lOut2 :>: ArgsNil) = do
+  mkGraph c (PTXScan' (dirToInt -> dir)) (_fun :>: _exp :>: L _ lIn :>: L _ lOut1 :>: L _ lOut2 :>: ArgsNil) = do
     let bsIn   = getLabelArrDeps lIn
     let bsOut1 = getLabelArrDeps lOut1
     let bsOut2 = getLabelArrDeps lOut2
@@ -371,7 +382,7 @@ instance MakesILP NativeOp where
                          <> foldMap (equal dir . WriteDir c) (bsOut1 <> bsOut2))
     fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut1)
 
-  mkGraph c NFold (_fun :>: _exp :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c PTXFold (_fun :>: _exp :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
@@ -382,7 +393,7 @@ instance MakesILP NativeOp where
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
 
-  mkGraph c NFold1 (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c PTXFold1 (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
@@ -393,39 +404,32 @@ instance MakesILP NativeOp where
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
 
-  labelLabelledArg :: M.Map (Graph.Var NativeOp) Int -> Node Comp -> LabelledArg env a -> LabelledArgOp NativeOp env a
+  labelLabelledArg :: M.Map (Graph.Var PTXOp) Int -> Node Comp -> LabelledArg env a -> LabelledArgOp PTXOp env a
   labelLabelledArg vars c (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! ReadDir  (getLabelArrDep y) c)
   labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
   labelLabelledArg _ _ (L x y) = LOp x y 0
 
-  getClusterArg :: LabelledArgOp NativeOp env a -> BackendClusterArg NativeOp a
-  getClusterArg LOp{} = BCAN
-
+  getClusterArg :: LabelledArgOp PTXOp env a -> BackendClusterArg PTXOp a
+  getClusterArg (LOp _ _ _) = BCAN
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
-  finalize :: FusionGraph -> Constraint NativeOp
   finalize g = foldMap (\(w,b) -> timesN (manifest b) .>. ILP.var (WriteDir w b)) (g^.writeEdges)
 
-  encodeBackendClusterArg BCAN = intHost $(hashQ ("BCAN" :: String))
+  encodeBackendClusterArg (BCAN) = intHost $(hashQ ("BCAN" :: String))
 
-inputConstraints :: Node Comp -> Nodes Comp -> Constraint NativeOp
+inputConstraints :: Node Comp -> Nodes Comp -> Constraint PTXOp
 inputConstraints c = foldMap $ \wIn ->
-    --             timesN (fused lIn l) .>=. ILP.var (InDims l) .-. ILP.var (OutDims lIn)
-    -- <> (-1) .*. timesN (fused lIn l) .<=. ILP.var (InDims l) .-. ILP.var (OutDims lIn)
                 timesN (fused (wIn, c)) .>=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
     <> (-1) .*. timesN (fused (wIn, c)) .<=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
 
-defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds NativeOp
+defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds PTXOp
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
 
-instance NFData' (BackendClusterArg NativeOp) where
-  rnf' :: BackendClusterArg NativeOp a -> ()
+instance NFData' (BackendClusterArg PTXOp) where
   rnf' !_ = ()
 
-instance ShrinkArg (BackendClusterArg NativeOp) where
-  shrinkArg :: SubArg t t' -> BackendClusterArg NativeOp t -> BackendClusterArg NativeOp t'
+instance ShrinkArg (BackendClusterArg PTXOp) where
   shrinkArg _ BCAN = BCAN
-  deadArg :: BackendClusterArg NativeOp (Out sh e) -> BackendClusterArg NativeOp (Var' sh)
   deadArg BCAN = BCAN
 
 shrToTypeR :: ShapeR sh -> TypeR sh

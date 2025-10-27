@@ -3,6 +3,7 @@
 {-# LANGUAGE GADTs                #-}
 {-# LANGUAGE RankNTypes           #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
+{-# LANGUAGE TypeApplications     #-}
 {-# LANGUAGE TypeFamilies         #-}
 
 -- |
@@ -26,15 +27,14 @@
 --
 
 module Data.Array.Accelerate.LLVM.Native (
-{-
   Acc, Arrays,
   Afunction, AfunctionR,
 
   -- * Synchronous execution
-  run, runWith,
-  run1, run1With,
-  runN, runNWith,
-  stream, streamWith,
+  run, -- runWith,
+  run1, -- run1With,
+  runN, -- runNWith,
+  {- stream, streamWith,
 
   -- * Asynchronous execution
   Async,
@@ -55,7 +55,10 @@ module Data.Array.Accelerate.LLVM.Native (
   Native, UniformScheduleFun, NativeKernel
 ) where
 
+import Data.Array.Accelerate
 import Data.Array.Accelerate.Backend
+import Data.Array.Accelerate.Trafo.Sharing
+import Data.Array.Accelerate.Trafo.Schedule.Uniform ()
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Pretty.Schedule.Uniform ()
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -90,11 +93,11 @@ import Data.Array.Accelerate.LLVM.Native.Debug                      as Debug
 
 import Control.Monad.Trans
 import System.IO.Unsafe
-import qualified Language.Haskell.TH.Extra                          as TH
+import qualified Data.Array.Accelerate.TH.Compat                    as TH
 import qualified Language.Haskell.TH.Syntax                         as TH
 
 import GHC.Stack
-
+-}
 
 -- Accelerate: LLVM backend for multicore CPUs
 -- -------------------------------------------
@@ -103,54 +106,54 @@ import GHC.Stack
 --
 -- /NOTE:/ it is recommended to use 'runN' or 'runQ' whenever possible.
 --
-run :: (Arrays a, HasCallStack) => Acc a -> a
-run a = withFrozenCallStack $ runWith defaultTarget a
+run :: Arrays a => Acc a -> a
+run = runAt @Native
 
 -- | As 'run', but execute using the specified target (thread gang).
 --
-runWith :: (Arrays a, HasCallStack) => Native -> Acc a -> a
-runWith target a
-  = withFrozenCallStack
-  $ unsafePerformIO (runWithIO target a)
+-- runWith :: (Arrays a, HasCallStack) => Native -> Acc a -> a
+-- runWith target a
+--   = withFrozenCallStack
+--   $ unsafePerformIO (runWithIO target a)
 
 -- | As 'run', but allow the computation to run asynchronously and return
 -- immediately without waiting for the result. The status of the computation can
 -- be queried using 'wait', 'poll', and 'cancel'.
 --
-runAsync :: (Arrays a, HasCallStack) => Acc a -> IO (Async a)
-runAsync a
-  = withFrozenCallStack
-  $ runAsyncWith defaultTarget a
+-- runAsync :: (Arrays a, HasCallStack) => Acc a -> IO (Async a)
+-- runAsync a
+--   = withFrozenCallStack
+--   $ runAsyncWith defaultTarget a
 
 -- | As 'runAsync', but execute using the specified target (thread gang).
 --
-runAsyncWith :: (Arrays a, HasCallStack) => Native -> Acc a -> IO (Async a)
-runAsyncWith target a
-  = withFrozenCallStack
-  $ async (runWithIO target a)
+-- runAsyncWith :: (Arrays a, HasCallStack) => Native -> Acc a -> IO (Async a)
+-- runAsyncWith target a
+--   = withFrozenCallStack
+--   $ async (runWithIO target a)
 
-runWithIO :: (Arrays a, HasCallStack) => Native -> Acc a -> IO a
-runWithIO target a = execute
-  where
-    !acc    = convertAcc a
-    execute = do
-      dumpGraph acc
-      evalNative target $ do
-        build <- phase Compile elapsedS (compileAcc acc) >>= dumpStats
-        exec  <- phase Link    elapsedS (linkAcc build)
-        res   <- phase Execute elapsedP (evalPar (executeAcc exec >>= getArrays (arraysR exec)))
-        return $ toArr res
+-- runWithIO :: (Arrays a, HasCallStack) => Native -> Acc a -> IO a
+-- runWithIO target a = execute
+--   where
+--     !acc    = convertAcc a
+--     execute = do
+--       dumpGraph acc
+--       evalNative target $ do
+--         build <- phase Compile elapsedS (compileAcc acc) >>= dumpStats
+--         exec  <- phase Link    elapsedS (linkAcc build)
+--         res   <- phase Execute elapsedP (evalPar (executeAcc exec >>= getArrays (arraysR exec)))
+--         return $ toArr res
 
 
 -- | This is 'runN', specialised to an array program of one argument.
 --
-run1 :: (Arrays a, Arrays b, HasCallStack) => (Acc a -> Acc b) -> a -> b
-run1 = withFrozenCallStack $ run1With defaultTarget
+run1 :: (Arrays a, Arrays b) => (Acc a -> Acc b) -> a -> b
+run1 = run1At @Native
 
 -- | As 'run1', but execute using the specified target (thread gang).
 --
-run1With :: (Arrays a, Arrays b, HasCallStack) => Native -> (Acc a -> Acc b) -> a -> b
-run1With = withFrozenCallStack $ runNWith
+-- run1With :: (Arrays a, Arrays b, HasCallStack) => Native -> (Acc a -> Acc b) -> a -> b
+-- run1With = withFrozenCallStack $ runNWith
 
 
 -- | Prepare and execute an embedded array program.
@@ -194,41 +197,41 @@ run1With = withFrozenCallStack $ runNWith
 -- See also 'runQ', which compiles the Accelerate program at _Haskell_ compile
 -- time, thus eliminating the runtime overhead altogether.
 --
-runN :: (Afunction f, HasCallStack) => f -> AfunctionR f
-runN = withFrozenCallStack $ runNWith defaultTarget
+runN :: Afunction f => f -> AfunctionR f
+runN = runNAt @Native
 
 -- | As 'runN', but execute using the specified target (thread gang).
 --
-runNWith :: forall f. (Afunction f, HasCallStack) => Native -> f -> AfunctionR f
-runNWith target f
-  = withFrozenCallStack
-  $ go (afunctionRepr @f) afun (return Empty)
-  where
-    !acc  = convertAfun f
-    !afun = unsafePerformIO $ do
-              dumpGraph acc
-              evalNative target $ do
-                build <- phase Compile elapsedS (compileAfun acc) >>= dumpStats
-                link  <- phase Link    elapsedS (linkAfun build)
-                return link
+-- runNWith :: forall f. (Afunction f, HasCallStack) => Native -> f -> AfunctionR f
+-- runNWith target f
+--   = withFrozenCallStack
+--   $ go (afunctionRepr @f) afun (return Empty)
+--   where
+--     !acc  = convertAfun f
+--     !afun = unsafePerformIO $ do
+--               dumpGraph acc
+--               evalNative target $ do
+--                 build <- phase Compile elapsedS (compileAfun acc) >>= dumpStats
+--                 link  <- phase Link    elapsedS (linkAfun build)
+--                 return link
 
-    go :: AfunctionRepr t (AfunctionR t) (ArraysFunctionR t)
-       -> ExecOpenAfun Native aenv (ArraysFunctionR t)
-       -> Par Native (Val aenv)
-       -> AfunctionR t
-    go (AfunctionReprLam repr) (Alam lhs l) k = \(arrs :: a) ->
-      let k' = do aenv  <- k
-                  a     <- useRemoteAsync (Sugar.arraysR @a) $ fromArr arrs
-                  return (aenv `push` (lhs, a))
-      in go repr l k'
-    go AfunctionReprBody (Abody b) k = unsafePerformIO . phase Execute elapsedP . evalNative target . evalPar $ do
-      aenv <- k
-      res  <- executeOpenAcc b aenv
-      arrs <- getArrays (arraysR b) res
-      return $ toArr arrs
-    go _ _ _ = error "The moon is hanging upside down"
+--     go :: AfunctionRepr t (AfunctionR t) (ArraysFunctionR t)
+--        -> ExecOpenAfun Native aenv (ArraysFunctionR t)
+--        -> Par Native (Val aenv)
+--        -> AfunctionR t
+--     go (AfunctionReprLam repr) (Alam lhs l) k = \(arrs :: a) ->
+--       let k' = do aenv  <- k
+--                   a     <- useRemoteAsync (Sugar.arraysR @a) $ fromArr arrs
+--                   return (aenv `push` (lhs, a))
+--       in go repr l k'
+--     go AfunctionReprBody (Abody b) k = unsafePerformIO . phase Execute elapsedP . evalNative target . evalPar $ do
+--       aenv <- k
+--       res  <- executeOpenAcc b aenv
+--       arrs <- getArrays (arraysR b) res
+--       return $ toArr arrs
+--     go _ _ _ = error "The moon is hanging upside down"
 
-
+{-
 -- | As 'run1', but execute asynchronously.
 --
 run1Async :: (Arrays a, Arrays b, HasCallStack) => (Acc a -> Acc b) -> a -> IO (Async b)

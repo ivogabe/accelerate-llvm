@@ -624,6 +624,10 @@ liftWord8 = lift $ TupRsingle scalarType
 liftWord32 :: Word32 -> Operands Word32
 liftWord32 = lift $ TupRsingle scalarTypeWord32
 
+{-# INLINE liftWord64 #-}
+liftWord64 :: Word64 -> Operands Word64
+liftWord64 = lift $ TupRsingle scalarType
+
 {-# INLINE liftBool #-}
 liftBool :: Bool -> Operands Bool
 liftBool x = OP_Bool (boolean x)
@@ -789,6 +793,36 @@ mathf2 n f (op f -> x) (op f -> y)
               (ArgumentsCons x [] $ ArgumentsCons y [] ArgumentsNil)
               [NoUnwind, ReadOnly]
     return r
+
+-- Thomas Wang's 64-bit integer hash
+-- Original website is currently unavailable,
+-- but see for instance https://naml.us/post/inverse-of-a-hash-function/
+-- or https://aebou.rbind.io/post/a-rust-glimpse-at-thomas-wang-integer-hash-function/
+hash :: Operands Word64 -> CodeGen arch (Operands Word64)
+hash key = do
+  -- key = (~key) + (key << 21);
+  a <- complement TypeWord64 key
+  b <- shiftL TypeWord64 key (liftInt 21)
+  key1 <- add numType a b
+
+  -- key = key ^ (key >> 24);
+  key2 <- shiftR TypeWord64 key1 (liftInt 24) >>= xor TypeWord64 key1
+
+  -- key = (key + (key << 3)) + (key << 8); // key * 265
+  key3 <- mul numType key2 (liftWord64 265)
+  
+  -- key = key ^ (key >> 14);
+  key4 <- shiftR TypeWord64 key3 (liftInt 14) >>= xor TypeWord64 key3
+
+  -- key = (key + (key << 2)) + (key << 4); // key * 21
+  key5 <- mul numType key4 (liftWord64 21)
+
+  -- key = key ^ (key >> 28);
+  key6 <- shiftR TypeWord64 key5 (liftInt 28) >>= xor TypeWord64 key5
+
+  -- key = key + (key << 31);
+  -- return key;
+  shiftL TypeWord64 key6 (liftInt 31) >>= add numType key6
 
 lm :: FloatingType t -> ShortByteString -> CodeGen arch Label
 lm t n

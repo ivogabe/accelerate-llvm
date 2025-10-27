@@ -23,7 +23,9 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
 
   tupleAlloca, tuplePtrs, tupleStore, tupleLoad,
 
-  intOfIndex
+  intOfIndex,
+
+  firstArrayPtr
 
 ) where
 
@@ -32,17 +34,17 @@ import Prelude                                                      hiding ( rea
 import Data.Bits
 import Data.Typeable                                                ( (:~:)(..) )
 
-import LLVM.AST.Type.AddrSpace
+import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
-import qualified LLVM.AST                                           as LLVM
+import LLVM.AST.Type.Metadata
 
 import Data.Array.Accelerate.AST.Environment
 import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.AST.Partitioned
-import Data.Array.Accelerate.Array.Buffer                           ( ScalarArrayDataR, SingleArrayDict(..), singleArrayDict )
+import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape
@@ -85,20 +87,20 @@ readArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx = do
 --
 {-# INLINEABLE readArray #-}
 readArray
-    :: forall int genv m sh e arch.
+    :: forall int genv idxEnv m sh e arch.
        IntegralType int
-    -> Gamma genv
+    -> Envs genv idxEnv
     -> Arg genv (m sh e) -- m is In or Mut
     -> Operands int
     -> CodeGen arch (Operands e)
-readArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) = read tp buffers
+readArray int envs (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) = read tp buffers
   where
     read :: forall t. TypeR t -> GroundVars genv (Buffers t) -> CodeGen arch (Operands t)
     read TupRunit         _                = return OP_Unit
     read (TupRpair t1 t2) (TupRpair b1 b2) = OP_Pair <$> read t1 b1 <*> read t2 b2
     read (TupRsingle t)   (TupRsingle buffer)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
-      , irbuffer <- aprjBuffer buffer env
+      , irbuffer <- envsPrjBuffer buffer envs
       = ir t <$> readBuffer t int irbuffer ix Nothing
     read _ _ = internalError "Tuple mismatch"
 
@@ -181,21 +183,21 @@ writeArrayAt' env (ArgArray _ (ArrayR shr tp) sh buffers) idx i val = do
 --
 {-# INLINEABLE writeArray #-}
 writeArray
-    :: forall int genv m sh e arch.
+    :: forall int genv idxEnv m sh e arch.
        IntegralType int
-    -> Gamma genv
+    -> Envs genv idxEnv
     -> Arg genv (m sh e) -- m is Out or Mut
     -> Operands int
     -> Operands e
     -> CodeGen arch ()
-writeArray int env (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) val = write tp buffers val
+writeArray int envs (ArgArray _ (ArrayR _ tp) _ buffers) (op int -> ix) val = write tp buffers val
   where
     write :: forall t. TypeR t -> GroundVars genv (Buffers t) -> Operands t -> CodeGen arch ()
     write TupRunit _ _ = return ()
     write (TupRpair t1 t2) (TupRpair b1 b2)    (OP_Pair v1 v2) = write t1 b1 v1 >> write t2 b2 v2
     write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
-      , irbuffer <- aprjBuffer buffer env
+      , irbuffer <- envsPrjBuffer buffer envs
       = writeBuffer t int irbuffer ix Nothing value
     write _ _ _ = internalError "Tuple mismatch"
 
@@ -230,157 +232,46 @@ getElementPtr
     :: AddrSpace
     -> ScalarType e
     -> IntegralType int
-    -> Operand (Ptr (ScalarArrayDataR e))
+    -> Operand (Ptr e)
     -> Operand int
     -> CodeGen arch (Operand (Ptr e))
-getElementPtr _ t@(SingleScalarType tp)   _ arr ix
-  | SingleArrayDict <- singleArrayDict tp = instr' $ GetElementPtr t arr [ix]
-getElementPtr a t@(VectorScalarType v) i arr ix
-  | VectorType n tp <- v
-  , IntegralDict   <- integralDict i
-  -- We do not put padding between vector elelemnts. LLVM does do that to
-  -- align the elements, which is an issue for Vectors of a size which isn't
-  -- a power of two. Hence we need to do more work to compute the pointer to a
-  -- Vector. We treat a 'Buffer (Vec n t)' as a 'Ptr t' (as seen in the type
-  -- families ScalarArrayDataR and MarshalArg).
-  = if popCount n == 1
-       then do
-          -- The vector size is a power of two, so there is no difference in
-          -- padding between our and LLVM's semantics. We cast the pointer to a
-          -- pointer of vectors and then perform GetElementPointer on that.
-          arr' <- instr' $ PtrCast ptrVecType arr
-          instr' $ GetElementPtr t arr' [ix]
-       else do
-          -- 
-          ix'  <- instr' $ Mul (IntegralNumType i) ix (integral i (fromIntegral n))
-          p'   <- instr' $ GetElementPtr (SingleScalarType tp) arr [integral i 0, ix']
-          instr' $ PtrCast ptrVecType p'
-  where
-    ptrVecType = PtrPrimType (ScalarPrimType (VectorScalarType v)) a
+getElementPtr _ _ _ arr ix = instr' $ GetElementPtr $ GEP1 arr ix
 
 
--- | A wrapper around the Load instruction, which splits non-power-of-two
--- SIMD types into a sequence of smaller reads.
---
--- Note: [Non-power-of-two loads and stores]
---
--- Splitting this operation a sequence of smaller power-of-two stores does
--- not work because those instructions may (will) violate alignment
--- restrictions, causing a general protection fault. So, we simply
--- implement those stores as a sequence of stores for each individual
--- element.
---
--- We could do runtime checks for what the pointer alignment is and perform
--- a vector store when we align on the right boundary, but I'm not sure the
--- extra complexity is worth it.
+-- | A wrapper around the Load instruction.
+-- This function used to be needed when we treated Vector types (Vec)
+-- differently, now it directly emits a single Load instruction.
 --
 load :: AddrSpace
      -> ScalarType e
      -> Volatility
      -> Operand (Ptr e)
-     -> Maybe (LLVM.MetadataNodeID, LLVM.MetadataNodeID)
+     -> Maybe (MetadataNodeID, MetadataNodeID)
      -> CodeGen arch (Operand e)
-load addrspace e v p alias
-  | SingleScalarType{} <- e = instrMD' (Load e v p) (bufferMetadata' alias)
-  | VectorScalarType s <- e
-  , VectorType n base  <- s
-  , m                  <- fromIntegral n
-  = if popCount m == 1
-       then instr' $ Load e v p
-       else do
-         p' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType (SingleScalarType base)) addrspace) p
-         --
-         let go i w
-               | i >= m    = return w
-               | otherwise = do
-                   q  <- instr' $ GetElementPtr (SingleScalarType base) p' [integral integralType i]
-                   r  <- instrMD' (Load (SingleScalarType base) v q) (bufferMetadata' alias)
-                   w' <- instr' $ InsertElement i w r
-                   go (i+1) w'
-         --
-         go 0 (undef e)
+load addrspace e v p alias = instrMD' (Load e v p) (bufferMetadata' alias)
 
 
--- | A wrapper around the Store instruction, which splits non-power-of-two
--- SIMD types into a sequence of smaller writes.
---
--- See: [Non-power-of-two loads and stores]
+-- | A wrapper around the Store instruction.
+-- This function used to be needed when we treated Vector types (Vec)
+-- differently, now it directly emits a single Store instruction.
 --
 store :: AddrSpace
       -> Volatility
       -> ScalarType e
       -> Operand (Ptr e)
       -> Operand e
-      -> Maybe (LLVM.MetadataNodeID, LLVM.MetadataNodeID)
+      -> Maybe (MetadataNodeID, MetadataNodeID)
       -> CodeGen arch ()
-store addrspace volatility e p v alias
-  | SingleScalarType{} <- e = do
+store addrspace volatility e p v alias = do
     _ <- instrMD' (Store volatility p v) (bufferMetadata' alias)
     return ()
-  | VectorScalarType s <- e
-  , VectorType n base  <- s
-  , m                  <- fromIntegral n
-  = if popCount m == 1
-       then do_ $ Store volatility p v
-       else do
-         p' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType (SingleScalarType base)) addrspace) p
-         --
-         let go i
-               | i >= m    = return ()
-               | otherwise = do
-                   x <- instr' $ ExtractElement i v
-                   q <- instr' $ GetElementPtr (SingleScalarType base) p' [integral integralType i]
-                   _ <- instrMD' (Store volatility q x) (bufferMetadata' alias)
-                   go (i+1)
-         go 0
-
-{--
-      let
-          go :: forall arch n t. SingleType t -> Int32 -> Operand (Ptr t) -> Operand (Vec n t) -> CodeGen arch ()
-          go t offset ptr' val'
-            | offset >= size = return ()
-            | otherwise      = do
-                let remaining = size - offset
-                    this      = setBit 0 (finiteBitSize remaining - countLeadingZeros remaining - 1)
-
-                    vec'      = VectorType (fromIntegral this) t
-                    ptr_vec'  = PtrPrimType (ScalarPrimType (VectorScalarType vec')) addrspace
-
-                    repack :: Int32 -> Operand (Vec m t) -> CodeGen arch (Operand (Vec m t))
-                    repack j u
-                      | j >= this = return u
-                      | otherwise = do
-                          x <- instr' $ ExtractElement (offset + j) val'
-                          v <- instr' $ InsertElement j u x
-                          repack (j+1) v
-
-                if remaining == 1
-                   then do
-                     x <- instr' $ ExtractElement offset val'
-                     _ <- instr' $ Store volatility ptr' x
-                     return ()
-
-                   else do
-                     v <- repack 0 $ undef (VectorScalarType vec')
-                     p <- instr' $ PtrCast ptr_vec' ptr'
-                     _ <- instr' $ Store volatility p v
-
-                     q <- instr' $ GetElementPtr ptr' [integral integralType this]
-                     go t (offset + this) q val'
-
-      ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType (SingleScalarType base)) addrspace) ptr
-      go base 0 ptr' val
-
-  where
-    VectorType (fromIntegral -> size) base = vec
---}
 
 tupleAlloca :: forall e arch. TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr e))
 tupleAlloca TupRunit = return TupRunit
 tupleAlloca (TupRpair t1 t2) = TupRpair <$> tupleAlloca t1 <*> tupleAlloca t2
 tupleAlloca (TupRsingle tp)
   | Refl <- reprIsSingle @ScalarType @e @Ptr tp
-  = TupRsingle <$> instr' (Alloca $ ScalarPrimType tp)
+  = TupRsingle <$> hoistAlloca (ScalarPrimType tp)
 
 tuplePtrs :: forall full arch. TypeR full -> Operand (Ptr (Struct full)) -> CodeGen arch (TupR Operand (Distribute Ptr full))
 tuplePtrs tp ptr = go TupleIdxSelf tp
@@ -391,7 +282,7 @@ tuplePtrs tp ptr = go TupleIdxSelf tp
       = TupRpair <$> go (tupleLeft tupleIdx) t1 <*> go (tupleRight tupleIdx) t2
     go tupleIdx (TupRsingle t)
       | Refl <- reprIsSingle @ScalarType @e @Ptr t
-      = TupRsingle <$> instr' (GetStructElementPtr (ScalarPrimType t) ptr tupleIdx)
+      = TupRsingle <$> instr' (GetElementPtr $ gepStruct (ScalarPrimType t) ptr tupleIdx)
 
 tupleStore :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> Operands e -> CodeGen arch ()
 tupleStore TupRunit _ _ = return ()
@@ -426,3 +317,11 @@ intOfIndex (ShapeRsnoc shr) (OP_Pair sh sz) (OP_Pair ix i)
         b <- A.mul numType a sz
         c <- A.add numType b i
         return c
+
+firstArrayPtr :: forall arch env idxEnv m sh e. Envs env idxEnv -> Arg env (m sh e) -> CodeGen arch (Operands Int)
+firstArrayPtr envs (ArgArray _ _ _ vars) = case flattenTupR vars of
+  [] -> return $ A.liftInt 0
+  Exists var : _ -> case prjPartial (varIdx var) $ envsGround envs of
+    Just (GroundOperandBuffer (IRBuffer ptr _ _ _ _)) ->
+      instr $ PtrToInt TypeInt ptr
+    _ -> internalError "Buffer not found in firstArrayPtr"

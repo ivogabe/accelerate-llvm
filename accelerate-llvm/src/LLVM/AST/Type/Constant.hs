@@ -4,6 +4,7 @@
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MagicHash             #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE TemplateHaskell       #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
@@ -20,12 +21,13 @@ module LLVM.AST.Type.Constant
   where
 
 import LLVM.AST.Type.Downcast
+import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Representation
 
-import qualified LLVM.AST.Constant                                  as LLVM
-import qualified LLVM.AST.Float                                     as LLVM
-import qualified LLVM.AST.Type                                      as LLVM
+import Data.Array.Accelerate.Error
+
+import qualified Text.LLVM                                          as LLVM
 
 import Data.Constraint
 import Data.Primitive.ByteArray
@@ -61,52 +63,50 @@ data Constant a where
                         -> Name a
                         -> Constant a
 
-  ConstantGetElementPtr :: ScalarType a
-                        -> Constant (Ptr a)
-                        -> [Constant i]
-                        -> Constant (Ptr a)
+  ConstantGetElementPtr :: GetElementPtr Constant (Ptr a) (Ptr b)
+                        -> Constant (Ptr b)
 
 
--- | Convert to llvm-hs
+-- | Convert to llvm-pretty
 --
-instance Downcast (Constant a) LLVM.Constant where
+instance Downcast (Constant a) (LLVM.Typed LLVM.Value) where
   downcast = \case
-    UndefConstant t             -> LLVM.Undef (downcast t)
-#if MIN_VERSION_llvm_hs(15,0,0)
-    GlobalReference _ n         -> LLVM.GlobalReference (downcast n)
-    ConstantGetElementPtr t n i -> LLVM.GetElementPtr inbounds (downcast t) (downcast n) (downcast i)
-#else
-    GlobalReference t n         -> LLVM.GlobalReference (downcast t) (downcast n)
-    ConstantGetElementPtr _ n i -> LLVM.GetElementPtr inbounds (downcast n) (downcast i)
-#endif
-    BooleanConstant x           -> LLVM.Int 1 (toInteger (fromEnum x))
-    NullPtrConstant t           -> LLVM.Null (downcast t)
+    UndefConstant t             -> LLVM.Typed (downcast t) LLVM.ValUndef
+    GlobalReference t n         -> LLVM.Typed (downcast t) (LLVM.ValSymbol (nameToPrettyS n))
+    instr@(ConstantGetElementPtr (GEP n i1 path)) -> case typeOf n of
+      PrimType (PtrPrimType t _) ->
+        LLVM.Typed (downcast (typeOf instr)) (LLVM.ValConstExpr (LLVM.ConstGEP inbounds Nothing (downcast t) (downcast n) (downcast i1 : downcastGEPIndex (num numType) path t)))
+      PrimType (ScalarPrimType _) -> internalError "Ptr impossible"
+    BooleanConstant x           -> LLVM.Typed (LLVM.PrimType (LLVM.Integer 1)) (LLVM.ValInteger (toInteger (fromEnum x)))
+    NullPtrConstant t           -> LLVM.Typed (downcast t) LLVM.ValNull
     ScalarConstant t x          -> scalar t x
     where
-      scalar :: ScalarType s -> s -> LLVM.Constant
+      scalar :: ScalarType s -> s -> LLVM.Typed LLVM.Value
       scalar (SingleScalarType s) = single s
       scalar (VectorScalarType s) = vector s
 
-      single :: SingleType s -> s -> LLVM.Constant
+      single :: SingleType s -> s -> LLVM.Typed LLVM.Value
       single (NumSingleType s) = num s
 
-      vector :: VectorType s -> s -> LLVM.Constant
-      vector (VectorType _ s) (Vec ba#)
-        = LLVM.Vector
-        $ map (single s)
+      vector :: VectorType s -> s -> LLVM.Typed LLVM.Value
+      vector (VectorType n s) (Vec ba#)
+        = LLVM.Typed (LLVM.Vector (fromIntegral n) (downcast s))
+        $ LLVM.ValVector (downcast s)
+        $ map (LLVM.typedValue . single s)
         $ singlePrim s `withDict` foldrByteArray (:) [] (ByteArray ba#)
 
-      num :: NumType s -> s -> LLVM.Constant
+      num :: NumType s -> s -> LLVM.Typed LLVM.Value
       num (IntegralNumType s) v
         | IntegralDict <- integralDict s
-        = LLVM.Int (LLVM.typeBits (downcast s)) (fromIntegral v)
+        = LLVM.Typed (downcast s) (LLVM.ValInteger (fromIntegral v))
 
       num (FloatingNumType s) v
-        = LLVM.Float
-        $ case s of
-            TypeFloat                        -> LLVM.Single v
-            TypeDouble                       -> LLVM.Double v
-            TypeHalf | Half (CUShort u) <- v -> LLVM.Half u
+        = case s of
+            TypeFloat                        -> LLVM.Typed (LLVM.PrimType (LLVM.FloatType LLVM.Float)) (LLVM.ValFloat v)
+            TypeDouble                       -> LLVM.Typed (LLVM.PrimType (LLVM.FloatType LLVM.Double)) (LLVM.ValDouble v)
+            TypeHalf | Half (CUShort _u) <- v ->
+              -- LLVM.Typed (LLVM.PrimType (LLVM.FloatType LLVM.Half)) (_ _u)
+              error "TODO: Half floats unsupported by llvm-pretty"
 
       singlePrim :: SingleType s -> Dict (Prim s)
       singlePrim (NumSingleType s) = numPrim s
@@ -141,5 +141,4 @@ instance TypeOf Constant where
   typeOf (UndefConstant t)             = t
   typeOf (NullPtrConstant t)           = t
   typeOf (GlobalReference t _)         = t
-  typeOf (ConstantGetElementPtr _ p _) = typeOf p
-
+  typeOf (ConstantGetElementPtr gep)   = typeOf gep

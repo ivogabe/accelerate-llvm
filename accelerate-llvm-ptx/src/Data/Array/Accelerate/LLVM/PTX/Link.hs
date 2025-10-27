@@ -15,8 +15,8 @@
 
 module Data.Array.Accelerate.LLVM.PTX.Link (
 
-  module Data.Array.Accelerate.LLVM.Link,
-  ExecutableR(..), FunctionTable(..), Kernel(..), ObjectCode,
+  KernelObject(..), ObjectCode,
+  link,
   linkFunctionQ,
 
 ) where
@@ -27,8 +27,8 @@ import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.LLVM.State
 
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
-import Data.Array.Accelerate.LLVM.PTX.Compile
 import Data.Array.Accelerate.LLVM.PTX.Context
+import Data.Array.Accelerate.LLVM.PTX.Compile
 import Data.Array.Accelerate.LLVM.PTX.Link.Cache
 import Data.Array.Accelerate.LLVM.PTX.Link.Object
 import Data.Array.Accelerate.LLVM.PTX.Target
@@ -41,40 +41,35 @@ import Control.Monad.State
 import Data.ByteString.Short.Char8                                  ( ShortByteString, unpack )
 import Formatting
 import Foreign.Ptr
-import Language.Haskell.TH.Extra
+import Data.Array.Accelerate.TH.Compat
+import qualified Data.ByteString                                    as B
 import qualified Data.ByteString.Unsafe                             as B
 import Prelude                                                      as P hiding ( lookup )
 
-
-instance Link PTX where
-  data ExecutableR PTX = PTXR { ptxExecutable :: {-# UNPACK #-} !(Lifetime FunctionTable)
-                              }
-  linkForTarget = link
-
-
 -- | Load the generated object code into the current CUDA context.
 --
-link :: ObjectR PTX -> LLVM PTX (ExecutableR PTX)
-link (ObjectR uid cfg obj) = do
+link :: ObjectR f -> LLVM PTX (Lifetime KernelObject)
+link (ObjectR uid sym cfg objFname) = do
   target <- gets llvmTarget
   cache  <- gets ptxKernelTable
-  funs   <- liftIO $ dlsym uid cache $ do
+  fun    <- liftIO $ dlsym uid cache $ do
     -- Load the SASS object code into the current CUDA context
+    obj <- B.readFile objFname
     jit <- B.unsafeUseAsCString obj $ \p -> CUDA.loadDataFromPtrEx (castPtr p) []
     let mdl = CUDA.jitModule jit
 
     -- Extract the kernel functions
-    nm  <- FunctionTable `fmap` mapM (uncurry (linkFunction mdl)) cfg
+    nm  <- linkFunction mdl sym cfg
     oc  <- newLifetime mdl
 
     -- Finalise the module by unloading it from the CUDA context
     addFinalizer oc $ do
-      Debug.traceM Debug.dump_ld ("ld: unload module: " % formatFunctionTable) nm
+      Debug.traceM Debug.dump_ld ("ld: unload module: " % shown) sym
       withContext (ptxContext target) (CUDA.unload mdl)
 
     return (nm, oc)
   --
-  return $! PTXR funs
+  return $! fun
 
 
 -- | Extract the named function from the module and package into a Kernel
@@ -86,7 +81,7 @@ linkFunction
     :: CUDA.Module                      -- the compiled module
     -> ShortByteString                  -- __global__ entry function name
     -> LaunchConfig                     -- launch configuration for this global function
-    -> IO Kernel
+    -> IO KernelObject
 linkFunction mdl name configure =
   fst `fmap` linkFunctionQ mdl name configure
 
@@ -94,7 +89,7 @@ linkFunctionQ
     :: CUDA.Module
     -> ShortByteString
     -> LaunchConfig
-    -> IO (Kernel, CodeQ (Int -> Int))
+    -> IO (KernelObject, CodeQ (Int -> Int))
 linkFunctionQ mdl name configure = do
   f     <- CUDA.getFun mdl name
   regs  <- CUDA.requires f CUDA.NumRegs
@@ -116,7 +111,7 @@ linkFunctionQ mdl name configure = do
                       (CUDA.activeThreadBlocks occ)
 
   Debug.traceM Debug.dump_cc ("cc: " % builder % "\n               " % builder) msg1 msg2
-  return (Kernel name f dsmem cta grid, gridQ)
+  return (KernelObject name f dsmem cta grid, gridQ)
 
 
 {--

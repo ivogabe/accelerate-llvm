@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes  #-}
 {-# LANGUAGE GADTs                #-}
 {-# LANGUAGE LambdaCase           #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RankNTypes           #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE TypeApplications     #-}
@@ -32,7 +33,6 @@ module Data.Array.Accelerate.LLVM.CodeGen.Base (
 
 ) where
 
-import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function                                       as LLVMType
@@ -44,6 +44,7 @@ import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
+import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
@@ -51,7 +52,7 @@ import Data.Array.Accelerate.Representation.Array                   ( Array, Arr
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 
-import qualified LLVM.AST.Global                                    as LLVM
+import qualified Text.LLVM                                          as LP
 
 import Data.Monoid
 import Data.String
@@ -158,43 +159,62 @@ shapeOperandsToList = \shr ops -> reverse $ go shr ops
 -- Function parameters
 -- -------------------
 
--- | Call a global function. The function declaration is inserted into the
--- symbol table.
+-- | Call a global function.
+--
+-- If the function being called has a special prefix (see 'labelIsAccPrelude'),
+-- the call instruction is generated as-is; otherwise (the common case), a
+-- function declaration is also inserted into the symbol table, resulting in a
+-- 'declare' statement in the LLVM module. A special prelude function is
+-- currently not allowed to have any function attributes.
+--
+-- TODO: The original llvm-hs code put function attributes both on the external
+-- function declaration and on the call instruction; this code puts them only
+-- on the declaration. We should compare LLVM IR / benchmark to see if this is
+-- an issue (@llvm-pretty@ does not yet support function attributes on call
+-- instructions).
 --
 call :: GlobalFunction t -> Arguments t -> [FunctionAttribute] -> CodeGen arch (Operands (Result t))
 call f args attrs = do
-  let decl      = (downcast f) { LLVM.functionAttributes = downcast attrs' }
-      attrs'    = map Right attrs
+  let decl      = (downcast f) { LP.decAttrs = downcast attrs }
       --
-      go :: GlobalFunction t -> Function Callable t
-      go (Body t k l) = Body t k (CallGlobal l)
-      go (Lam t x l)  = Lam t x (go l)
+      go :: GlobalFunction t -> (Label, Function Callable t)
+      go (Body t k l) = (l, Body t k $ CallGlobal l)
+      go (Lam t x l)  = Lam t x <$> go l
   --
-  declare decl
-  instr (Call (go f) args attrs')
+  let (lab, f') = go f
+  if labelIsAccPrelude lab
+    then case attrs of
+           [] -> return ()
+           _ -> internalError "Function attributes passed to a call to an acc prelude LLVM function"
+    else declareExternFunc decl
+
+  -- TODO: this only puts the attributes on the external function declaration,
+  -- not on the call instruction. The original llvm-hs code also put them on
+  -- the call instruction. Should compare LLVM IR / benchmark to see if this is
+  -- an issue (llvm-pretty does not yet support function attributes on call
+  -- instructions).
+  instr (Call f' args)
 
 call' :: GlobalFunction t -> Arguments t -> [FunctionAttribute] -> CodeGen arch (Operand (Result t))
 call' f args attrs = do
-  let decl      = (downcast f) { LLVM.functionAttributes = downcast attrs' }
-      attrs'    = map Right attrs
+  let decl      = (downcast f) { LP.decAttrs = downcast attrs }
       --
       go :: GlobalFunction t -> Function Callable t
       go (Body t k l) = Body t k (CallGlobal l)
       go (Lam t x l)  = Lam t x (go l)
   --
-  declare decl
-  instr' (Call (go f) args attrs')
+  declareExternFunc decl
+  instr' (Call (go f) args)
 
 callLocal :: Function Label t -> Arguments t -> [FunctionAttribute] -> CodeGen arch (Operand (Result t))
-callLocal f args attrs = do
+callLocal f args _attrs = do
   let
-      attrs'    = map Right attrs
       --
       go :: Function Label t -> Function Callable t
       go (Body t k l) = Body t k (CallLocal l)
       go (Lam t x l)  = Lam t x (go l)
   --
-  instr' (Call (go f) args attrs')
+  instr' (Call (go f) args)
 
 -- | Converts a tuple of scalars to a function type
 type family MarshalScalars a res where
@@ -214,7 +234,7 @@ bindScalars' prefix fresh (TupRpair t1 t2)
   = (fresh2, case (eq1, eq2) of (Refl, Refl) -> Refl, f1 . f2, OP_Pair o1 o2)
 bindScalars' prefix fresh (TupRsingle tp)
   | Refl <- marshalScalar @t @f tp = (fresh + 1, Refl, LLVMType.Lam (ScalarPrimType tp) name, ir tp operand)
-  where
+    where
     operand = LocalReference (PrimType $ ScalarPrimType tp) name
     name = fromString $ prefix ++ show fresh
 bindScalars' _      fresh (TupRunit) = (fresh, Refl, id, OP_Unit)

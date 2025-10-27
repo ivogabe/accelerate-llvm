@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP                   #-}
 {-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -9,6 +10,7 @@
 {-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE TypeOperators         #-}
+{-# LANGUAGE TypeSynonymInstances  #-}
 {-# LANGUAGE ViewPatterns          #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
@@ -24,10 +26,10 @@
 module LLVM.AST.Type.Instruction
   where
 
-import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Constant                             ( Constant(ScalarConstant) )
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function
+import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.InlineAssembly
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
@@ -36,27 +38,21 @@ import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction.Atomic                   ( Atomicity, MemoryOrdering )
 import LLVM.AST.Type.Instruction.Compare                  ( Ordering(..) )
 import LLVM.AST.Type.Instruction.RMW                      ( RMWOperation )
-import LLVM.AST.Type.Instruction.Volatile                 ( Volatility )
+import LLVM.AST.Type.Instruction.Volatile                 ( Volatility(..) )
 
-import qualified LLVM.AST.Constant                        as LLVM ( Constant(GlobalReference, Int) )
-import qualified LLVM.AST.CallingConvention               as LLVM
-import qualified LLVM.AST.FloatingPointPredicate          as FP
-import qualified LLVM.AST.Instruction                     as LLVM
-import qualified LLVM.AST.IntegerPredicate                as IP
-import qualified LLVM.AST.Operand                         as LLVM ( Operand(..), CallableOperand )
-import qualified LLVM.AST.ParameterAttribute              as LLVM ( ParameterAttribute )
-import qualified LLVM.AST.RMWOperation                    as LLVM ( RMWOperation )
-import qualified LLVM.AST.Type                            as LLVM ( Type(..) )
-import qualified LLVM.AST.AddrSpace                       as LLVM
+import qualified Text.LLVM                                as LP
 
 import Data.Array.Accelerate.AST                          ( PrimBool )
 import Data.Array.Accelerate.AST.Idx
+import qualified Data.Array.Accelerate.Debug.Internal     as Debug
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Type
 import Data.Primitive.Vec
 
 import Prelude                                            hiding ( Ordering(..), quot, rem, div, isNaN, tail )
-
+import Data.Bifunctor                                     ( bimap )
+import Data.Maybe                                         ( fromMaybe )
+import System.IO.Unsafe                                   ( unsafePerformIO )
 
 -- | Non-terminating instructions
 --
@@ -251,27 +247,8 @@ data Instruction a where
 
   -- <http://llvm.org/docs/LangRef.html#getelementptr-instruction>
   --
-  GetElementPtr   :: ScalarType a
-                  -> Operand (Ptr a)
-                  -> [Operand i]
-                  -> Instruction (Ptr a)
-
-  GetPtrElementPtr
-                  :: Operand (Ptr (Ptr a))
-                  -> Operand i
-                  -> Instruction (Ptr (Ptr a))
-
-  GetStructElementPtr
-                  :: PrimType t
-                  -> Operand (Ptr (Struct a))
-                  -> TupleIdx a t
-                  -> Instruction (Ptr t)
-
-  GetArrayElementPtr
-                  :: IntegralType i
-                  -> Operand (Ptr (SizedArray t))
-                  -> Operand i
-                  -> Instruction (Ptr t)
+  GetElementPtr   :: GetElementPtr Operand (Ptr a) (Ptr b)
+                  -> Instruction (Ptr b)
 
   -- <http://llvm.org/docs/LangRef.html#i-fence>
   --
@@ -366,7 +343,10 @@ data Instruction a where
                   -> Operand (Ptr a)
                   -> Instruction (Ptr b)
 
-  -- PtrToInt
+  PtrToInt        :: IntegralType b
+                  -> Operand (Ptr a)
+                  -> Instruction b
+
   -- IntToPtr
   -- AddrSpaceCast
 
@@ -398,7 +378,6 @@ data Instruction a where
   --
   Call            :: Function Callable t
                   -> Arguments t
-                  -> [Either GroupID FunctionAttribute]
                   -> Instruction (Result t)
 
   -- <http://llvm.org/docs/LangRef.html#select-instruction>
@@ -421,80 +400,63 @@ data Named ins a where
   Do   :: ins ()          -> Named ins ()
 
 
--- | Convert to llvm-hs
+-- | Convert to llvm-pretty
 --
-instance Downcast (Instruction a) LLVM.Instruction where
-  downcast instruction = downcastInstruction instruction []
-
-downcastInstruction :: Instruction a -> LLVM.InstructionMetadata -> LLVM.Instruction
-downcastInstruction instruction md = case instruction of
+instance Downcast (Instruction a) LP.Instr where
+  downcast = \case
     Add t x y             -> add t (downcast x) (downcast y)
     Sub t x y             -> sub t (downcast x) (downcast y)
     Mul t x y             -> mul t (downcast x) (downcast y)
     Quot t x y            -> quot t (downcast x) (downcast y)
     Rem t x y             -> rem t (downcast x) (downcast y)
-    Div _ x y             -> LLVM.FDiv fmf (downcast x) (downcast y) md
-    ShiftL _ x i          -> LLVM.Shl nsw nuw (downcast x) (downcast i) md
-    ShiftRL _ x i         -> LLVM.LShr exact (downcast x) (downcast i) md
-    ShiftRA _ x i         -> LLVM.AShr exact (downcast x) (downcast i) md
-    BAnd _ x y            -> LLVM.And (downcast x) (downcast y) md
-    LAnd x y              -> LLVM.And (downcast x) (downcast y) md
-    BOr _ x y             -> LLVM.Or (downcast x) (downcast y) md
-    LOr x y               -> LLVM.Or (downcast x) (downcast y) md
-    BXor _ x y            -> LLVM.Xor (downcast x) (downcast y) md
-    LNot x                -> LLVM.Xor (downcast x) (LLVM.ConstantOperand (LLVM.Int 1 1)) md
-    InsertElement i v x   -> LLVM.InsertElement (downcast v) (downcast x) (constant i) md
-    ExtractElement i v    -> LLVM.ExtractElement (downcast v) (constant i) md
+    Div _ x y             -> LP.Arith (LP.FDiv fmf) (downcast x) (LP.typedValue (downcast y))
+    ShiftL _ x i          -> LP.Bit (LP.Shl nsw nuw) (downcast x) (LP.typedValue (downcast i))
+    ShiftRL _ x i         -> LP.Bit (LP.Lshr exact) (downcast x) (LP.typedValue (downcast i))
+    ShiftRA _ x i         -> LP.Bit (LP.Ashr exact) (downcast x) (LP.typedValue (downcast i))
+    BAnd _ x y            -> LP.Bit LP.And (downcast x) (LP.typedValue (downcast y))
+    LAnd x y              -> LP.Bit LP.And (downcast x) (LP.typedValue (downcast y))
+    BOr _ x y             -> LP.Bit LP.Or (downcast x) (LP.typedValue (downcast y))
+    LOr x y               -> LP.Bit LP.Or (downcast x) (LP.typedValue (downcast y))
+    BXor _ x y            -> LP.Bit LP.Xor (downcast x) (LP.typedValue (downcast y))
+    LNot x                -> LP.Bit LP.Xor (downcast x) (LP.ValInteger 1)
+    -- If we decide to compile power-of-two Vecs to LLVM Vectors (instead of Arrays),
+    -- then we must use InsertElt and ExtractElt instead of InsertValue and ExtractValue.
+    InsertElement i v x   -> LP.InsertValue (downcast v) (downcast x) [i]
+      -- | vecIsPowerOfTwo v -> LP.InsertElt (downcast v) (downcast x) (constant i)
+    ExtractElement i v    -> LP.ExtractValue (downcast v) [i]
+      -- | vecIsPowerOfTwo v -> LP.ExtractElt (downcast v) (constant i)
     ExtractValue _ i s    -> extractStruct i s
-    Alloca tp             -> LLVM.Alloca (downcast tp) Nothing 0 md
-#if MIN_VERSION_llvm_hs_pure(15,0,0)
-    Load t v p            -> LLVM.Load (downcast v) (downcast t) (downcast p) atomicity alignment md
-    LoadBool v p          -> LLVM.Load (downcast v) (downcast $ BoolPrimType) (downcast p) atomicity alignment md
-    LoadPtr v p           -> LLVM.Load (downcast v) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment md
-    LoadStruct v p        -> LLVM.Load (downcast v) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment md
-    GetElementPtr t n i   -> LLVM.GetElementPtr inbounds (downcast t) (downcast n) (downcast i) md
-    GetPtrElementPtr n i  -> LLVM.GetElementPtr inbounds (downcast $ type' @(Ptr Int8)) (downcast n) [downcast i] md
-    GetStructElementPtr _ n i -> case typeOf n of
-      (PrimType (PtrPrimType t@(skipTypeAlias -> StructPrimType _ tp) _)) ->
-                             LLVM.GetElementPtr inbounds (downcast t) (downcast n) [constant (0 :: Int), constant (fromIntegral $ tupleIdxToInt tp i :: Int32)] md
-      _ -> internalError "Struct ptr impossible"
-    GetArrayElementPtr _ n i -> case typeOf n of
-      (PrimType (PtrPrimType t _)) ->
-        LLVM.GetElementPtr inbounds (downcast t) (downcast n) [constant (0 :: Int), downcast i] md
-      _ -> internalError "Ptr impossible"
-#else
-    Load _ v p            -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
-    LoadBool v p          -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
-    LoadPtr v p           -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
-    LoadStruct v p        -> LLVM.Load (downcast v) (downcast p) atomicity alignment md
-    GetElementPtr _ n i   -> LLVM.GetElementPtr inbounds (downcast n) (downcast i) md
-    GetPtrElementPtr n i  -> LLVM.GetElementPtr inbounds (downcast n) [downcast i] md
-    GetStructElementPtr _ n i -> case typeOf n of
-      PrimType (PtrPrimType (StructPrimType _ tp) _) ->
-                             LLVM.GetElementPtr inbounds (downcast n) [constant (0 :: Int), constant (fromIntegral $ tupleIdxToInt tp i :: Int32)] md
-      _ -> internalError "Struct ptr impossible"
-    GetArrayElementPtr _ n i -> LLVM.GetElementPtr inbounds (downcast n) [constant (0 :: Int), downcast i] md
-#endif
-    Store v p x           -> LLVM.Store (downcast v) (downcast p) (downcast x) atomicity alignment md
-    Fence a               -> LLVM.Fence (downcast a) md
-    CmpXchg _ v p x y a m -> cmpXchg (downcast v) (downcast p) (downcast x) (downcast y) (downcast a) (downcast m) md
-    AtomicRMW t v f p x a -> atomicRMW (downcast v) (downcast (t,f)) (downcast p) (downcast x) (downcast a) md
-    Trunc _ t x           -> LLVM.Trunc (downcast x) (downcast t) md
-    IntToBool _ x         -> LLVM.Trunc (downcast x) (LLVM.IntegerType 1) md
-    FTrunc _ t x          -> LLVM.FPTrunc (downcast x) (downcast t) md
+    Alloca tp             -> LP.Alloca (downcast tp) Nothing Nothing
+    Store vol p x         -> LP.Store (downcast vol) (downcast x) (downcast p) atomicity alignment
+    Load t vol p          -> LP.Load (downcast vol) (downcast t) (downcast p) atomicity alignment
+    LoadBool vol p        -> LP.Load (downcast vol) (downcast BoolPrimType) (downcast p) atomicity alignment
+    LoadPtr vol p         -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment
+    LoadStruct vol p      -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment
+    GetElementPtr (GEP n i1 path) -> case typeOf n of
+      PrimType (PtrPrimType t _) ->
+        LP.GEP inbounds (downcast t) (downcast n) (downcast i1 : downcastGEPIndex constantTyped path t)
+      PrimType (ScalarPrimType _) -> internalError "Ptr impossible"
+    Fence a               -> LP.Fence (downcast (fst a)) (downcast (snd a))
+    -- TODO: this is now a STRONG cmpxchg. Is that what was intended? I think llvm-hs defaulted to strong, but the LLVM source is very obtuse about this.
+    CmpXchg _ v p x y a m -> LP.CmpXchg False (downcast v) (downcast p) (downcast x) (downcast y) (downcast (fst a)) (downcast (snd a)) (downcast m)
+    AtomicRMW t v f p x a -> LP.AtomicRW (downcast v) (downcast (t,f)) (downcast p) (downcast x) (downcast (fst a)) (downcast (snd a))
+    Trunc _ t x           -> LP.Conv LP.Trunc (downcast x) (downcast t)
+    IntToBool _ x         -> LP.Conv LP.Trunc (downcast x) (LP.PrimType (LP.Integer 1))
+    FTrunc _ t x          -> LP.Conv LP.FpTrunc (downcast x) (downcast t)
     Ext a b x             -> ext a b (downcast x)
-    BoolToInt a x         -> LLVM.ZExt (downcast x) (downcast a) md
-    BoolToFP x a          -> LLVM.UIToFP (downcast a) (downcast x) md
-    FExt _ t x            -> LLVM.FPExt (downcast x) (downcast t) md
+    BoolToInt a x         -> LP.Conv LP.ZExt (downcast x) (downcast a)
+    BoolToFP x a          -> LP.Conv LP.UiToFp (downcast a) (downcast x)
+    FExt _ t x            -> LP.Conv LP.FpExt (downcast x) (downcast t)
     FPToInt _ b x         -> float2int b (downcast x)
     IntToFP a b x         -> int2float a b (downcast x)
-    BitCast t x           -> LLVM.BitCast (downcast x) (downcast t) md
-    PtrCast t x           -> LLVM.BitCast (downcast x) (downcast t) md
-    Phi t e               -> LLVM.Phi (downcast t) (downcast e) md
-    Select p x y          -> LLVM.Select (downcast p) (downcast x) (downcast y) md
+    BitCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
+    PtrCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
+    PtrToInt t x          -> LP.Conv LP.PtrToInt (downcast x) (downcast t)
+    Phi t e               -> LP.Phi (fmfFor t) (downcast t) (map (bimap (LP.typedValue . downcast) (LP.Named . labelToPrettyI)) e)
+    Select p x y          -> LP.Select (fmfFor $ typeOf x) (downcast p) (downcast x) (LP.typedValue (downcast y))
     IsNaN _ x             -> isNaN (downcast x)
     Cmp t p x y           -> cmp t p (downcast x) (downcast y)
-    Call f args a         -> call f args a
+    Call f args           -> call f args
 
     where
       nsw :: Bool       -- no signed wrap
@@ -506,178 +468,154 @@ downcastInstruction instruction md = case instruction of
       exact :: Bool     -- does not lose any information
       exact = False
 
+      fmf :: [LP.FMF]
+      fmf = fastmathFlags
+
       inbounds :: Bool
       inbounds = True
 
-      atomicity :: Maybe LLVM.Atomicity
+      atomicity :: Maybe LP.AtomicOrdering
       atomicity = Nothing
 
-      alignment :: Word32
-      alignment = 0
+      alignment :: Maybe LP.Align
+      alignment = Nothing  -- was: 0
 
-      fmf :: LLVM.FastMathFlags
-#if MIN_VERSION_llvm_hs_pure(6,0,0)
-      fmf = LLVM.FastMathFlags
-              { LLVM.allowReassoc    = True
-              , LLVM.noNaNs          = True
-              , LLVM.noInfs          = True
-              , LLVM.noSignedZeros   = True
-              , LLVM.allowReciprocal = True
-              , LLVM.allowContract   = True
-              , LLVM.approxFunc      = True
-              }
-#else
-      fmf = LLVM.UnsafeAlgebra -- allow everything
-#endif
+      -- fmf :: LLVM.FastMathFlags
+      -- fmf = LLVM.FastMathFlags
+      --         { LLVM.allowReassoc    = True
+      --         , LLVM.noNaNs          = True
+      --         , LLVM.noInfs          = True
+      --         , LLVM.noSignedZeros   = True
+      --         , LLVM.allowReciprocal = True
+      --         , LLVM.allowContract   = True
+      --         , LLVM.approxFunc      = True
+      --         }
 
-      -- LLVM 13 added optional alignment parameters. These behave differently from
-      -- the alignment in the load and store instructions though. An alignment of 0
-      -- here means that the alignment is the same as the size of the type, while an
-      -- alignment of 0 in those instructions means that the alignment is defined by
-      -- the ABI.
-      --
-      cmpXchg   :: Bool -> LLVM.Operand -> LLVM.Operand -> LLVM.Operand -> LLVM.Atomicity -> LLVM.MemoryOrdering -> LLVM.InstructionMetadata -> LLVM.Instruction
-      atomicRMW :: Bool -> LLVM.RMWOperation -> LLVM.Operand -> LLVM.Operand -> LLVM.Atomicity -> LLVM.InstructionMetadata -> LLVM.Instruction
-#if MIN_VERSION_llvm_hs_pure(13,0,0)
-      cmpXchg volatile address expected replacement atomicity' failureMemoryOrdering metadata =
-        LLVM.CmpXchg volatile address expected replacement alignment atomicity' failureMemoryOrdering metadata
-      atomicRMW volatile rmwOperation address value atomicity' metadata =
-        LLVM.AtomicRMW volatile rmwOperation address value alignment atomicity' metadata
-#else
-      cmpXchg volatile address expected replacement atomicity' failureMemoryOrdering metadata =
-        LLVM.CmpXchg volatile address expected replacement atomicity' failureMemoryOrdering metadata
-      atomicRMW volatile rmwOperation address value atomicity' metadata =
-        LLVM.AtomicRMW volatile rmwOperation address value atomicity' metadata
-#endif
+      constantTyped :: IsScalar a => a -> LP.Typed LP.Value
+      constantTyped x = downcast (ConstantOperand (ScalarConstant scalarType x))
 
-      constant :: IsScalar a => a -> LLVM.Operand
-      constant x = downcast (ConstantOperand (ScalarConstant scalarType x))
+      constant :: IsScalar a => a -> LP.Value
+      constant = LP.typedValue . constantTyped
 
-      add :: NumType a -> LLVM.Operand -> LLVM.Operand -> LLVM.Instruction
-      add IntegralNumType{} x y = LLVM.Add nsw nuw x y md
-      add FloatingNumType{} x y = LLVM.FAdd fmf    x y md
+      add :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      add IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Add nsw nuw) x y
+      add FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FAdd fmf)    x y
 
-      sub :: NumType a -> LLVM.Operand -> LLVM.Operand -> LLVM.Instruction
-      sub IntegralNumType{} x y = LLVM.Sub nsw nuw x y md
-      sub FloatingNumType{} x y = LLVM.FSub fmf    x y md
+      sub :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      sub IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Sub nsw nuw) x y
+      sub FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FSub fmf)    x y
 
-      mul :: NumType a -> LLVM.Operand -> LLVM.Operand -> LLVM.Instruction
-      mul IntegralNumType{} x y = LLVM.Mul nsw nuw x y md
-      mul FloatingNumType{} x y = LLVM.FMul fmf    x y md
+      mul :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      mul IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Mul nsw nuw) x y
+      mul FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FMul fmf)    x y
 
-      quot :: IntegralType a -> LLVM.Operand -> LLVM.Operand -> LLVM.Instruction
-      quot t x y
-        | signed t  = LLVM.SDiv exact x y md
-        | otherwise = LLVM.UDiv exact x y md
+      quot :: IntegralType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      quot t x (LP.Typed _ y)
+        | signed t  = LP.Arith (LP.SDiv exact) x y
+        | otherwise = LP.Arith (LP.UDiv exact) x y
 
-      rem :: IntegralType a -> LLVM.Operand -> LLVM.Operand -> LLVM.Instruction
-      rem t x y
-        | signed t  = LLVM.SRem x y md
-        | otherwise = LLVM.URem x y md
+      rem :: IntegralType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      rem t x (LP.Typed _ y)
+        | signed t  = LP.Arith LP.SRem x y
+        | otherwise = LP.Arith LP.URem x y
 
-      extractStruct :: TupleIdx s t -> Operand (Struct s) -> LLVM.Instruction
-      extractStruct ix s = LLVM.ExtractValue (downcast s) [fromIntegral int] md
+      -- vecIsPowerOfTwo :: Operand (Vec n a1) -> Bool
+      -- vecIsPowerOfTwo v = case typeOf v of
+      --   PrimType (ScalarPrimType (VectorScalarType (VectorType n _))) -> popCount n == 1
+      --   _ -> internalError "Vector impossible"
+
+      extractStruct :: TupleIdx s t -> Operand (Struct s) -> LP.Instr
+      extractStruct ix s = LP.ExtractValue (downcast s) [fromIntegral int]
         where
           int = case typeOf s of
             PrimType (StructPrimType _ tuple) -> tupleIdxToInt tuple ix
             _ -> internalError "Struct impossible"
 
-      ext :: BoundedType a -> BoundedType b -> LLVM.Operand -> LLVM.Instruction
+      ext :: BoundedType a -> BoundedType b -> LP.Typed LP.Value -> LP.Instr
       ext a (downcast -> b) x
-        | signed a  = LLVM.SExt x b md
-        | otherwise = LLVM.ZExt x b md
+        | signed a  = LP.Conv LP.SExt x b
+        | otherwise = LP.Conv LP.ZExt x b
 
-      float2int :: IntegralType b -> LLVM.Operand -> LLVM.Instruction
+      float2int :: IntegralType b -> LP.Typed LP.Value -> LP.Instr
       float2int t@(downcast -> t') x
-        | signed t  = LLVM.FPToSI x t' md
-        | otherwise = LLVM.FPToUI x t' md
+        | signed t  = LP.Conv LP.FpToSi x t'
+        | otherwise = LP.Conv LP.FpToUi x t'
 
-      int2float :: IntegralType a -> FloatingType b -> LLVM.Operand -> LLVM.Instruction
+      int2float :: IntegralType a -> FloatingType b -> LP.Typed LP.Value -> LP.Instr
       int2float a (downcast -> b) x
-        | signed a  = LLVM.SIToFP x b md
-        | otherwise = LLVM.UIToFP x b md
+        | signed a  = LP.Conv LP.SiToFp x b
+        | otherwise = LP.Conv LP.UiToFp x b
 
-      isNaN :: LLVM.Operand -> LLVM.Instruction
-      isNaN x = LLVM.FCmp FP.UNO x x md
+      isNaN :: LP.Typed LP.Value -> LP.Instr
+      isNaN x = LP.FCmp fmf LP.Funo x (LP.typedValue x)
 
-      cmp :: SingleType a -> Ordering -> LLVM.Operand -> LLVM.Operand -> LLVM.Instruction
-      cmp t p x y =
+      cmp :: SingleType a -> Ordering -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      cmp t p x (LP.Typed _ y) =
         case t of
-          NumSingleType FloatingNumType{} -> LLVM.FCmp (fp p) x y md
-          _ | signed t                    -> LLVM.ICmp (si p) x y md
-            | otherwise                   -> LLVM.ICmp (ui p) x y md
+          NumSingleType FloatingNumType{} -> LP.FCmp fastmathFlags (fp p) x y
+          _ | signed t                    -> LP.ICmp (si p) x y
+            | otherwise                   -> LP.ICmp (ui p) x y
         where
-          fp :: Ordering -> FP.FloatingPointPredicate
-          fp EQ = FP.OEQ
-          fp NE = FP.ONE
-          fp LT = FP.OLT
-          fp LE = FP.OLE
-          fp GT = FP.OGT
-          fp GE = FP.OGE
+          fp :: Ordering -> LP.FCmpOp
+          fp EQ = LP.Foeq
+          fp NE = LP.Fone
+          fp LT = LP.Folt
+          fp LE = LP.Fole
+          fp GT = LP.Fogt
+          fp GE = LP.Foge
 
-          si :: Ordering -> IP.IntegerPredicate
-          si EQ = IP.EQ
-          si NE = IP.NE
-          si LT = IP.SLT
-          si LE = IP.SLE
-          si GT = IP.SGT
-          si GE = IP.SGE
+          si :: Ordering -> LP.ICmpOp
+          si EQ = LP.Ieq
+          si NE = LP.Ine
+          si LT = LP.Islt
+          si LE = LP.Isle
+          si GT = LP.Isgt
+          si GE = LP.Isge
 
-          ui :: Ordering -> IP.IntegerPredicate
-          ui EQ = IP.EQ
-          ui NE = IP.NE
-          ui LT = IP.ULT
-          ui LE = IP.ULE
-          ui GT = IP.UGT
-          ui GE = IP.UGE
+          ui :: Ordering -> LP.ICmpOp
+          ui EQ = LP.Ieq
+          ui NE = LP.Ine
+          ui LT = LP.Iult
+          ui LE = LP.Iule
+          ui GT = LP.Iugt
+          ui GE = LP.Iuge
 
       pointeeType :: Type (Ptr t) -> PrimType t
       pointeeType (PrimType (PtrPrimType tp _)) = tp
       pointeeType _ = internalError "Ptr impossible"
 
-      call :: Function Callable t -> Arguments t -> [Either GroupID FunctionAttribute] -> LLVM.Instruction
-#if MIN_VERSION_llvm_hs_pure(15,0,0)
-      call f args as = LLVM.Call tail LLVM.C [] fun_ty target (travArgs args) (downcast as) md
-#else
-      call f args as = LLVM.Call tail LLVM.C []        target (travArgs args) (downcast as) md
-#endif
+      call :: Function Callable t -> Arguments t -> LP.Instr
+      call f args = LP.Call tail fmFlags fun_ty target $ travArgs args
         where
           trav :: Function Callable t
-               -> ( [LLVM.Type]                                 -- argument types
-                  , Maybe LLVM.TailCallKind                     -- calling kind
-                  , LLVM.Type                                   -- return type
-                  , LLVM.CallableOperand                        -- function name or inline assembly
+               -> ( [LP.Type]           -- argument types
+                  , Bool                -- tail call?
+                  , LP.Type             -- return type
+                  , [LP.FMF]            -- fast-math flags for this return type
+                  , LP.Value            -- function name or inline assembly
                   )
           trav (Body u k o) =
             case o of
-              CallAssembly asm -> ([], downcast k, downcast u, Left  (downcast (LLVM.FunctionType ret argt False, asm)))
-#if MIN_VERSION_llvm_hs_pure(15,0,0)
-              CallGlobal n -> ([], downcast k, downcast u, Right (LLVM.ConstantOperand (LLVM.GlobalReference (downcast n))))
-              CallLocal n  -> ([], downcast k, downcast u, Right (LLVM.LocalReference ptr_fun_ty (downcast n)))
-#else
-              CallGlobal n -> ([], downcast k, downcast u, Right (LLVM.ConstantOperand (LLVM.GlobalReference ptr_fun_ty (downcast n))))
-              CallLocal n  -> ([], downcast k, downcast u, Right (LLVM.LocalReference ptr_fun_ty (downcast n)))
-#endif
+              CallAssembly asm -> error "TODO inline assembly"
+                -- ([], downcast k, downcast u, Left  (downcast (LLVM.FunctionType ret argt False, asm)))
+              CallGlobal n -> ([], fromMaybe False (downcast k), downcast u, fmfFor u, LP.ValSymbol (labelToPrettyS n))
+              CallLocal n  -> ([], fromMaybe False (downcast k), downcast u, fmfFor u, LP.ValIdent (labelToPrettyI n))
           trav (Lam t _ l)  =
-            let (ts, k, r, n) = trav l
-            in  (downcast t : ts, k, r, n)
+            let (ts, k, r, fm, n) = trav l
+            in  (downcast t : ts, k, r, fm, n)
 
-          travArgs :: Arguments t -> [(LLVM.Operand, [LLVM.ParameterAttribute])]
-          travArgs (ArgumentsCons operand attrs args') = (downcast operand, attrs) : travArgs args'
+          travArgs :: Arguments t -> [LP.Typed LP.Value]
+          -- TODO: Place the attrs on the argument, when llvm-pretty supports that
+          travArgs (ArgumentsCons operand attrs args') = downcast operand : travArgs args'
           travArgs ArgumentsNil = []
 
-          (argt, tail, ret, target) = trav f
-          fun_ty                          = LLVM.FunctionType ret argt False
-#if !MIN_VERSION_llvm_hs_pure(15,0,0)
-          ptr_fun_ty                      = LLVM.PointerType fun_ty (LLVM.AddrSpace 0)
-#else
-          ptr_fun_ty                      = LLVM.PointerType (LLVM.AddrSpace 0)
-#endif
+          (argt, tail, ret, fmFlags, target) = trav f
+          fun_ty = LP.FunTy ret argt False
 
 
-instance Downcast (i a) i' => Downcast (Named i a) (LLVM.Named i') where
-  downcast (x := op) = downcast x LLVM.:= downcast op
-  downcast (Do op)   = LLVM.Do (downcast op)
+instance Downcast (Named Instruction a) LP.Stmt where
+  downcast (x := op) = LP.Result (nameToPrettyI x) (downcast op) []
+  downcast (Do op)   = LP.Effect (downcast op) []
 
 
 instance TypeOf Instruction where
@@ -710,15 +648,7 @@ instance TypeOf Instruction where
       PrimType (PtrPrimType t _) -> PrimType t
       _ -> internalError "Ptr impossible"
     Store{}               -> VoidType
-    GetElementPtr _ x _   -> typeOf x
-    GetPtrElementPtr x _  -> typeOf x
-    GetStructElementPtr t x _ -> case typeOf x of
-      PrimType (PtrPrimType _ addr) -> PrimType $ PtrPrimType t addr
-      _ -> internalError "Ptr impossible"
-    GetArrayElementPtr _ x _ -> case typeOf x of
-      PrimType (PtrPrimType (ArrayPrimType _ t) addr)
-        -> PrimType $ PtrPrimType t addr
-      _ -> internalError "Array ptr impossible"
+    GetElementPtr gep     -> typeOf gep
     Fence{}               -> VoidType
     CmpXchg t _ _ _ _ _ _ -> PrimType . StructPrimType False $ ScalarPrimType (SingleScalarType (NumSingleType (IntegralNumType t))) `pair` primType
     AtomicRMW _ _ _ _ x _ -> typeOf x
@@ -733,11 +663,12 @@ instance TypeOf Instruction where
     BoolToFP t _          -> floating t
     BitCast t _           -> scalar t
     PtrCast t _           -> PrimType t
+    PtrToInt t _          -> integral t
     Cmp{}                 -> type'
     IsNaN{}               -> type'
     Phi t _               -> PrimType t
     Select _ x _          -> typeOf x
-    Call f _ _            -> fun f
+    Call f _              -> fun f
     where
       typeOfVec :: HasCallStack => Operand (Vec n a) -> Type a
       typeOfVec x
@@ -771,4 +702,47 @@ instance TypeOf Instruction where
       fun :: Function kind a -> Type (Result a)
       fun (Lam _ _ l)  = fun l
       fun (Body t _ _) = t
+
+-- Utility to construct GetElementPtr instructions for accessing a field of a struct.
+-- This function is not in GetElementPtr.hs as that would cause a cycle.
+gepStruct :: PrimType b -> Operand (Ptr (Struct a)) -> TupleIdx a b -> GetElementPtr Operand (Ptr (Struct a)) (Ptr b)
+gepStruct tp struct idx = GEP struct (ConstantOperand $ ScalarConstant scalarTypeInt32 0) $ GEPStruct tp idx GEPEmpty
+
+{-# NOINLINE fmfEnabled #-}
+fmfEnabled :: Bool
+fmfEnabled = unsafePerformIO $ Debug.getFlag Debug.fast_math
+
+fastmathFlags :: [LP.FMF]
+fastmathFlags
+  -- We explicitly exclude 'nnan' and 'ninf' from this list, because apparently
+  -- we care about NaN and Inf values:
+  --   <https://github.com/AccelerateHS/accelerate/issues/407>
+  | fmfEnabled = [LP.Fnsz, LP.Farcp, LP.Fcontract, LP.Fafn, LP.Freassoc]
+  | otherwise  = []
+
+-- | Some LLVM instructions allow fast math flags only if their return type is
+-- a "compatible floating-point type". This class returns fast-math flags given
+-- such a return type.
+class FmfFor s where
+  fmfFor :: s a -> [LP.FMF]
+
+instance FmfFor PrimType where
+  fmfFor BoolPrimType = []
+  fmfFor (ScalarPrimType t) = fmfFor t
+  fmfFor PtrPrimType{} = []
+  fmfFor (ArrayPrimType _ t) = fmfFor t
+  fmfFor StructPrimType{} = []  -- TODO: homogeneous float structs are allowed by LLVM
+  fmfFor NamedPrimType{} = []
+
+instance FmfFor ScalarType where
+  fmfFor (SingleScalarType st) = fmfFor st
+  fmfFor (VectorScalarType (VectorType _ st)) = fmfFor st
+
+instance FmfFor SingleType where
+  fmfFor (NumSingleType (IntegralNumType _)) = []
+  fmfFor (NumSingleType (FloatingNumType _)) = fastmathFlags
+
+instance FmfFor Type where
+  fmfFor VoidType = []
+  fmfFor (PrimType t) = fmfFor t
 

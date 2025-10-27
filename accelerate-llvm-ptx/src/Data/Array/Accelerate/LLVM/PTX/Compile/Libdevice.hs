@@ -19,12 +19,12 @@ module Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice (
 
 ) where
 
-import LLVM.Context
-import qualified LLVM.Module                                        as LLVM
+-- import LLVM.Context
+-- import qualified LLVM.Module                                        as LLVM
 
-import LLVM.AST                                                     as AST
-import LLVM.AST.Global                                              as G
-import LLVM.AST.Linkage
+-- import LLVM.AST                                                     as AST
+-- import LLVM.AST.Global                                              as G
+-- import LLVM.AST.Linkage
 
 import Data.Array.Accelerate.LLVM.PTX.Compile.Libdevice.Load
 import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
@@ -65,6 +65,8 @@ import qualified Data.HashSet                                       as Set
 --
 --   6. Run the standard optimisation pipeline
 --
+-- Source: https://releases.llvm.org/19.1.0/docs/NVPTXUsage.html#linking-with-libdevice
+--
 withLibdeviceNVPTX
     :: DeviceProperties
     -> Context
@@ -76,7 +78,7 @@ withLibdeviceNVPTX dev ctx ast next =
     True        -> LLVM.withModuleFromAST ctx ast next
     False       ->
       LLVM.withModuleFromAST ctx ast                          $ \mdl  ->
-      LLVM.withModuleFromAST ctx nvvmReflect                  $ \refl ->
+      LLVM.withModuleFromAST ctx nvvmReflectModule            $ \refl ->
       LLVM.withModuleFromAST ctx (internalise externs libdev) $ \libd -> do
         LLVM.linkModules mdl refl
         LLVM.linkModules mdl libd
@@ -116,7 +118,7 @@ withLibdeviceNVVM dev ctx ast next =
   where
     externs             = analyse ast
     withlib             = not (Set.null externs)
-    lib | withlib       = [ nvvmReflect, libdevice arch ]
+    lib | withlib       = [ nvvmReflectBitcode, libdevice_bc arch ]
         | otherwise     = []
 
     arch        = computeCapability dev

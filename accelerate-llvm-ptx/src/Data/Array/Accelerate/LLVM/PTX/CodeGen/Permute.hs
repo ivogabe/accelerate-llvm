@@ -16,17 +16,15 @@
 --
 
 module Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (
-
-  mkPermute,
-
+  atomically
 ) where
 
-import Data.Array.Accelerate.AST
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.AST.Operation (Mut, Arg (ArgArray), Modifier (Mut))
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -45,11 +43,11 @@ import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.PTX.Target
 
-import LLVM.AST.Type.AddrSpace
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW                                as RMW
 import LLVM.AST.Type.Instruction.Volatile
+import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
@@ -59,7 +57,7 @@ import Control.Monad                                                ( void )
 import Control.Monad.State                                          ( gets )
 import Prelude
 
-
+{-
 -- Forward permutation specified by an indexing mapping. The resulting array is
 -- initialised with the given defaults, and any further values that are permuted
 -- into the result array are added to the current value using the combination
@@ -164,7 +162,7 @@ mkPermute_rmw uid aenv (ArrayR shr tp) shr' rmw update project marr = do
           _ | TupRsingle (SingleScalarType s)   <- tp
             , adata                             <- irArrayData arrOut
             -> do
-                  addr <- instr' $ GetElementPtr (SingleScalarType s) (asPtr defaultAddrSpace (op s adata)) [op integralType j]
+                  addr <- instr' $ GetElementPtr $ GEP1 (SingleScalarType s) (asPtr defaultAddrSpace (op s adata)) (op integralType j)
                   --
                   let
                       rmw_integral :: IntegralType t -> Operand (Ptr t) -> Operand t -> CodeGen PTX ()
@@ -257,22 +255,25 @@ mkPermute_mutex uid aenv (ArrayR shr tp) shr' combine project marr =
           writeArray TypeInt arrOut j r
 
     return_
-
+-}
 
 -- Atomically execute the critical section only when the lock at the given
 -- array indexed is obtained.
 --
 atomically
-    :: IRArray (Vector Word32)
-    -> Operands Int
-    -> CodeGen PTX a
-    -> CodeGen PTX a
-atomically barriers i action = do
-  dev <- liftCodeGen $ gets ptxDeviceProperties
-  if computeCapability dev >= Compute 7 0
-     then atomically_thread barriers i action
-     else atomically_warp   barriers i action
-
+  :: Envs env idxEnv
+  -> Arg env (Mut sh' Word32)
+  -> Operands Int
+  -> CodeGen PTX ()
+  -> CodeGen PTX ()
+atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
+  | irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
+  = do
+    dev <- liftCodeGen $ gets ptxDeviceProperties
+    if computeCapability dev >= Compute 7 0
+      then atomically_thread bufptr i action
+      else atomically_warp   bufptr i action
+  | otherwise = internalError "Expected IRBufferScopeArray"
 
 -- Atomically execute the critical section only when the lock at the given
 -- array index is obtained. The thread spins waiting for the lock to be
@@ -290,7 +291,7 @@ atomically barriers i action = do
 -- Requires independent thread scheduling features of SM7+.
 --
 atomically_thread
-    :: IRArray (Vector Word32)
+    :: Operand (Ptr Word32)
     -> Operands Int
     -> CodeGen PTX a
     -> CodeGen PTX a
@@ -309,7 +310,7 @@ atomically_thread barriers i action = do
   exit  <- newBlock "spinlock.exit"
   ns    <- fresh i32
 
-  addr  <- instr' $ GetElementPtr scalarType (asPtr defaultAddrSpace (op integralType (irArrayData barriers))) [op integralType i]
+  addr  <- instr' $ GetElementPtr $ GEP1 barriers (op integralType i)
   top   <- br entry
 
   -- Loop until this thread has completed its critical section. If the slot
@@ -392,7 +393,7 @@ atomically_thread barriers i action = do
 -- > } while ( done == 0 );
 --
 atomically_warp
-    :: IRArray (Vector Word32)
+    :: Operand (Ptr Word32)
     -> Operands Int
     -> CodeGen PTX a
     -> CodeGen PTX a
@@ -407,7 +408,7 @@ atomically_warp barriers i action = do
   end   <- newBlock "spinlock.critical-end"
   exit  <- newBlock "spinlock.exit"
 
-  addr <- instr' $ GetElementPtr scalarType (asPtr defaultAddrSpace (op integralType (irArrayData barriers))) [op integralType i]
+  addr <- instr' $ GetElementPtr $ GEP1 barriers (op integralType i)
   _    <- br entry
 
   -- Loop until this thread has completed its critical section. If the slot was

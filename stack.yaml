@@ -2,7 +2,7 @@
 # For advanced use and comprehensive documentation of the format, please see:
 # https://docs.haskellstack.org/en/stable/yaml_configuration/
 
-resolver: lts-21.7
+resolver: lts-21.25
 
 packages:
 - accelerate-llvm
@@ -15,20 +15,13 @@ extra-deps:
 - OptDir-0.0.4
 - bytestring-encoding-0.1.2.0
 - ../accelerate
-- github: msakai/haskell-MIP
-  commit: 4295aa21a24a30926b55770c55ac00f749fb8a39
-  subdirs:
-  - MIP
+- MIP-0.2.0.0
 
-- github: llvm-hs/llvm-hs
-  commit: e4b3cfa47e72f094ab109884f18acfc666b0fb7d  # llvm-15
-  # commit: 423220bffac4990d019fc088c46c5f25310d5a33  # llvm-12
-  subdirs:
-    - llvm-hs
-    - llvm-hs-pure
-# - highs-lp-0.0
-# - linear-programming-0.0.1
-# - comfort-array-0.5.5
+- github: tomsmeding/llvm-pretty
+  commit: a253a7fc1c62f4825ffce6b2507eebc5dadff32c
+
+- monadLib-3.10.3@sha256:026ba169762e63f0fe5f5c78829808f522a28730043bc3ad9b7c146baedf709f,637
+
 # Override default flag values for local packages and extra-deps
 # flags:
 
