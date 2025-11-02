@@ -244,7 +244,7 @@ mkFoldSegP_block uid aenv repr@(ArrayR shr tp) intTp combine mseed marr mseg = d
                                                go (TupRpair a b) = OP_Pair (go a) (go b)
                                                go (TupRsingle t) = ir t (undef t)
                                            in
-                                           return $ go tp
+                                           return $ undefs tp
 
                                z <- i32 v'
                                y <- reduceBlock dev tp combine (Just z) x
