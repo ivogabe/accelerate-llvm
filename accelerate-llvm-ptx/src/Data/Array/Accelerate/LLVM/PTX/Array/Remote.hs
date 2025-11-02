@@ -50,6 +50,9 @@ import qualified Formatting                                         as F
 
 import GHC.Base                                                     ( Int(..), Double(..), int2Double# )
 
+import System.Mem
+import System.IO.Unsafe
+import Data.IORef
 
 -- Events signal once a computation has completed
 --
@@ -63,6 +66,7 @@ instance Remote.RemoteMemory (LLVM PTX) where
   mallocRemote n
     | n <= 0    = return (Just CUDA.nullDevPtr)
     | otherwise = do
+        liftIO $ hintGCAlloc n
         name <- gets ptxDeviceName
         liftIO $ do
           ep <- try (CUDA.mallocArray n)
@@ -100,7 +104,20 @@ instance Remote.RemoteMemory (LLVM PTX) where
   totalRemoteMem       = liftIO $ snd `fmap` CUDA.getMemInfo
   remoteAllocationSize = return 4096
 
+-- Once per 1GB of allocations, perform garbage collection.
+-- CUDA allocations are outside of the Haskell world, so we have to force
+-- GC to deallocate them indirectly.
+hintGCAlloc :: Int -> IO ()
+hintGCAlloc bytes = do
+  let maxSize = 1024 * 1024 * 1024
+  gc <- atomicModifyIORef' bytesAllocatedSinceGC $ \sz ->
+    let newSize = sz + bytes
+    in if newSize < maxSize then (newSize, False) else (newSize `mod` maxSize, True)
+  if gc then performGC else return ()
 
+{-# NOINLINE bytesAllocatedSinceGC #-}
+bytesAllocatedSinceGC :: IORef Int
+bytesAllocatedSinceGC = unsafePerformIO $ newIORef 0
 
 -- | Allocate an array in the remote memory space sufficient to hold the given
 -- number of elements, and associated with the given host side array. Space will
