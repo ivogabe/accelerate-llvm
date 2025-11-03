@@ -57,7 +57,8 @@ import Lens.Micro.Mtl
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Array.Accelerate.Trafo.Exp.Substitution
-import Control.Monad.State.Strictimport Data.Array.Accelerate.Trafo.Exp.Bounds.ArrayInstr
+import Control.Monad.State.Strict
+import Data.Array.Accelerate.Trafo.Exp.Bounds.ArrayInstr
 import Data.Array.Accelerate.Trafo.Exp.Bounds.Optimize.ArrayInstr
 
 import Data.Foldable (fold)
@@ -153,7 +154,7 @@ instance BCOperation NativeOp where
   bcOperation NGenerate    = defaultBCGenerate NGenerate
   bcOperation NMap         = defaultBCMap NMap
   bcOperation NBackpermute = defaultBCBackpermute NBackpermute
-  bcOperation NPermute     = defaultBCPermuteWithIndices NPermute
+  bcOperation NPermute     = defaultBCPermute NPermute
   bcOperation NPermute'    = defaultBCPermuteUnique NPermute'
   bcOperation (NScan dir)  = defaultBCScan (NScan dir)
   bcOperation (NScan1 dir) = defaultBCScan1 (NScan1 dir)
