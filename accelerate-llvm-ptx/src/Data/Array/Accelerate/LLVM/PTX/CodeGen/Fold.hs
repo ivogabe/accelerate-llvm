@@ -24,6 +24,7 @@ import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Shape                   hiding ( size )
 import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.Error
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -39,9 +40,9 @@ import Data.Array.Accelerate.LLVM.Compile.Cache
 
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
-import Data.Array.Accelerate.LLVM.PTX.CodeGen.Generate
 import Data.Array.Accelerate.LLVM.PTX.Target
 
+import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
 import qualified Foreign.CUDA.Analysis                              as CUDA
@@ -52,6 +53,7 @@ import Data.String                                                  ( fromString
 import Data.Bits                                                    as P
 import Prelude                                                      as P
 
+{-
 
 -- Reduce an array along the innermost dimension. The reduction function must be
 -- associative to allow for an efficient parallel implementation, but the
@@ -670,18 +672,27 @@ reduceBlockShfl dev tp combine size = warpReduce >=> warpAggregate
             app2 combine x =<< readArray TypeInt32 smem step
         else
           return input
-
+-}
 
 -- Equivalent to 'reduceWarpSmem' but using warp shuffle instructions
 --
 reduceWarpShfl
-    :: forall e aenv. DeviceProperties
+    :: forall e. DeviceProperties
     -> TypeR e
-    -> IRFun2 PTX aenv (e -> e -> e)                  -- ^ combination function
-    -> Maybe (Operands Int32)                         -- ^ number of items that will be reduced by this warp, otherwise all lanes are valid
-    -> Operands e                                     -- ^ this thread's input value
-    -> CodeGen PTX (Operands e)                       -- ^ final result
-reduceWarpShfl dev typer combine size = reduce 0
+    -> Maybe (IRExp PTX e)                       -- ^ identity value
+    -> IRFun2 PTX (e -> e -> e)                  -- ^ combination function
+    -> Maybe (Operands Int32)                    -- ^ number of items that will be reduced by this warp, otherwise all lanes are valid
+    -> Operands e                                -- ^ this thread's input value
+    -> CodeGen PTX (Operands e)                  -- ^ final result
+reduceWarpShfl dev typer (Just identity) combine (Just size) = \value -> do
+  -- If not all lanes are active, and we know an identity value,
+  -- then make all lanes active and use the identity value in the previously inactive lanes.
+  lane  <- laneId
+  valid <- A.lt singleType lane (liftInt32 (P.fromIntegral (CUDA.warpSize dev)))
+  identity' <- identity
+  value' <- select typer valid value identity'
+  reduceWarpShfl dev typer (Just identity) combine Nothing value
+reduceWarpShfl dev typer _ combine size = reduce 0
   where
     log2 :: Double -> Double
     log2  = P.logBase 2
@@ -711,7 +722,25 @@ reduceWarpShfl dev typer combine size = reduce 0
                   else return x
           reduce (step + 1) x'
 
+-- In a warp, reduce the values from shared memory to a single value.
+reduceFromSMem
+    :: forall e. DeviceProperties
+    -> TypeR e
+    -> Maybe (IRExp PTX e)
+    -> IRFun2 PTX (e -> e -> e)
+    -> Int
+    -> Operand Int32 -- Number of warps = number of used entries in shared memory
+    -> TupR Operand (Distribute Ptr (Distribute SizedArray e))
+    -> CodeGen PTX (Operands e)
+reduceFromSMem dev tp identity fun maxSize size smem
+  | maxSize /= CUDA.warpSize dev = internalError "Expected that the maximum number of warps is equal to the warp size"
+  | otherwise = do
+    lane <- laneId
+    ptr <- tupleArrayGep tp smem lane
+    value <- tupleLoad tp ptr
+    reduceWarpShfl dev tp identity fun (Just $ OP_Int32 size) value
 
+{-
 
 -- Reduction loops
 -- ---------------
@@ -754,7 +783,7 @@ reduceFromTo dev tp from to combine get set = do
                return (lift TupRunit ())
 
   return ()
-
+-}
 
 -- Utilities
 -- ---------
@@ -765,7 +794,7 @@ i32 = A.fromIntegral integralType numType
 int :: Operands Int32 -> CodeGen PTX (Operands Int)
 int = A.fromIntegral integralType numType
 
-imapFromTo
+{- imapFromTo
     :: Operands Int
     -> Operands Int
     -> (Operands Int -> CodeGen PTX ())
@@ -775,4 +804,4 @@ imapFromTo start end body = do
   gd  <- int =<< gridDim
   i0  <- A.add numType start bid
   imapFromStepTo i0 gd end body
-
+-}
