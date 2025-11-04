@@ -173,6 +173,7 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         While c f x                 -> while (expType x) (cvtF1 c) (cvtF1 f) (cvtE x)
         Coerce t1 t2 x              -> coerce t1 t2 =<< cvtE x
         Assert c e                  -> assert (expType e) (cvtE c) (cvtE e)
+        Assume _ e                  -> cvtE e
 
     indexSlice :: SliceIndex slix sl co sh -> Operands slix -> Operands sh -> Operands sl
     indexSlice SliceNil              OP_Unit               OP_Unit          = OP_Unit
