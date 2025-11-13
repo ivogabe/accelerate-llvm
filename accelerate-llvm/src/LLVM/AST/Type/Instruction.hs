@@ -449,6 +449,9 @@ instance Downcast (Instruction a) LP.Instr where
     FExt _ t x            -> LP.Conv LP.FpExt (downcast x) (downcast t)
     FPToInt _ b x         -> float2int b (downcast x)
     IntToFP a b x         -> int2float a b (downcast x)
+    -- TODO: BitCast in llvm doesn't work on our VectorScalarType, as we compile that to an array type in LLVM.
+    -- Solution might be to convert an array to a vector, and then bitcast the vector.
+    -- (And if the output is a vector: bitcast to a vector, then convert the vector to an array).
     BitCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
     PtrCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
     PtrToInt t x          -> LP.Conv LP.PtrToInt (downcast x) (downcast t)
