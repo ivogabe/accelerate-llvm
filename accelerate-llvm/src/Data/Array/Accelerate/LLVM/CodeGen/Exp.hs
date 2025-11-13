@@ -242,8 +242,9 @@ llvmOfOpenExp arrayInstr top env = cvtE top
          -> IROpenExp arch env PrimBool
          -> IROpenExp arch env a
          -> IROpenExp arch env a
-    assert tp c e =
-      A.ifThenElse (tp, bool c) e (trap e)
+    assert tp c e = do
+      A.unless (bool c) trap
+      e
 
     while :: TypeR a
           -> IROpenFun1 arch env (a -> PrimBool)
@@ -417,10 +418,10 @@ pushE env (LeftHandSideSingle tp , e)               = env `Push` op tp e
 pushE env (LeftHandSideWildcard _, _)               = env
 pushE env (LeftHandSidePair l1 l2, (OP_Pair e1 e2)) = pushE env (l1, e1) `pushE` (l2, e2)
 
-trap :: CodeGen arch (Operands a) ->  CodeGen arch (Operands a)
-trap e = do
+trap :: CodeGen arch ()
+trap = do
     _ <- call'
       (F.lamUnnamed (primType @Int64)
         $ F.Body (PrimType (primType @(Ptr Word8))) Nothing (Label "llvm.trap")) 
       ( F.ArgumentsCons (scalar scalarType (-1)) [] F.ArgumentsNil) []
-    e
+    return ()
