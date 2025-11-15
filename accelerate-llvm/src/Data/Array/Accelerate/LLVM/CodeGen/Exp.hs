@@ -58,7 +58,7 @@ import GHC.TypeNats
 import Data.Primitive (Ptr(Ptr))
 import Data.Array.Accelerate.LLVM.CodeGen.Base (call, call')
 import qualified LLVM.AST.Type.Function as F
-import LLVM.AST.Type.Representation (IsPrim(primType), Type (PrimType))
+import LLVM.AST.Type.Representation (IsPrim(primType), Type(..))
 import LLVM.AST.Type.Name (Label(Label))
 
 
@@ -420,8 +420,5 @@ pushE env (LeftHandSidePair l1 l2, (OP_Pair e1 e2)) = pushE env (l1, e1) `pushE`
 
 trap :: CodeGen arch ()
 trap = do
-    _ <- call'
-      (F.lamUnnamed (primType @Int64)
-        $ F.Body (PrimType (primType @(Ptr Word8))) Nothing (Label "llvm.trap")) 
-      ( F.ArgumentsCons (scalar scalarType (-1)) [] F.ArgumentsNil) []
-    return ()
+  _ <- call' (F.Body VoidType Nothing (Label "llvm.trap")) F.ArgumentsNil []
+  return ()
