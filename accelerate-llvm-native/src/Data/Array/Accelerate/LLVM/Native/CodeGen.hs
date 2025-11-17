@@ -490,7 +490,7 @@ parCodeGen descending (FlatOp (NScan dir)
       _ -> internalError "Shape impossible"
 parCodeGen _ _ = Nothing
 
-parCodeGenSharded :: Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (ParLoopCodeGen Native env idxEnv))
+parCodeGenSharded :: Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (NParLoopCodeGen env idxEnv))
 parCodeGenSharded descending (FlatOp NFold
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
@@ -552,7 +552,7 @@ parCodeGenFoldSharded
   -> ExpVars idxEnv (sh, Int)
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
-  -> Exists (ParLoopCodeGen Native env idxEnv)
+  -> Exists (NParLoopCodeGen env idxEnv)
 parCodeGenFoldSharded descending fun Nothing input index codeEnd
   | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
   = parCodeGenFoldSharded descending fun (Just $ mkConstant tp identity) input index codeEnd
@@ -566,7 +566,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
   = parCodeGenFoldCommutative descending fun s i input index codeEnd
   | otherwise = Exists $ ParLoopCodeGen
   -- If we know an identity value, we can implement this without loop peeling
-  (isNothing identity)
+  (CPULoopAnalysis $ isNothing identity)
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
   -- of that block.
