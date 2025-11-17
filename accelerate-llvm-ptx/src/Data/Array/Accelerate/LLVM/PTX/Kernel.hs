@@ -145,7 +145,7 @@ operationName = \case
   PTXGenerate    -> (2, "generate", "generates")
   PTXPermute     -> (5, "permute", "permutes")
   PTXPermute'    -> (5, "permute", "permutes")
-  {-PTXScan LeftToRight
+  PTXScan LeftToRight
                -> (4, "scanl", "scanls")
   PTXScan RightToLeft
                -> (4, "scanr", "scanrs")
@@ -158,4 +158,4 @@ operationName = \case
   PTXScan' RightToLeft
                -> (4, "scanr", "scanrs")
   PTXFold        -> (3, "fold", "folds")
-  PTXFold1       -> (3, "fold", "folds") -}
+  PTXFold1       -> (3, "fold", "folds")
