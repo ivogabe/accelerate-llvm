@@ -34,6 +34,9 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
   atomicAdd_f,
   nanosleep,
 
+  -- Utilities related to thread ids & intrinsics
+  perWarp, perWarp', perThreadBlock, warpPerThreadBlock,
+
   -- Barriers and synchronisation
   __syncthreads, __syncthreads_count, __syncthreads_and, __syncthreads_or,
   __syncwarp, __syncwarp_mask,
@@ -44,7 +47,7 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
   canShfl,
 
   -- Shared memory
-  staticSharedMem,
+  staticSharedMem, staticSharedMemTuple,
   dynamicSharedMem,
   sharedMemAddrSpace, sharedMemVolatility,
 
@@ -131,6 +134,30 @@ laneMask_le = specialPTXReg "llvm.nvvm.read.ptx.sreg.lanemask.le"
 laneMask_gt = specialPTXReg "llvm.nvvm.read.ptx.sreg.lanemask.gt"
 laneMask_ge = specialPTXReg "llvm.nvvm.read.ptx.sreg.lanemask.ge"
 
+-- Executes code once per warp (instead of once per thread)
+perWarp :: CodeGen PTX () -> CodeGen PTX ()
+perWarp action = do
+  lane <- laneId
+  when (A.eq singleType lane (liftInt32 0)) action
+
+perWarp' :: TypeR e -> CodeGen PTX (Operands e) -> CodeGen PTX (Operands e)
+perWarp' tp action = do
+  lane <- laneId
+  value <- A.ifThenElse
+    (tp, A.eq singleType lane (liftInt32 0))
+    action
+    (return $ A.undefs tp)
+  __broadcast tp value
+
+-- Executes code in only one warp per threadblock
+warpPerThreadBlock :: CodeGen PTX () -> CodeGen PTX ()
+warpPerThreadBlock action = do
+  id <- warpId
+  when (A.eq singleType id (liftInt32 0)) action
+
+-- Executes code only once per thread block (instead of once per thread)
+perThreadBlock :: CodeGen PTX () -> CodeGen PTX ()
+perThreadBlock = warpPerThreadBlock . perWarp
 
 -- | NOTE: The special register %warpid as volatile value and is not guaranteed
 --         to be constant over the lifetime of a thread or thread block.
@@ -622,11 +649,10 @@ sharedMemVolatility = Volatile
 -- instead. The assigned value is 'undef', just like what Clang generates for
 -- the internal sdata C++ declaration.
 staticSharedMem
-    :: IRBufferScope
-    -> ScalarType e
+    :: ScalarType e
     -> Word64
-    -> CodeGen PTX (IRBuffer e)
-staticSharedMem scope tp n = do
+    -> CodeGen PTX (Operand (Ptr (SizedArray e)))
+staticSharedMem tp n = do
   name <- freshGlobalName
   let arrayTp = ArrayPrimType n (ScalarPrimType tp)
   let ptrArrayTp = PrimType (PtrPrimType arrayTp sharedMemAddrSpace)
@@ -648,12 +674,24 @@ staticSharedMem scope tp n = do
   -- Return a pointer to the first element of the __shared__ memory array.
   -- We do this rather than just returning the global reference directly due
   -- to how __shared__ memory needs to be indexed with the GEP instruction.
-  p <- instr' $ GetElementPtr
-      $ GEP sm (A.num numType 0 :: Operand Int32)
-      $ GEPArray (A.num numType 0 :: Operand Int32) GEPEmpty
+  -- p <- instr' $ GetElementPtr
+  --     $ GEP sm (A.num numType 0 :: Operand Int32)
+  --     $ GEPArray (A.num numType 0 :: Operand Int32) GEPEmpty
 
-  return $ IRBuffer p sharedMemAddrSpace sharedMemVolatility scope Nothing
+  return sm
 
+staticSharedMemTuple
+  :: forall e.
+     TypeR e
+  -> Word64
+  -> CodeGen PTX (TupR Operand (Distribute Ptr (Distribute SizedArray e)))
+staticSharedMemTuple tp n = case tp of
+  TupRunit -> return TupRunit
+  TupRpair t1 t2 -> TupRpair <$> staticSharedMemTuple t1 n <*> staticSharedMemTuple t2 n
+  TupRsingle t
+    | Refl <- reprIsSingle @ScalarType @e @Ptr t
+    , Refl <- reprIsSingle @ScalarType @e @SizedArray t ->
+      TupRsingle <$> staticSharedMem t n
 
 -- External declaration in shared memory address space. This must be declared in
 -- order to access memory allocated dynamically by the CUDA driver. This results
