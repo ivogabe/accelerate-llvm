@@ -20,7 +20,7 @@
 
 module Data.Array.Accelerate.LLVM.PTX.CodeGen.Scan (
 
-  mkScan, mkScan',
+  scanWarpShfl, scanFromSMem
 
 ) where
 
@@ -29,11 +29,13 @@ import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.Error
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
+import Data.Array.Accelerate.LLVM.CodeGen.Default
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
@@ -43,9 +45,9 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.Compile.Cache
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
-import Data.Array.Accelerate.LLVM.PTX.CodeGen.Generate
 import Data.Array.Accelerate.LLVM.PTX.Target
 
+import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
 import qualified Foreign.CUDA.Analysis                              as CUDA
@@ -58,7 +60,7 @@ import Data.Coerce                                                  as Safe
 import Data.Bits                                                    as P
 import Prelude                                                      as P hiding ( last )
 
-
+{-
 
 -- 'Data.List.scanl' or 'Data.List.scanl1' style exclusive scan, but with the
 -- restriction that the combination function must be associative to enable
@@ -1348,7 +1350,6 @@ scanWarpSMem dir dev tp combine smem = scan 0
 
           scan (step+1) x'
 
-
 scanBlockShfl
     :: forall aenv e.
        Direction
@@ -1414,15 +1415,46 @@ scanBlockShfl dir dev tp combine nelem = warpScan >=> warpPrefix
             LeftToRight -> app2 combine prefix input
             RightToLeft -> app2 combine input prefix
 
+-}
+
 scanWarpShfl
     :: forall aenv e.
        Direction
-    -> DeviceProperties                             -- ^ properties of the target device
+    -> ScanInclusiveness
+    -> DeviceProperties                        -- ^ properties of the target device
     -> TypeR e
-    -> IRFun2 PTX aenv (e -> e -> e)                -- ^ combination function
-    -> Operands e                                   -- ^ calling thread's input element
-    -> CodeGen PTX (Operands e)
-scanWarpShfl dir dev tp combine = scan 0
+    -> Maybe (IRExp PTX e)
+    -> IRFun2 PTX (e -> e -> e)                -- ^ combination function
+    -> Maybe (Operands Int32)                  -- ^ number of items that will be reduced by this warp, otherwise all lanes are valid
+    -> Operands e                              -- ^ calling thread's input element
+    -> CodeGen PTX (Operands e, Operands e)    -- ^ the scanned values and the reduced value. The latter is the same on all lanes of the warp.
+-- In an inclusive scan without an identity value the first value is undefined.
+-- Furthermore, the entire function is undefined for an inclusive scan without
+-- identity if 'size' is zero.
+scanWarpShfl dir inclusiveness dev tp (Just identity) combine (Just size) = \value -> do
+  -- If not all lanes are active, and we know an identity value,
+  -- then make all lanes active and use the identity value in the previously inactive lanes.
+  lane  <- laneId
+  valid <- A.lt singleType lane size
+  identity' <- identity
+  value' <- select tp valid value identity'
+  scanWarpShfl dir inclusiveness dev tp (Just identity) combine Nothing value
+scanWarpShfl dir ScanExclusive dev tp identity combine size = \value -> do
+  (inclusive, reduced) <- scanWarpShfl dir ScanInclusive dev tp identity combine size value
+  exclusive <- __shfl_up tp inclusive (liftWord32 1)
+  case identity of
+    Nothing ->
+      -- If there is no identity, then the first value is undefined.
+      -- Hence we don't need to 'fix' anything there.
+      return (exclusive, reduced)
+    Just identity' -> do
+      identity'' <- identity'
+      lane <- laneId
+      -- Change value of lane zero to identity
+      isFirst <- A.eq singleType lane (liftInt32 0)
+      result <- select tp isFirst identity'' exclusive
+      return (result, reduced)
+scanWarpShfl dir ScanInclusive dev tp identity combine size = scan 0
   where
     log2 :: Double -> Double
     log2 = P.logBase 2
@@ -1431,9 +1463,16 @@ scanWarpShfl dir dev tp combine = scan 0
     steps = P.floor (log2 (P.fromIntegral (CUDA.warpSize dev)))
 
     -- Unfold the scan as a recursive code generation function
-    scan :: Int -> Operands e -> CodeGen PTX (Operands e)
+    scan :: Int -> Operands e -> CodeGen PTX (Operands e, Operands e)
     scan step x
-      | step >= steps = return x
+      | step >= steps = do
+        -- x is the scanned value. Since this is an inclusive scan,
+        -- the last lane has the reduced value of all inputs.
+        lastLane <- case size of
+          Just sz -> A.sub numType sz (liftInt32 1) >>= A.fromIntegral integralType numType
+          Nothing -> return $ liftWord32 $ P.fromIntegral (CUDA.warpSize dev) - 1
+        reduced <- __shfl_idx tp x lastLane
+        return (x, reduced)
       | otherwise     = do
           let offset = 1 `P.shiftL` step
 
@@ -1441,10 +1480,22 @@ scanWarpShfl dir dev tp combine = scan 0
           y    <- __shfl_up tp x (liftWord32 offset)
           lane <- laneId
 
+          -- check whether this thread needs to do anything
+          let condition = A.gte singleType lane (liftInt32 . P.fromIntegral $ offset)
+
+          -- if not all lanes are active, check if this lane is active
+          let condition' = case size of
+                Nothing -> condition
+                Just sz -> do
+                  c1 <- condition
+                  c2 <- A.lt singleType lane sz
+                  A.land c1 c2
+
           -- update partial result if in range
-          x'   <- if (tp, A.gte singleType lane (liftInt32 . P.fromIntegral $ offset))
+          x'   <- if (tp, condition')
                     then do
                       case dir of
+                        -- TODO: Remove the dir argument, and let the caller of this function flip combine if dir is RightToLeft?
                         LeftToRight -> app2 combine y x
                         RightToLeft -> app2 combine x y
 
@@ -1452,6 +1503,29 @@ scanWarpShfl dir dev tp combine = scan 0
                       return x
 
           scan (step+1) x'
+
+-- In a warp, scan the values from shared memory. Computes a left-to-right
+-- exclusive scan. The first value of the output is undefined, unless an
+-- identity value is given. Returns the reduced value.
+scanFromSMem
+    :: forall e.
+       DeviceProperties
+    -> TypeR e
+    -> Maybe (IRExp PTX e)
+    -> IRFun2 PTX (e -> e -> e)
+    -> Int
+    -> Operand Int32 -- Number of warps = number of used entries in shared memory
+    -> TupR Operand (Distribute Ptr (Distribute SizedArray e))
+    -> CodeGen PTX (Operands e)
+scanFromSMem dev tp identity fun maxSize size smem
+  | maxSize /= CUDA.warpSize dev = internalError "Expected that the maximum number of warps is equal to the warp size"
+  | otherwise = do
+    lane <- laneId
+    ptr <- tupleArrayGep tp smem lane
+    value <- tupleLoad tp ptr
+    (scanned, reduced) <- scanWarpShfl LeftToRight ScanExclusive dev tp identity fun (Just $ OP_Int32 size) value
+    tupleStore tp ptr scanned
+    return reduced
 
 -- Utilities
 -- ---------

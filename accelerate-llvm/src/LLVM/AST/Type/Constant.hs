@@ -90,8 +90,8 @@ instance Downcast (Constant a) (LLVM.Typed LLVM.Value) where
 
       vector :: VectorType s -> s -> LLVM.Typed LLVM.Value
       vector (VectorType n s) (Vec ba#)
-        = LLVM.Typed (LLVM.Vector (fromIntegral n) (downcast s))
-        $ LLVM.ValVector (downcast s)
+        = LLVM.Typed (LLVM.Array (fromIntegral n) (downcast s))
+        $ LLVM.ValArray (downcast s)
         $ map (LLVM.typedValue . single s)
         $ singlePrim s `withDict` foldrByteArray (:) [] (ByteArray ba#)
 

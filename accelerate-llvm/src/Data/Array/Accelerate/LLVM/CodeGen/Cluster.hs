@@ -29,6 +29,8 @@ module Data.Array.Accelerate.LLVM.CodeGen.Cluster
   , parCodeGenHasMultipleTileLoops
   , genParallel
   , ParTileLoop(..), ParTileLoops(..)
+  , CPULoopAnalysis(..)
+  , GPULoopAnalysis(..)
   -- Utilities
   , pushIdxEnv
   )
@@ -225,13 +227,14 @@ pushIdxEnv env (LeftHandSideWildcard _, _)               = env
 pushIdxEnv env (LeftHandSidePair l1 l2, (OP_Pair e1 e2)) = pushIdxEnv env (l1, e1) `pushIdxEnv` (l2, e2)
 
 parCodeGens
-  :: CompileForeignExp target
+  :: Monoid analysis
+  => CompileForeignExp target
   -- Generate parallel code for an operation. Only called for operations on the
   -- given loop depth, which were compiled to OpCodeGenLoop.
-  => (forall idxEnv'. FlatOp op env idxEnv' -> Maybe (Exists (ParLoopCodeGen target env idxEnv')))
+  => (forall idxEnv'. FlatOp op env idxEnv' -> Maybe (Exists (ParLoopCodeGen target analysis env idxEnv')))
   -> LoopDepth
   -> OpCodeGens target op env idxEnv
-  -> Maybe (Exists (ParCodeGens target op env idxEnv))
+  -> Maybe (Exists (ParCodeGens target analysis op env idxEnv))
 parCodeGens g depth code
   | Just (Exists parCode) <- parCodeGens' g depth code
   = Just $ Exists $ parHoistDeeperLoops parCode
@@ -241,11 +244,11 @@ parCodeGens g depth code
 -- Helper function for parCodeGens', such that parCodeGens can be implemented as
 -- parHoistDeeperLoops after parCodeGens'
 parCodeGens'
-  :: CompileForeignExp target
-  => (forall idxEnv'. FlatOp op env idxEnv' -> Maybe (Exists (ParLoopCodeGen target env idxEnv')))
+  :: (CompileForeignExp target, Monoid analysis)
+  => (forall idxEnv'. FlatOp op env idxEnv' -> Maybe (Exists (ParLoopCodeGen target analysis env idxEnv')))
   -> LoopDepth
   -> OpCodeGens target op env idxEnv
-  -> Maybe (Exists (ParCodeGens target op env idxEnv))
+  -> Maybe (Exists (ParCodeGens target analysis op env idxEnv))
 parCodeGens' g depth = \case
   GenNil -> Just $ Exists ParGenNil
   GenBind d lhs expr next
@@ -257,7 +260,7 @@ parCodeGens' g depth = \case
     Just (Exists next')
       | depth' == depth ->
         Just $ Exists $ ParGenPar
-          ( ParLoopCodeGen False TupRunit
+          ( ParLoopCodeGen mempty TupRunit
             (\_ _ -> return ())
             (\_ _ -> return ())
             (\_ _ _ _ -> return ())
@@ -270,7 +273,7 @@ parCodeGens' g depth = \case
           next'
       | depth' == depth + 1 ->
         Just $ Exists $ ParGenPar
-          ( ParLoopCodeGen False TupRunit
+          ( ParLoopCodeGen mempty TupRunit
             (\_ _ -> return ())
             (\_ _ -> return ())
             (\_ _ _ _ -> return ())
@@ -298,7 +301,7 @@ parCodeGens' g depth = \case
 
 -- Hoists all ParGenDeeper to before the first ParGenTileLoopBoundary.
 -- Throws an error if this is not possible
-parHoistDeeperLoops :: ParCodeGens target op env idxEnv kernelMemory -> ParCodeGens target op env idxEnv kernelMemory
+parHoistDeeperLoops :: ParCodeGens target analysis op env idxEnv kernelMemory -> ParCodeGens target analysis op env idxEnv kernelMemory
 parHoistDeeperLoops ParGenNil = ParGenNil
 parHoistDeeperLoops (ParGenBind d lhs expr next) = ParGenBind d lhs expr $ parHoistDeeperLoops next
 parHoistDeeperLoops (ParGenPar par next) = ParGenPar par $ parHoistDeeperLoops next
@@ -307,7 +310,7 @@ parHoistDeeperLoops (ParGenTileLoopBoundary next)
   | (deeper, next') <- go next
   = foldr (uncurry ParGenDeeper) (ParGenTileLoopBoundary next') deeper
   where
-    go :: ParCodeGens target op env idxEnv kernelMemory -> ([(LoopDepth, OpCodeGen target op env idxEnv)], ParCodeGens target op env idxEnv kernelMemory)
+    go :: ParCodeGens target analysis op env idxEnv kernelMemory -> ([(LoopDepth, OpCodeGen target op env idxEnv)], ParCodeGens target analysis op env idxEnv kernelMemory)
     go ParGenNil = ([], ParGenNil)
     go ParGenBind{} = internalError "Cannot hoist nested loops over a ParGenBind (binding of a backpermute)"
     go (ParGenPar par n)
@@ -320,39 +323,40 @@ parHoistDeeperLoops (ParGenTileLoopBoundary next)
       | (deeper, n') <- go n
       = ((d, op) : deeper, n')
 
-data ParCodeGens target op env idxEnv kernelMemory where
+data ParCodeGens target analysis op env idxEnv kernelMemory where
   ParGenNil
-    :: ParCodeGens target op env idxEnv ()
+    :: ParCodeGens target analysis op env idxEnv ()
 
   ParGenBind
     :: LoopDepth
     -> ELeftHandSide t idxEnv idxEnv'
     -> (Envs env idxEnv -> CodeGen target (Operands t))
-    -> ParCodeGens target op env idxEnv' kernelMemory
-    -> ParCodeGens target op env idxEnv kernelMemory
+    -> ParCodeGens target analysis op env idxEnv' kernelMemory
+    -> ParCodeGens target analysis op env idxEnv kernelMemory
 
   ParGenPar
-    :: ParLoopCodeGen target env idxEnv kernelMemory1
-    -> ParCodeGens target op env idxEnv kernelMemory2
-    -> ParCodeGens target op env idxEnv (Struct kernelMemory1, kernelMemory2)
+    :: ParLoopCodeGen target analysis env idxEnv kernelMemory1
+    -> ParCodeGens target analysis op env idxEnv kernelMemory2
+    -> ParCodeGens target analysis op env idxEnv (Struct kernelMemory1, kernelMemory2)
 
   ParGenDeeper
     :: LoopDepth
     -> OpCodeGen target op env idxEnv
-    -> ParCodeGens target op env idxEnv kernelMemory
-    -> ParCodeGens target op env idxEnv kernelMemory
+    -> ParCodeGens target analysis op env idxEnv kernelMemory
+    -> ParCodeGens target analysis op env idxEnv kernelMemory
 
   -- This marks the end of one tile loop (and the start of the next).
   -- After a tile loop boundary, there should be no more ParGenDeepers:
   -- all nested loops should be placed in the first tile loop.
   ParGenTileLoopBoundary
-    :: ParCodeGens target op env idxEnv kernelMemory
-    -> ParCodeGens target op env idxEnv kernelMemory
+    :: ParCodeGens target analysis op env idxEnv kernelMemory
+    -> ParCodeGens target analysis op env idxEnv kernelMemory
 
-data ParLoopCodeGen target env idxEnv kernelMemory where
+data ParLoopCodeGen target analysis env idxEnv kernelMemory where
   ParLoopCodeGen
-    -- Whether the operation prefers loop peeling of the tile loop.
-    :: Bool
+    -- Some analysis information.
+    -- For instance, this could contain whether we should prefer loop peeling.
+    :: analysis
     -- The type of kernel memory for this operation
     -> TupR PrimType kernelMemory
     -- Initialize kernel memory (before the start of the operation)
@@ -362,6 +366,9 @@ data ParLoopCodeGen target env idxEnv kernelMemory where
     -- Code before a tile loop. Bool denotes whether we generate code for the
     -- single threaded mode of zero overhead parallel scans.
     -- See https://dl.acm.org/doi/abs/10.1145/3649169.3649248
+    -- Note that not all backends need to have a special single-threaded mode.
+    -- GPUs probably don't benefit from a single-threaded (or actually single
+    -- threadblock) mode.
     -> (Bool -> a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -- Code within the tile loop
     -> (Bool -> a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
@@ -372,13 +379,13 @@ data ParLoopCodeGen target env idxEnv kernelMemory where
     -- Code after a row, *executed once*, by only one thread, per row
     -> (Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
     -- Code in the next tile loop, and whether we want to do loop peeling in that loop.
-    -> Maybe (Bool, a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
-    -> ParLoopCodeGen target env idxEnv kernelMemory
+    -> Maybe (analysis, a -> Operand (Ptr (Struct kernelMemory)) -> Envs env idxEnv -> CodeGen target ())
+    -> ParLoopCodeGen target analysis env idxEnv kernelMemory
 
-parLoopMultipleTileLoops :: ParLoopCodeGen target env idxEnv kernelMemory -> Bool
+parLoopMultipleTileLoops :: ParLoopCodeGen target analysis env idxEnv kernelMemory -> Bool
 parLoopMultipleTileLoops (ParLoopCodeGen _ _ _ _ _ _ _ _ _ nextTile) = isJust nextTile
 
-parCodeGenMemory :: ParCodeGens target op env idxEnv kernelMemory -> TupR PrimType kernelMemory
+parCodeGenMemory :: ParCodeGens target analysis op env idxEnv kernelMemory -> TupR PrimType kernelMemory
 parCodeGenMemory ParGenNil = TupRunit
 parCodeGenMemory (ParGenBind _ _ _ next) = parCodeGenMemory next
 parCodeGenMemory (ParGenDeeper _ _ next) = parCodeGenMemory next
@@ -387,7 +394,7 @@ parCodeGenMemory (ParGenPar par next)
   | ParLoopCodeGen _ tp _ _ _ _ _ _ _ _ <- par
   = TupRsingle (StructPrimType False tp) `TupRpair` parCodeGenMemory next
 
-parCodeGenHasMultipleTileLoops :: ParCodeGens target op env idxEnv kernelMemory -> Bool
+parCodeGenHasMultipleTileLoops :: ParCodeGens target analysis op env idxEnv kernelMemory -> Bool
 parCodeGenHasMultipleTileLoops = \case
   ParGenNil -> False
   ParGenTileLoopBoundary _ -> True
@@ -399,7 +406,7 @@ parCodeGenInitMemory
   :: Operand (Ptr (Struct memoryFull))
   -> Envs env idxEnv
   -> TupleIdx memoryFull memory
-  -> ParCodeGens target op env idxEnv memory
+  -> ParCodeGens target analysis op env idxEnv memory
   -> CodeGen target ()
 parCodeGenInitMemory ptr envs tupleIdx = \case
   ParGenNil -> return ()
@@ -429,7 +436,7 @@ parCodeGenFinish
   :: Operand (Ptr (Struct memoryFull))
   -> Envs env idxEnv
   -> TupleIdx memoryFull memory
-  -> ParCodeGens target op env idxEnv memory
+  -> ParCodeGens target analysis op env idxEnv memory
   -> CodeGen target ()
 parCodeGenFinish ptr envs tupleIdx = \case
   ParGenNil -> return ()
@@ -455,33 +462,34 @@ parCodeGenFinish ptr envs tupleIdx = \case
   where
     depth = envsLoopDepth envs
 
-data ParTileLoop target op env idxEnv where
+data ParTileLoop target analysis op env idxEnv where
   ParTileLoop ::
-    { ptPeel   :: Bool
-    , ptBefore :: (Envs env idxEnv -> CodeGen target ())
-    , ptIn     :: OpCodeGens target op env idxEnv
-    , ptAfter  :: (Envs env idxEnv -> CodeGen target ())
-    } -> ParTileLoop target op env idxEnv
+    { ptAnalysis :: analysis
+    , ptBefore   :: (Envs env idxEnv -> CodeGen target ())
+    , ptIn       :: OpCodeGens target op env idxEnv
+    , ptAfter    :: (Envs env idxEnv -> CodeGen target ())
+    } -> ParTileLoop target analysis op env idxEnv
 
-data ParTileLoops target op env idxEnv where
+data ParTileLoops target analysis op env idxEnv where
   ParTileLoops ::
-    { ptFirstLoop  :: ParTileLoop target op env idxEnv
-    , ptOtherLoops :: [ParTileLoop target op env idxEnv]
+    { ptFirstLoop  :: ParTileLoop target analysis op env idxEnv
+    , ptOtherLoops :: [ParTileLoop target analysis op env idxEnv]
     -- Loop for the single threaded mode
-    , ptSingleThreaded :: ParTileLoop target op env idxEnv
+    , ptSingleThreaded :: ParTileLoop target analysis op env idxEnv
     -- Code when the thread stops working on this row.
     , ptExit       :: (Envs env idxEnv -> CodeGen target ())
-    } -> ParTileLoops target op env idxEnv
+    } -> ParTileLoops target analysis op env idxEnv
 
-emptyParTileLoop :: ParTileLoop target op env idxEnv
-emptyParTileLoop = ParTileLoop False (\_ -> return ()) GenNil (\_ -> return ())
+emptyParTileLoop :: Monoid analysis => ParTileLoop target analysis op env idxEnv
+emptyParTileLoop = ParTileLoop mempty (\_ -> return ()) GenNil (\_ -> return ())
 
 genParallel
-  :: Operand (Ptr (Struct memoryFull))
+  :: Monoid analysis
+  => Operand (Ptr (Struct memoryFull))
   -> Envs env idxEnv
   -> TupleIdx memoryFull memory
-  -> ParCodeGens target op env idxEnv memory
-  -> CodeGen target (ParTileLoops target op env idxEnv)
+  -> ParCodeGens target analysis op env idxEnv memory
+  -> CodeGen target (ParTileLoops target analysis op env idxEnv)
 genParallel ptr envs tupleIdx = \case
   ParGenNil ->
     return
@@ -510,7 +518,7 @@ genParallel ptr envs tupleIdx = \case
           (loopSkippedEnv d lhs expr loopSeq)
           (withSkippedEnv lhs exit)
 
-  ParGenPar (ParLoopCodeGen peel tp _ init before body after exit _ nextLoop) next -> do
+  ParGenPar (ParLoopCodeGen analysis tp _ init before body after exit _ nextLoop) next -> do
     -- Pointer to the kernel memory of this operation
     thisPtr <- instr' $ GetElementPtr $ gepStruct (StructPrimType False tp) ptr $ tupleLeft tupleIdx
     -- Initialize the thread state of this operation (type variable 'a' in ParLoopCodeGen)
@@ -520,12 +528,12 @@ genParallel ptr envs tupleIdx = \case
     -- Construct data structures describing the code generation of the tile loops
     -- Include this operation in the first tile loop
     let loop' = ParTileLoop
-          (peel || ptPeel loop)
+          (analysis <> ptAnalysis loop)
           (\e -> before False a thisPtr e >> ptBefore loop e)
           (GenOp (depth + 1) (OpCodeGenSingle $ body False a thisPtr) $ ptIn loop)
           (\e -> after False a thisPtr e >> ptAfter loop e)
     let loopSeq' = ParTileLoop
-          (peel || ptPeel loopSeq)
+          (analysis <> ptAnalysis loopSeq)
           (\e -> before True a thisPtr e >> ptBefore loopSeq e)
           (GenOp (depth + 1) (OpCodeGenSingle $ body True a thisPtr) $ ptIn loopSeq)
           (\e -> after True a thisPtr e >> ptAfter loopSeq e)
@@ -535,7 +543,7 @@ genParallel ptr envs tupleIdx = \case
           Just (p, n) -> case loops of
             l : ls ->
               l{
-                ptPeel = p || ptPeel l,
+                ptAnalysis = p <> ptAnalysis l,
                 ptIn = GenOp (depth + 1) (OpCodeGenSingle $ n a thisPtr) $ ptIn l
               } : ls
             _ -> internalError "Operations wants to emit code in next tile loop, but there is no next tile loop. Is there a ParGenTileLoopBoundary missing or misplaced?"
@@ -572,8 +580,8 @@ genParallel ptr envs tupleIdx = \case
       :: LoopDepth
       -> ELeftHandSide t idxEnv1 idxEnv2
       -> (Envs env idxEnv1 -> CodeGen target (Operands t))
-      -> ParTileLoop target op env idxEnv2
-      -> ParTileLoop target op env idxEnv1
+      -> ParTileLoop target analysis op env idxEnv2
+      -> ParTileLoop target analysis op env idxEnv1
     loopSkippedEnv d lhs expr (ParTileLoop peel before body after) =
       ParTileLoop peel
         (withSkippedEnv lhs before)
@@ -595,8 +603,8 @@ genParallel ptr envs tupleIdx = \case
       :: LoopDepth
       -> ELeftHandSide t idxEnv1 idxEnv2
       -> Operands t
-      -> ParTileLoop target op env idxEnv2
-      -> ParTileLoop target op env idxEnv1
+      -> ParTileLoop target analysis op env idxEnv2
+      -> ParTileLoop target analysis op env idxEnv1
     loopExtendedEnv d lhs value (ParTileLoop peel before body after) =
       ParTileLoop peel
         (withExtendedEnv lhs value before)
@@ -606,3 +614,31 @@ genParallel ptr envs tupleIdx = \case
         -- (const $ return value)
         (GenBind (d + 1) lhs (\_ -> return value) body)
         (withExtendedEnv lhs value after)
+
+data CPULoopAnalysis = CPULoopAnalysis
+  { cpuLoopPeel :: Bool -- Whether we prefer to do loop peeling
+  }
+
+instance Semigroup CPULoopAnalysis where
+  a <> b = CPULoopAnalysis
+    { cpuLoopPeel = cpuLoopPeel a || cpuLoopPeel b
+    }
+
+instance Monoid CPULoopAnalysis where
+  mempty = CPULoopAnalysis False
+
+data GPULoopAnalysis = GPULoopAnalysis
+  { gpuLoopScheduleAscending :: Bool -- Whether tiles need to be claimed in ascending order. When False, we can use the hardware scheduler.
+  , gpuLoopFullWarp :: Bool -- Whether it is required that all lanes in a warp are always active. Required for folds and scans which use warp shuffle intrinsics.
+  , gpuLoopPeel :: Bool -- Whether we prefer to do loop peeling
+  }
+
+instance Semigroup GPULoopAnalysis where
+  a <> b = GPULoopAnalysis
+    { gpuLoopScheduleAscending = gpuLoopScheduleAscending a || gpuLoopScheduleAscending b
+    , gpuLoopFullWarp = gpuLoopFullWarp a || gpuLoopFullWarp b
+    , gpuLoopPeel = gpuLoopPeel a || gpuLoopPeel b
+    }
+
+instance Monoid GPULoopAnalysis where
+  mempty = GPULoopAnalysis False False False

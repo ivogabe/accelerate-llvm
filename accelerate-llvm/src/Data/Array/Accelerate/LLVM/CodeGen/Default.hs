@@ -52,6 +52,9 @@ import Control.Monad
 type CG f = forall target op env idxEnv. CompileForeignExp target => Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
 type CGLoop f = forall target op env idxEnv. CompileForeignExp target => FlatOp op env idxEnv -> Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
 
+data FoldOrScan = IsFold | IsScan deriving Eq
+data ScanInclusiveness = ScanInclusive | ScanExclusive deriving Eq
+
 defaultCodeGenGenerate :: CG (Fun' (sh -> t) -> Out sh t -> ())
 defaultCodeGenGenerate (ArgFun fun :>: array :>: _) (_ :>: IdxArgIdx depth idxs :>: _) =
   ( depth

@@ -21,7 +21,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
   readBuffer,
   writeBuffer,
 
-  tupleAlloca, tuplePtrs, tupleStore, tupleLoad,
+  tupleAlloca, tuplePtrs, tupleStore, tupleLoad, tupleArrayGep,
 
   intOfIndex,
 
@@ -56,6 +56,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
+import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant        as A
 
 
 -- | Read a value from an array at the given index
@@ -301,6 +302,21 @@ tupleLoad (TupRsingle tp) (TupRsingle ptr)
   | Refl <- reprIsSingle @ScalarType @e @Ptr tp
   = instr $ Load tp NonVolatile ptr
 tupleLoad _ _ = internalError "Tuple mismatch"
+
+tupleArrayGep
+  :: forall e arch.
+     TypeR e
+  -> TupR Operand (Distribute Ptr (Distribute SizedArray e))
+  -> Operands Int32
+  -> CodeGen arch (TupR Operand (Distribute Ptr e))
+tupleArrayGep TupRunit _ _ = return TupRunit
+tupleArrayGep (TupRpair t1 t2) (TupRpair p1 p2) idx = TupRpair <$> tupleArrayGep t1 p1 idx <*> tupleArrayGep t2 p2 idx
+tupleArrayGep (TupRsingle tp) (TupRsingle ptr) idx
+  | Refl <- reprIsSingle @ScalarType @e @Ptr tp
+  , Refl <- reprIsSingle @ScalarType @e @SizedArray tp = do
+    ptr' <- instr' $ GetElementPtr $ GEP ptr (A.num numType 0 :: Operand Int32) $ GEPArray ptr GEPEmpty
+    return $ TupRsingle ptr'
+tupleArrayGep _ _ _ = internalError "Tuple mismatch"
 
 -- | Convert a multidimensional array index into a linear index
 --

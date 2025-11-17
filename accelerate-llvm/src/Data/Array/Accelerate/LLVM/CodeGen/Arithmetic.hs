@@ -632,6 +632,19 @@ liftWord64 = lift $ TupRsingle scalarType
 liftBool :: Bool -> Operands Bool
 liftBool x = OP_Bool (boolean x)
 
+-- | Select, an if-then-else variant that always evaluates both branches.
+--
+select
+    :: TypeR a
+    -> Operands Bool
+    -> Operands a
+    -> Operands a
+    -> CodeGen arch (Operands a)
+select (TupRsingle tp) (OP_Bool test) yes no = instr $ Select test (op tp yes) (op tp no)
+select (TupRpair t1 t2) test (OP_Pair y1 y2) (OP_Pair n1 n2) =
+  OP_Pair <$> select t1 test y1 n1 <*> select t2 test y2 n2
+select TupRunit _ _ _ = return OP_Unit
+
 -- | Standard if-then-else expression
 --
 ifThenElse
@@ -714,12 +727,7 @@ caseof tR tag xs x = do
   v    <- do
     setBlock def
     r <- case x of
-        Nothing ->
-          let go :: TypeR a -> Operands a
-              go TupRunit       = OP_Unit
-              go (TupRsingle t) = ir t (undef t)
-              go (TupRpair a b) = OP_Pair (go a) (go b)
-          in return (go tR)
+        Nothing -> return (undefs tR)
         Just default_ -> default_
     b <- br exit
     return (r,b)

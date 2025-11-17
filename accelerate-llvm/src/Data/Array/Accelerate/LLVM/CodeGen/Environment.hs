@@ -100,12 +100,19 @@ data Envs env idxEnv = Envs
   -- The index within the tile, if this is in a parallel tiled loop
   , envsTileLocalIndex :: Operands Int
   -- Whether the iteration at the current loop depth is the first iteration of
-  -- the loop If this is in a tile loop, this says if this is the first
+  -- the loop. If this is in a tile loop, this says if this is the first
   -- iteration of that tile loop.
   , envsIsFirst :: Operands Bool
   -- Whether the loop at the current loop depth is descending
   -- (iterating from high indices to low indices)
   , envsDescending :: Bool
+
+  -- Some additional properties for GPU code generation. Should only be used by GPU backends;
+  -- they get dummy values for CPU code generation.
+  , envsGpuFullWarp :: Bool -- Whether the current warp is guaranteed to be full
+  , envsGpuWarpActiveThreads :: Operand Int32 -- The number of threads active in this warp.
+  , envsGpuActiveWarps :: Operand Int32 -- The number of warps active in this thread group
+  , envsGpuFirstForThread :: Operand Bool -- Whether this is the first value for this thread
   }
 
 initEnv
@@ -138,6 +145,11 @@ initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
       , envsTileLocalIndex = OP_Int $ scalar scalarTypeInt 0
       , envsIsFirst = OP_Bool $ boolean True
       , envsDescending = False
+
+      , envsGpuFullWarp = False
+      , envsGpuWarpActiveThreads = scalar scalarType 0
+      , envsGpuActiveWarps = scalar scalarType 0
+      , envsGpuFirstForThread = boolean False
       }
     , reverse $ loops shr idxVars iterSize iterDir
     )
