@@ -634,12 +634,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
         
         case ptrs of
           TupRsingle shardArray -> do
-            let shardIdx = fromMaybe (internalError "Missing shard index") $ envsShardIdx envs
-            OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 $ valuesPerCacheLine shardType)
-            startIdx <- tupleLoadArray (TupRsingle scalarTypeInt) NonVolatile shardArray idxCacheWidth shardStartIdxIdx
-            isFirst <- A.eq singleType startIdx (envsTileIndex envs)
-
-            A.ifThenElse (tp, A.land isFirst $ envsIsFirst envs)
+            A.ifThenElse' (tp, envsIsFirst envs)
               ( do
                 return x
               )
