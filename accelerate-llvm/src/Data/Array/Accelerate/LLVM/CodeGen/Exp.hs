@@ -172,7 +172,7 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         ShapeSize shr sh            -> shapeSize shr =<< cvtE sh
         While c f x                 -> while (expType x) (cvtF1 c) (cvtF1 f) (cvtE x)
         Coerce t1 t2 x              -> coerce t1 t2 =<< cvtE x
-        Assert c e                  -> assert (expType e) (cvtE c) (cvtE e)
+        Assert c e                  -> assert (cvtE c) (cvtE e)
         Assume _ e                  -> cvtE e
 
     indexSlice :: SliceIndex slix sl co sh -> Operands slix -> Operands sh -> Operands sl
@@ -238,11 +238,10 @@ llvmOfOpenExp arrayInstr top env = cvtE top
     cond tp p t e =
       A.ifThenElse (tp, bool p) t e
 
-    assert :: TypeR a
-         -> IROpenExp arch env PrimBool
-         -> IROpenExp arch env a
-         -> IROpenExp arch env a
-    assert tp c e = do
+    assert :: IROpenExp arch env PrimBool
+           -> IROpenExp arch env a
+           -> IROpenExp arch env a
+    assert c e = do
       A.unless (bool c) trap
       e
 
