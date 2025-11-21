@@ -41,6 +41,7 @@ import Text.LLVM                                                    ( AddrSpace(
 import Data.List
 import Data.Bits
 import Data.Text.Lazy.Builder
+import Data.Type.Equality
 import Foreign.Ptr
 import Foreign.Storable
 import Formatting
@@ -92,6 +93,22 @@ data PrimType a where
   ArrayPrimType   :: Word64 -> PrimType a    -> PrimType (SizedArray a) -- static arrays
   StructPrimType  :: Bool -> TupR PrimType l -> PrimType (Struct l) -- aggregate structures
   NamedPrimType   :: Label -> PrimType (Struct a) -> PrimType (Struct a)          -- typedef
+
+instance Distributes PrimType where
+  reprIsSingle BoolPrimType = Refl
+  reprIsSingle (ScalarPrimType t) = reprIsSingle t
+  reprIsSingle (PtrPrimType _ _) = Refl
+  reprIsSingle (ArrayPrimType _ _) = Refl
+  reprIsSingle (StructPrimType _ t) = case t of
+    TupRunit     -> Refl
+    TupRsingle s -> case reprIsSingle s of Refl -> Refl
+    TupRpair _ _ -> Refl
+  reprIsSingle (NamedPrimType _ t) = reprIsSingle t
+
+  pairImpossible (ScalarPrimType t) = pairImpossible t
+  
+  unitImpossible (ScalarPrimType t) = unitImpossible t
+
 
 skipTypeAlias :: PrimType a -> PrimType a
 skipTypeAlias (NamedPrimType _ t) = skipTypeAlias t

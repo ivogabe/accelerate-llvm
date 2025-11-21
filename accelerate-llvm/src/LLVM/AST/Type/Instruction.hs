@@ -226,6 +226,13 @@ data Instruction a where
                   -> Operand (Ptr a)
                   -> Instruction a
 
+  LoadAtomic      :: ScalarType a
+                  -> Volatility
+                  -> Operand (Ptr a)
+                  -> MemoryOrdering
+                  -> LP.Align
+                  -> Instruction a
+
   LoadBool        :: Volatility
                   -> Operand (Ptr Bool)
                   -> Instruction Bool
@@ -429,6 +436,7 @@ instance Downcast (Instruction a) LP.Instr where
     Alloca tp             -> LP.Alloca (downcast tp) Nothing Nothing
     Store vol p x         -> LP.Store (downcast vol) (downcast x) (downcast p) atomicity alignment
     Load t vol p          -> LP.Load (downcast vol) (downcast t) (downcast p) atomicity alignment
+    LoadAtomic t vol p at al  -> LP.Load (downcast vol) (downcast t) (downcast p) (Just $ downcast at) (Just al)
     LoadBool vol p        -> LP.Load (downcast vol) (downcast BoolPrimType) (downcast p) atomicity alignment
     LoadPtr vol p         -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment
     LoadStruct vol p      -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment
@@ -643,6 +651,7 @@ instance TypeOf Instruction where
     ExtractValue t _ _    -> PrimType t
     Alloca t              -> PrimType $ PtrPrimType t defaultAddrSpace
     Load t _ _            -> scalar t
+    LoadAtomic t _ _ _ _  -> scalar t
     LoadBool _ _          -> PrimType BoolPrimType
     LoadPtr _ x           -> case typeOf x of
       PrimType (PtrPrimType t _) -> PrimType t

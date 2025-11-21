@@ -4,6 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies        #-}
 {-# LANGUAGE TypeOperators       #-}
+{-# LANGUAGE FlexibleInstances #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 -- Copyright   : [2015..2020] The Accelerate Team
@@ -29,6 +30,7 @@ import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import Data.Array.Accelerate.LLVM.Native.Foreign                    ()
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.Representation.Elt (bytesElt)
 import Data.Array.Accelerate.Type
 import Data.Primitive.Vec
 
@@ -42,6 +44,27 @@ import LLVM.AST.Type.Module
 import Data.String
 import qualified Data.ByteString.Short.Char8                        as S8
 
+shardAmount :: Word64
+shardAmount = 64
+
+cacheWidth :: Word64
+cacheWidth = 64
+
+-- Calculates how many values are needed to fill a cache line
+class CalcValuesPerCacheLine t where
+  valuesPerCacheLine :: t a -> Word64
+
+instance CalcValuesPerCacheLine PrimType where
+  valuesPerCacheLine tp = (cacheWidth + byteSize - 1) `div` byteSize    
+    where byteSize = fromIntegral (fst (primSizeAlignment tp))
+
+instance CalcValuesPerCacheLine ScalarType where
+  valuesPerCacheLine tp = valuesPerCacheLine $ ScalarPrimType tp
+
+instance CalcValuesPerCacheLine TypeR where
+  valuesPerCacheLine tp = (cacheWidth + byteSize - 1) `div` byteSize
+    where byteSize = fromIntegral (bytesElt tp)
+
 -- The struct passed as argument to a call contains:
 --  * work_function: ptr
 --  * continuation: ptr, u32 (program, location)
@@ -51,13 +74,15 @@ import qualified Data.ByteString.Short.Char8                        as S8
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = (((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), Word64)
+type Header = (((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), SizedArray Word64), SizedArray Word64), Word64)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle (ArrayPrimType (shardAmount * cacheWidth `div` 8) primType)
+  `TupRpair` TupRsingle (ArrayPrimType shardAmount primType)
   `TupRpair` TupRsingle primType
 
 type KernelType env
@@ -74,20 +99,27 @@ bindHeaderEnv
   :: forall env. Env AccessGroundR env
   -> ( PrimType (Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)))
      , CodeGen Native ()
-     , Operand (Ptr Word64) -- Pointer to work index
-     , Operand (Word64) -- First work index index
+     , Operand (Ptr (SizedArray Word64))  -- work indexes of shards
+     , Operand (Ptr (SizedArray Word64))  -- sizes of the shards
+     , Operand (Ptr Word64)               -- In the case of workassist, the workassist index.
+       -- In the case of sharded self scheduling, combined the next shard and amount of finished shards.
+     , Operand (Word64) -- Flag that specifies if the work needs to be initialized or finished
      , Operand (Ptr (SizedArray Word))
      , Gamma env
      )
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameIndex := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ "env" := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameKernelMemory := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameShards         := GetElementPtr (gepStruct (ArrayPrimType (shardAmount * cacheWidth `div` 8) (ScalarPrimType scalarType)) arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameShardSizes     := GetElementPtr (gepStruct (ArrayPrimType shardAmount (ScalarPrimType scalarType)) arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameIndex          := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ "env"              := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameKernelMemory   := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
+  , LocalReference (PrimType $ PtrPrimType (ArrayPrimType (shardAmount * cacheWidth `div` 8) (ScalarPrimType scalarType)) defaultAddrSpace) nameShards
+  , LocalReference (PrimType $ PtrPrimType (ArrayPrimType shardAmount (ScalarPrimType scalarType)) defaultAddrSpace) nameShardSizes
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
-  , LocalReference type' nameFirstIndex
+  , LocalReference type' nameFlag
   , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
   , gamma
   )
@@ -98,8 +130,10 @@ bindHeaderEnv env =
     argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp `TupRpair` TupRsingle kernelMemTp)) defaultAddrSpace
     (envTp, extractEnv, gamma) = bindEnvFromStruct env
 
+    nameShards = "workassist.shards"
+    nameShardSizes = "workassist.shard_sizes"
     nameIndex = "workassist.index"
-    nameFirstIndex = "workassist.first_index"
+    nameFlag = "workassist.flag"
     nameKernelMemory = "kernel_memory"
 
     kernelMemTp :: PrimType (SizedArray Word)
