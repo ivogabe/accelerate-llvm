@@ -620,7 +620,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
         tupleStore tp accumVar value
   )
   -- Code within the tile loop
-  (\_ accumVar ptr envs -> do
+  (\_ accumVar _ envs -> do
     x <- readArray' envs input index
     new <-
       if isJust identity then do
@@ -630,21 +630,17 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
         else
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
       else do 
-        ptrs <- tuplePtrs' memoryTp ptr
-        
-        case ptrs of
-          TupRsingle shardArray -> do
-            A.ifThenElse' (tp, envsIsFirst envs)
-              ( do
-                return x
-              )
-              ( do
-                accum <- tupleLoad tp accumVar
-                if envsDescending envs then
-                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-                else
-                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-              )      
+        A.ifThenElse' (tp, envsIsFirst envs)
+          ( do
+            return x
+          )
+          ( do
+            accum <- tupleLoad tp accumVar
+            if envsDescending envs then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+          )      
     tupleStore tp accumVar new
   )
   -- Code after the tile loop
