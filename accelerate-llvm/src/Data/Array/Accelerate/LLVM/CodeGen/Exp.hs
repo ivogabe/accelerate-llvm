@@ -164,8 +164,6 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         Foreign tp asm f x          -> foreignE tp asm f =<< cvtE x
         Case tag xs mx              -> A.caseof (expType (snd (head xs))) (cvtE tag) [(t,cvtE e) | (t,e) <- xs] (fmap cvtE mx)
         Cond c t e                  -> cond (expType t) (cvtE c) (cvtE t) (cvtE e)
-        IndexSlice slice slix sh    -> indexSlice slice <$> cvtE slix <*> cvtE sh
-        IndexFull slice slix sh     -> indexFull slice  <$> cvtE slix <*> cvtE sh
         ToIndex shr sh ix           -> join $ intOfIndex shr <$> cvtE sh <*> cvtE ix
         FromIndex shr sh ix         -> join $ indexOfInt shr <$> cvtE sh <*> cvtE ix
         ArrayInstr arr arg          -> arrayInstr arr =<< cvtE arg
@@ -174,23 +172,6 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         Coerce t1 t2 x              -> coerce t1 t2 =<< cvtE x
         Assert c e                  -> assert (cvtE c) (cvtE e)
         Assume _ e                  -> cvtE e
-
-    indexSlice :: SliceIndex slix sl co sh -> Operands slix -> Operands sh -> Operands sl
-    indexSlice SliceNil              OP_Unit               OP_Unit          = OP_Unit
-    indexSlice (SliceAll sliceIdx)   (OP_Pair slx OP_Unit) (OP_Pair sl sz)  =
-      let sl' = indexSlice sliceIdx slx sl
-        in OP_Pair sl' sz
-    indexSlice (SliceFixed sliceIdx) (OP_Pair slx _i)      (OP_Pair sl _sz) =
-      indexSlice sliceIdx slx sl
-
-    indexFull :: SliceIndex slix sl co sh -> Operands slix -> Operands sl -> Operands sh
-    indexFull SliceNil              OP_Unit               OP_Unit         = OP_Unit
-    indexFull (SliceAll sliceIdx)   (OP_Pair slx OP_Unit) (OP_Pair sl sz) =
-      let sh' = indexFull sliceIdx slx sl
-        in OP_Pair sh' sz
-    indexFull (SliceFixed sliceIdx) (OP_Pair slx sz)      sl              =
-      let sh' = indexFull sliceIdx slx sl
-        in OP_Pair sh' sz
 
     vecPack :: forall n single tuple. (HasCallStack, KnownNat n) => VecR n single tuple -> Operands tuple -> CodeGen arch (Operands (Vec n single))
     vecPack vecr tuple = ir tp <$> go vecr n tuple
@@ -349,12 +330,10 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         PrimLOr                   -> A.uncurry lor                  =<< cvtE x
         PrimIsNaN t               -> primbool $ A.isNaN t           =<< cvtE x
         PrimIsInfinite t          -> primbool $ A.isInfinite t      =<< cvtE x
-        PrimLt t                  -> primbool $ A.uncurry (A.lt t)  =<< cvtE x
-        PrimGt t                  -> primbool $ A.uncurry (A.gt t)  =<< cvtE x
-        PrimLtEq t                -> primbool $ A.uncurry (A.lte t) =<< cvtE x
-        PrimGtEq t                -> primbool $ A.uncurry (A.gte t) =<< cvtE x
-        PrimEq t                  -> primbool $ A.uncurry (A.eq t)  =<< cvtE x
-        PrimNEq t                 -> primbool $ A.uncurry (A.neq t) =<< cvtE x
+        PrimCmp t CmpLt           -> primbool $ A.uncurry (A.lt t)  =<< cvtE x
+        PrimCmp t CmpGtEq         -> primbool $ A.uncurry (A.gte t) =<< cvtE x
+        PrimCmp t CmpEq           -> primbool $ A.uncurry (A.eq t)  =<< cvtE x
+        PrimCmp t CmpNEq          -> primbool $ A.uncurry (A.neq t) =<< cvtE x
         PrimLNot                  -> primbool $ A.lnot              =<< bool (cvtE x)
           -- no missing patterns, whoo!
 
