@@ -153,8 +153,6 @@ llvmOfOpenExp arrayInstr top env = cvtE top
                                           llvmOfOpenExp arrayInstr body (env `pushE` (lhs, x))
         Evar (Var tp ix)            -> return $ ir tp $ prj ix env
         Const tp c                  -> return $ ir tp $ scalar tp c
-        PrimConst c                 -> let tp = (SingleScalarType $ primConstType c)
-                                       in  return $ ir tp $ scalar tp $ primConst c
         PrimApp f x                 -> primFun f x
         Undef tp                    -> return $ ir tp $ undef tp
         Nil                         -> return $ OP_Unit
