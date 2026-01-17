@@ -346,38 +346,33 @@ initShards
   -> Operands Word64 -- Amount of tiles to be divided over the shards. Must be greater than the number of shards
   -> CodeGen Native ()
 initShards shardIndexes shardSizes finishedShards tileCount = do
+  _ <- instr' $ Store NonVolatile finishedShards (integral TypeWord64 0)
 
-  OP_Bool notenoughTiles <- A.lt singleType tileCount (A.liftWord64 shardAmount)
-  OP_Word64 tileDiff <- A.sub numType (A.liftWord64 64) tileCount
-  finished <- instr' $ Select notenoughTiles tileDiff (integral TypeWord64 0)
-  _ <- instr' $ Store NonVolatile finishedShards finished
-
-  (OP_Word64 shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeWord64 tileCount (A.liftWord64 shardAmount)
+  -- Determine the size of every shard
+  -- start = tileCount * i / shardAmount
+  -- end   = tileCount * (i + 1) / shardAmount
 
   -- Initialize shardIndexes with the start index of every shard.
   imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
-    shardStart <- A.mul numType (OP_Word64 i) (OP_Word64 shardMinSize)
-    addRemainder <- A.min singleType (OP_Word64 i) remainder
-    OP_Word64 shard <- A.add numType shardStart addRemainder
+    shardStartNum <- A.mul numType tileCount (OP_Word64 i)
+    OP_Word64 shardStart <- A.quot TypeWord64 shardStartNum (A.liftWord64 shardAmount)
 
-    -- Multiply the index by the cache width in bytes to ensure every shard is on a seperate cache line.
+    -- Multiply the index by the cache width in bytes to ensure every shard is on a separate cache line.
     OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 (cacheWidth `div` 8))
     shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
-    _ <- instr' $ Store NonVolatile shardIdxArr shard
-
+    _ <- instr' $ Store NonVolatile shardIdxArr shardStart
     return ()
     )
 
   -- Initialize shardSizeArray with the last index + 1 of every shard.
   imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
     indexPlus1 <- A.add numType (OP_Word64 i) (A.liftWord64 1)
-    shardStart <- A.mul numType indexPlus1 (OP_Word64 shardMinSize)
-    addRemainder <- A.min singleType indexPlus1 remainder
-    OP_Word64 shard <- A.add numType shardStart addRemainder
+    shardEndNum <- A.mul numType tileCount indexPlus1
+    OP_Word64 shardEnd <- A.quot TypeWord64 shardEndNum (A.liftWord64 shardAmount)
 
     -- Multiplying by the cache width is not necessary here as shardSizes is only read.
     shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty
-    _ <- instr' $ Store NonVolatile shardSizeArray shard
+    _ <- instr' $ Store NonVolatile shardSizeArray shardEnd
     return ()
     )
 
