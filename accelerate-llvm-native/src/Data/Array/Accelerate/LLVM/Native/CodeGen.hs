@@ -1008,9 +1008,29 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
             -- as this loop starts with the prefix value of the previous
             -- thread. We can directly write that to kernel memory.
             return local
+          else if isNothing seed then
+            -- If there is no seed, then write the output directly in the first tiles.
+            -- The other tiles must combine their result with the given operator.
+            -- Note that the first tile should typically be handled in the sequential mode,
+            -- but this sequential mode is not always generated:
+            -- A non-commutative fold is handled as a scan without the sequential mode.
+            -- Furthermore we could decide to skip the sequential mode if it leads to
+            -- a lot of code duplication (but we don't do that yet).s
+            A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
+              (do
+                return local
+              )
+              (do
+                prefix <- tupleLoad tp valuePtrs
+                tupleStore tp accumVar prefix
+                if envsDescending envs then
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
+                else
+                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
+              )
+          -- If there is a seed, then all tile will combine their local result with
+          -- the already available value.
           else do
-            -- Note: if we are not in single threaded mode, then 'envsTileIndex envs /= 0'.
-            -- Hence we know there is always a value available in 'valuePtrs'.
             prefix <- tupleLoad tp valuePtrs
             tupleStore tp accumVar prefix
             if envsDescending envs then
