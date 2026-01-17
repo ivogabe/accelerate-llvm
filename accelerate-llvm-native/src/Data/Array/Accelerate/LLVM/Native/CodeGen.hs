@@ -300,7 +300,9 @@ codegen name env cluster args
                   return ()
 
             if useSharded
-              then shardedSelfScheduling shardIndexes shardSizes workassistIndex
+              then do 
+                shardAmount' <- A.min singleType (A.liftWord64 shardAmount) (OP_Word64 tileCount)
+                shardedSelfScheduling shardIndexes shardSizes workassistIndex shardAmount'
                    (\seq tile shard -> processTile seq tile (Just shard))
               else workassistLoop workassistIndex tileCount
                    (\seq tile -> processTile seq tile Nothing)
@@ -344,13 +346,16 @@ codegen name env cluster args
       setBlock workBlock
       do
         tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
-        
+        tileCount' <- shapeSize parallelShr tileCount
+        tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
+        shardAmount' <- A.min singleType (A.liftWord64 shardAmount) tileCount64
+
         let ann =
               if parallelDepth /= rank shr then []
               else {- if hasPermute then -} [Loop.LoopInterleave]
               -- else [Loop.LoopVectorize]
 
-        shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes workassistIndex tileSize parSizes tileCount $ \idx _ -> do
+        shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes workassistIndex shardAmount' tileSize parSizes tileCount $ \idx _ -> do
           let envs' = envs{
               envsLoopDepth = parallelDepth,
               envsIdx =
@@ -388,22 +393,24 @@ initShards shardIndexes shardSizes finishedShards tileCount = do
   -- end   = tileCount * (i + 1) / shardAmount
 
   -- Initialize shardIndexes with the start index of every shard.
-  imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
+  shardAmount' <- A.min singleType (A.liftWord64 shardAmount) tileCount
+
+  imapFromStepTo [] (A.liftWord64 0) (A.liftWord64 1) shardAmount' (\(OP_Word64 i) -> do
     shardStartNum <- A.mul numType tileCount (OP_Word64 i)
-    OP_Word64 shardStart <- A.quot TypeWord64 shardStartNum (A.liftWord64 shardAmount)
+    OP_Word64 shardStart <- A.quot TypeWord64 shardStartNum shardAmount'
 
     -- Multiply the index by the cache width in bytes to ensure every shard is on a separate cache line.
-    OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 (cacheWidth `div` 8))
+    OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 $ valuesPerCacheLine scalarTypeWord64)
     shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
     _ <- instr' $ Store NonVolatile shardIdxArr shardStart
     return ()
     )
 
   -- Initialize shardSizeArray with the last index + 1 of every shard.
-  imapFromStepTo [Loop.LoopVectorize, Loop.LoopNonEmpty] (A.liftWord64 0) (A.liftWord64 1) (A.liftWord64 shardAmount) (\(OP_Word64 i) -> do
+  imapFromStepTo [] (A.liftWord64 0) (A.liftWord64 1) shardAmount' (\(OP_Word64 i) -> do
     indexPlus1 <- A.add numType (OP_Word64 i) (A.liftWord64 1)
     shardEndNum <- A.mul numType tileCount indexPlus1
-    OP_Word64 shardEnd <- A.quot TypeWord64 shardEndNum (A.liftWord64 shardAmount)
+    OP_Word64 shardEnd <- A.quot TypeWord64 shardEndNum shardAmount'
 
     -- Multiplying by the cache width is not necessary here as shardSizes is only read.
     shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty
@@ -573,34 +580,34 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
       TupRsingle shardArray -> do
         let tileCount = envsTileCount envs
 
-        -- Initialize shardIndexes and shardStartIndexes the same way as in initShards.        
-        (OP_Int shardMinSize, remainder) <- A.unpair <$> A.quotRem TypeInt (OP_Int tileCount) (A.liftInt $ fromIntegral shardAmount)
-        imapFromStepTo [Loop.LoopNonEmpty] (A.liftInt 0) (A.liftInt 1) (A.liftInt $ fromIntegral shardAmount) (\(OP_Int idx) -> do
-          shardStart <- A.mul numType (OP_Int idx) (OP_Int shardMinSize)
-          addRemainder <- A.min singleType (OP_Int idx) remainder
-          shard <- A.add numType shardStart addRemainder
+        -- Initialize shardIndexes and shardStartIndexes the same way as in initShards
+        shardAmount' <- A.min singleType (A.liftInt $ fromIntegral shardAmount) (OP_Int tileCount)
+                
+        imapFromStepTo [] (A.liftInt 0) (A.liftInt 1) shardAmount' (\(OP_Int idx) -> do
+          shardStartNum <- A.mul numType (OP_Int tileCount) (OP_Int idx)
+          shardStart <- A.quot TypeInt shardStartNum shardAmount'
 
-          -- Multiply the index by the cache width in bytes to ensure every shard is on a seperate cache line.
+          -- Multiply the index by the cache width in bytes to ensure every shard is on a separate cache line.
           OP_Int idxCacheWidth <- A.mul numType (OP_Int idx) (A.liftInt $ fromIntegral $ valuesPerCacheLine shardType)
-          _ <- tupleStoreArray (TupRsingle scalarTypeInt) Volatile shardArray idxCacheWidth shardIdxIdx shard
-          _ <- tupleStoreArray (TupRsingle scalarTypeInt) NonVolatile shardArray idxCacheWidth shardStartIdxIdx shard
-
+          _ <- tupleStoreArray (TupRsingle scalarTypeInt) Volatile shardArray idxCacheWidth shardIdxIdx shardStart
+          _ <- tupleStoreArray (TupRsingle scalarTypeInt) NonVolatile shardArray idxCacheWidth shardStartIdxIdx shardStart
           return ()
           )
         -- Initialize shardValues with the identity value, if we know it.
-        -- We need the idenity instead of the seed, as sharded self scheduling
+        -- We need the identity instead of the seed, as sharded self scheduling
         -- does not combine all the tiles in order.
         case identity of
           Nothing -> return ()
           Just i -> do
             value <- llvmOfExp (compileArrayInstrEnvs envs) i
             imapFromStepTo
-              [Loop.LoopVectorize, Loop.LoopNonEmpty]
-              (A.liftWord64 0)
-              (A.liftWord64 $ valuesPerCacheLine shardType)
-              (A.liftWord64 (shardAmount * valuesPerCacheLine shardType))
-              (\(OP_Word64 idx) -> do
-                _ <- tupleStoreArray tp NonVolatile shardArray idx shardValueIdx value
+              []
+              (A.liftInt 0)
+              (A.liftInt 1)
+              shardAmount'
+              (\(OP_Int idx) -> do
+                OP_Int idxCacheWidth <- A.mul numType (OP_Int idx) (A.liftInt $ fromIntegral $ valuesPerCacheLine shardType)
+                _ <- tupleStoreArray tp NonVolatile shardArray idxCacheWidth shardValueIdx value
                 return ()
               )
   )

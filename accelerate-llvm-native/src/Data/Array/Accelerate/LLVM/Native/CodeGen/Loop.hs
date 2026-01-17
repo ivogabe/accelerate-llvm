@@ -188,9 +188,10 @@ shardedSelfScheduling
     :: Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- combined: high 32 bits = next shard index, low 32 bits = finished shard count
+    -> Operands Word64                       -- amount of shards
     -> (Operand Bool -> Operand Word64 -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = do
+shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards shardAmount' doWork = do
   entry    <- getBlock
   start    <- newBlock "workassist.shards.start"
   outer    <- newBlock "workassist.shards.outer"
@@ -225,17 +226,17 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards doWork = d
   -- Check if amount of finished shards is lower than amount of shards to continue.
   finishCount <- phi (TupRsingle scalarType) [(OP_Word64 initNextFinish, entry), (OP_Word64 nextInc, next), (OP_Word64 finishInc, finish)]
   finishCount' <- A.band TypeWord64 finishCount (A.liftWord64 0xFFFFFFFF)
-  finished <- A.lt singleType finishCount' (A.liftWord64 shardAmount)
+  finished <- A.lt singleType finishCount' shardAmount'
 
   _ <- cbr finished outer exit
 
   setBlock outer
 
   nextShard' <- A.shiftR TypeWord64 finishCount (A.liftInt 32)
-  OP_Word64 shardToWorkOn <- A.rem TypeWord64 nextShard' (A.liftWord64 shardAmount)
+  OP_Word64 shardToWorkOn <- A.rem TypeWord64 nextShard' shardAmount'
 
   -- Get shard from shards array, to do this we need to multiply by cache width as every shards is on a separate cache line.
-  OP_Word64 shardIdx <- A.mul numType (A.liftWord64 (cacheWidth `div` 8)) (OP_Word64 shardToWorkOn)
+  OP_Word64 shardIdx <- A.mul numType (A.liftWord64 $ valuesPerCacheLine scalarTypeWord64) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
   
   shardSizeIdx <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty
@@ -275,14 +276,15 @@ shardedSelfSchedulingChunked
     -> Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- combined: high 32 bits = next shard index, low 32 bits = finished shard count
+    -> Operands Word64                      -- amount of shards
     -> sh 
     -> Operands sh
     -> Operands sh
     -> (Operands sh -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShardFinishedShards chunkSz' sh chunkCounts doWork = do
+shardedSelfSchedulingChunked ann shr shardIndexes shardSizes nextShardFinishedShards shardAmount' chunkSz' sh chunkCounts doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
-  shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards $ \_ chunkLinearIndex shardIdx -> do
+  shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards shardAmount' $ \_ chunkLinearIndex shardIdx -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex
