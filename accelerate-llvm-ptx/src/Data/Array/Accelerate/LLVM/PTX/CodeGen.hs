@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen
@@ -14,6 +15,7 @@
 
 module Data.Array.Accelerate.LLVM.PTX.CodeGen (
 
+  PTXCode(..),
   codegen,
   KernelMetadata,
 
@@ -69,29 +71,46 @@ import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import qualified Text.LLVM as LP
 
-codegen :: String
+data PTXCode env = PTXCode
+  { ptxCodeSize :: [Idx env Int] -- The product of these variables is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
+  , ptxCodeKernelMemory :: Int  -- The size of the kernel data, shared by all threads working on this kernel.
+  , ptxCodeInit :: Maybe (Module (KernelType env))
+  , ptxCodeWork :: Module (KernelType env)
+  , ptxCodeFinish :: Maybe (Module (KernelType env))
+  }
+
+codegen :: forall env args.
+           String
         -> Env AccessGroundR env
         -> Clustered PTXOp args
         -> Args env args
-        -> LLVM PTX
-           ( ( [Idx env Int] -- The product of these variables is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
-             , Int ) -- The size of the kernel data, shared by all threads working on this kernel.
-           , Module (KernelType env))
+        -> LLVM PTX (PTXCode env)
 codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth
  , Refl <- marshalFunResultUnit env =
-  codeGenKernel name (LLVM.Lam kernelDataRawType "kernel_data" . bindArgs) $ do
-    extractEnv
-    if parallelDepth == 0 && rank shr /= 0 then do
-      internalError "TODO: Implement parallel collective operations on one-dimensional arrays"
-    else if parallelDepth /= rank shr then do
-      internalError "TODO: Implement parallel collective operations on multi-dimensional arrays"
-    else do
-      -- Parallelise over all independent dimensions
-      let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
-      let parSizes = parallelIterSize parallelShr loops
+  if parallelDepth == 0 && rank shr /= 0 then do
+    -- Parallelise over the first dimension using parallel folds or scans
+    let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+    let ((idxVar, direction, size), loops') = case loops of
+          [] -> internalError "Expected at least one loop since rank shr /= 0"
+          (l:ls) -> (l, ls)
+
+    case parCodeGens (parCodeGen $ undefined {- isDescending -} direction) 0 $ opCodeGens opCodeGen flatOps of
+      Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
+      Just (Exists parCodes) -> do
+
+        -- index <- atomicAdd Monotonic undefined (integral TypeWord64 1)
+
+        undefined
+
+  else do
+    -- Parallelise over all independent dimensions
+    let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+    let parSizes = parallelIterSize parallelShr loops
+
+    kernelWork <- codeGenKernel' "" $ do
       parSize <- shapeSize parallelShr parSizes
 
       imapFromTo (A.liftInt 0) parSize $ \linearIdx -> do
@@ -109,10 +128,19 @@ codegen name env cluster args
 
       return_
 
-    let maxGridSize = map sizeVar $ flattenTupR sizes
-    let kernelMemSize = 0 -- We don't use kernel data yet
-    return (maxGridSize, kernelMemSize)
+    return $ PTXCode
+      (map sizeVar $ flattenTupR sizes)
+      0 -- We don't need kernel memory here
+      Nothing -- No need to initialize kernel memory
+      kernelWork
+      Nothing -- No need to finalize kernel memory
   where
+    codeGenKernel'
+      :: LLVM.Result (MarshalFun env) ~ ()
+      => String -> CodeGen PTX () -> LLVM PTX (Module (KernelType env))
+    codeGenKernel' postfix body =
+      snd <$> codeGenKernel (name ++ postfix) (LLVM.Lam kernelDataRawType "kernel_data" . bindArgs) (extractEnv >> body)
+
     (bindArgs, extractEnv, gamma) = bindEnvArgs @PTX env
     kernelDataRawType :: PrimType (Ptr (SizedArray Word))
     kernelDataRawType = PtrPrimType (ArrayPrimType 0 primType) defaultAddrSpace
