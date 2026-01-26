@@ -51,7 +51,7 @@ import Data.Maybe
 
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
-import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW
@@ -68,7 +68,7 @@ import Control.Monad.State ( gets )
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
-import Data.Array.Accelerate.LLVM.CodeGen.Constant
+import Data.Array.Accelerate.LLVM.CodeGen.Constant as Const
 import qualified Text.LLVM as LP
 
 data PTXCode env = PTXCode
@@ -339,7 +339,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
             )
             (\_ -> return OP_Unit) -- TODO: Maybe add nanosleep here
             OP_Unit
-          _ <- instr' $ Fence (CrossThread, Acquire)
+          _ <- instr' $ LLVM.Fence (CrossThread, Acquire)
           
           OP_Pair exclusive inclusive <-
             if isNothing seed then
@@ -347,7 +347,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
               -- The other tiles must combine their result with the given operator.
               A.ifThenElse (TupRpair tp tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
                 (do
-                  return $ OP_Pair (undefs tp) aggregate
+                  return $ OP_Pair (Const.undefs tp) aggregate
                 )
                 (do
                   prefix <- tupleLoad tp valuePtrs
@@ -371,7 +371,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
 
           tupleStore tp valuePtrs inclusive
 
-          _ <- instr' $ Fence (CrossThread, Release)
+          _ <- instr' $ LLVM.Fence (CrossThread, Release)
           OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
           _ <- instr' $ Store Volatile idxPtr nextIdx
           return exclusive

@@ -2,15 +2,16 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs             #-}
 {-# LANGUAGE InstanceSigs      #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell   #-}
 {-# LANGUAGE TypeFamilies      #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeOperators     #-}
+{-# LANGUAGE ViewPatterns      #-}
+{-# LANGUAGE TupleSections     #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Accelerate
@@ -45,6 +46,7 @@ import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Var (DeclareVars(..), declareVars)
 import Data.Array.Accelerate.Representation.Ground (buffersR)
 import Data.Array.Accelerate.AST.LeftHandSide
+import Data.Array.Accelerate.Trafo.Operation.Bounds
 import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken, LHS (..), mkLHS)
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
@@ -129,6 +131,13 @@ instance PrettyOp PTXOp where
 
 instance NFData' PTXOp where
   rnf' !_ = ()
+
+instance OperationBounds PTXOp where
+  boundsOptimizeOp = \case
+    PTXMap -> boundsOptimizeMap
+    PTXGenerate -> boundsOptimizeGenerate
+    PTXBackpermute -> boundsOptimizeBackpermute
+    _ -> boundsOptimizeOpDefault
 
 instance DesugarAcc PTXOp where
   mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
