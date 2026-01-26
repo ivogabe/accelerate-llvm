@@ -2,17 +2,18 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs             #-}
 {-# LANGUAGE InstanceSigs      #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell   #-}
 {-# LANGUAGE TypeFamilies      #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeOperators     #-}
+{-# LANGUAGE ViewPatterns      #-}
+{-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE BlockArguments    #-}
+{-# LANGUAGE TupleSections     #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Accelerate
@@ -45,6 +46,7 @@ import Data.Array.Accelerate.Trafo.Var (DeclareVars(..), declareVars)
 import Data.Array.Accelerate.Representation.Ground (buffersR)
 import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken)
+import Data.Array.Accelerate.Trafo.Operation.Bounds
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
 import Data.Array.Accelerate.Type (scalarType, Word8, scalarTypeWord8, scalarTypeInt)
@@ -123,6 +125,13 @@ instance PrettyOp NativeOp where
 
 instance NFData' NativeOp where
   rnf' !_ = ()
+
+instance OperationBounds NativeOp where
+  boundsOptimizeOp = \case
+    NMap -> boundsOptimizeMap
+    NGenerate -> boundsOptimizeGenerate
+    NBackpermute -> boundsOptimizeBackpermute
+    _ -> boundsOptimizeOpDefault
 
 instance DesugarAcc NativeOp where
   mkMap         a b c   = Exec NMap         (a :>: b :>: c :>:       ArgsNil)
