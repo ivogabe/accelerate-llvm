@@ -106,13 +106,14 @@ instance IsKernel PTXKernel where
   type KernelMetadata  PTXKernel = PTXKernelMetadata
 
   compileKernel env cluster args = unsafePerformIO $ evalPTX defaultTarget $ do
-    ((maxGridSize, smemSize), module') <- codegen fullName env cluster args
+    ptxCode <- codegen fullName env cluster args
     dev <- gets ptxDeviceProperties
     -- TODO: Change simpleLaunchConfig to launchConfig when we use shared memory
-    obj <- compile uid (fromString $ fullName) (simpleLaunchConfig dev) module'
+    -- TODO: Also compile initialization and finalization kernels
+    obj <- compile uid (fromString $ fullName) (simpleLaunchConfig dev) (ptxCodeWork ptxCode)
     obj `seq` return ()
     linked <- link obj
-    return $ PTXKernel obj linked (fromString $ fullName) uid maxGridSize smemSize detail brief
+    return $ PTXKernel obj linked (fromString $ fullName) uid (ptxCodeSize ptxCode) (ptxCodeKernelMemory ptxCode) detail brief
     where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "_" ++ show uid

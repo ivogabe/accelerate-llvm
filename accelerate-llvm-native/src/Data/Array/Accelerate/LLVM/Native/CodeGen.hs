@@ -223,7 +223,8 @@ codegen name env cluster args
                       envsLoopDepth = 1,
                       envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
                       envsIsFirst = isFirst,
-                      envsTileLocalIndex = localIdx
+                      envsTileLocalIndex = localIdx,
+                      envsTileStorageIndex = localIdx
                     }
                   genSequential envs'''' loops' $ ptIn tileLoop
                 ptAfter tileLoop envs'''
@@ -260,7 +261,8 @@ codegen name env cluster args
                         envsLoopDepth = 1,
                         envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
                         envsIsFirst = isFirst,
-                        envsTileLocalIndex = localIdx
+                        envsTileLocalIndex = localIdx,
+                        envsTileStorageIndex = localIdx
                       }
                     genSequential envs'''' loops'' $ ptIn tileLoop
                   ptAfter tileLoop envs'''
