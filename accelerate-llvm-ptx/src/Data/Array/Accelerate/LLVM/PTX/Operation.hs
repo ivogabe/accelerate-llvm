@@ -62,7 +62,6 @@ import Lens.Micro.Mtl
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Array.Accelerate.Trafo.Exp.Substitution
-import Data.Array.Accelerate.Trafo.Desugar (desugarAlloc)
 
 import Data.Array.Accelerate.AST.Idx (Idx(..))
 import Data.Array.Accelerate.Pretty.Operation (prettyFun)
@@ -144,7 +143,7 @@ instance OperationBounds PTXOp where
     PTXFold1 -> boundsOptimizeFold1
     _ -> boundsOptimizeOpDefault
 
-instance DesugarAcc PTXOp where
+instance LowerAcc PTXOp where
   mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec PTXBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec PTXGenerate    (a :>: b :>:             ArgsNil)

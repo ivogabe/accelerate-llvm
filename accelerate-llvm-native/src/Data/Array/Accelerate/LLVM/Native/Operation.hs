@@ -136,7 +136,7 @@ instance OperationBounds NativeOp where
     NFold1 -> boundsOptimizeFold1
     _ -> boundsOptimizeOpDefault
 
-instance DesugarAcc NativeOp where
+instance LowerAcc NativeOp where
   mkMap         a b c   = Exec NMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec NBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec NGenerate    (a :>: b :>:             ArgsNil)
