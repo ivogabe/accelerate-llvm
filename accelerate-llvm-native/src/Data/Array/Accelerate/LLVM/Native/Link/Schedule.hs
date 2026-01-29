@@ -1012,6 +1012,21 @@ convert inAwhile (Effect (RefWrite ref value) next)
     tp = case varType ref of
       BaseRrefWrite t -> t
       _ -> internalError "OutputRef impossible"
+convert inAwhile (Effect (Aassert cond) next)
+  | Exists2 next1 <- convert inAwhile next =
+    Exists2 $ Phase1{
+      blockCount = blockCount next1,
+      importsType = importsType next1,
+      importsInit = importsInit next1,
+      importedLifetimes = importedLifetimes next1,
+      stateType = stateType next1,
+      varsFree = effectFreeVars (Aassert cond) `IdxSet.union` varsFree next1,
+      varsInStruct = varsInStruct next1,
+      maySuspend = maySuspend next1,
+      phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
+        _ <- llvmOfExp (convertArrayInstr structVars localVars) (Assert cond Nil)
+        phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock 
+    }
 -- Bindings
 -- No need to construct anything if the result is not used.
 -- This is required, since pushBindingSingle leaks memory when using LeftHandSideWildcard

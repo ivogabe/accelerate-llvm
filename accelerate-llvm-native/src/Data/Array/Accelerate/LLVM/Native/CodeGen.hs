@@ -54,7 +54,7 @@ import Data.Maybe
 
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
-import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW
@@ -516,7 +516,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
         tupleStore tp valuePtrs new
 
         -- Release the lock
-        _ <- instr' $ Fence (CrossThread, Release)
+        _ <- instr' $ LLVM.Fence (CrossThread, Release)
         _ <- instr' $ Store Volatile lock (scalar scalarTypeWord8 0)
         return ()
   )
@@ -675,7 +675,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
             )
             (\_ -> return OP_Unit)
             OP_Unit
-          _ <- instr' $ Fence (CrossThread, Acquire)
+          _ <- instr' $ LLVM.Fence (CrossThread, Acquire)
           return ()
 
         local <- tupleLoad tp accumVar
@@ -717,7 +717,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
         tupleStore tp valuePtrs new
 
-        _ <- instr' $ Fence (CrossThread, Release)
+        _ <- instr' $ LLVM.Fence (CrossThread, Release)
         OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
         _ <- instr' $ Store Volatile idxPtr nextIdx
         return ()

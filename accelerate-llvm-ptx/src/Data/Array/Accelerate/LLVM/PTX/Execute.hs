@@ -70,7 +70,7 @@ import Data.Array.Accelerate.LLVM.PTX.State
 import qualified Foreign.CUDA.Driver                                as CUDA
 import qualified Foreign.CUDA.Driver.Stream                         as CUDA
 
-import Control.Monad                                                ( forM_, when )
+import Control.Monad                                                ( forM_, when, unless )
 import Control.Monad.Reader                                         ( asks )
 import Control.Monad.State                                          ( liftIO )
 import Control.Concurrent.MVar
@@ -197,6 +197,9 @@ executeEffect env = \case
     , Refl <- reprIsSingle @Value @_ @Value value -> do
       liftIO $ putMVar mvar value
     | otherwise -> internalError "Ref or scalar impossible"
+  Aassert cond -> do
+    result <- evalExp cond $ evalArrayInstr env
+    unless (result == 1) $ error "Assertion failed"
 
 size' :: ShapeR sh -> Distribute Value sh -> Int
 size' ShapeRz _ = 1
