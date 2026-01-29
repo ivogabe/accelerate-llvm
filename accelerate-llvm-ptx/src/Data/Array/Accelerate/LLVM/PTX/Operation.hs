@@ -137,6 +137,11 @@ instance OperationBounds PTXOp where
     PTXMap -> boundsOptimizeMap
     PTXGenerate -> boundsOptimizeGenerate
     PTXBackpermute -> boundsOptimizeBackpermute
+    PTXScan _ -> boundsOptimizeScan
+    PTXScan1 _ -> boundsOptimizeScan1
+    PTXScan' _ -> boundsOptimizeScan'
+    PTXFold -> boundsOptimizeFold
+    PTXFold1 -> boundsOptimizeFold1
     _ -> boundsOptimizeOpDefault
 
 instance DesugarAcc PTXOp where

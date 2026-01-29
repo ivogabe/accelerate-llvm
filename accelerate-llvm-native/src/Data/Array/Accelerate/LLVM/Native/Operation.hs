@@ -129,6 +129,11 @@ instance OperationBounds NativeOp where
     NMap -> boundsOptimizeMap
     NGenerate -> boundsOptimizeGenerate
     NBackpermute -> boundsOptimizeBackpermute
+    NScan _ -> boundsOptimizeScan
+    NScan1 _ -> boundsOptimizeScan1
+    NScan' _ -> boundsOptimizeScan'
+    NFold -> boundsOptimizeFold
+    NFold1 -> boundsOptimizeFold1
     _ -> boundsOptimizeOpDefault
 
 instance DesugarAcc NativeOp where
