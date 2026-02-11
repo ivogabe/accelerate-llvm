@@ -41,6 +41,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.Foreign
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as L
@@ -68,7 +69,7 @@ import LLVM.AST.Type.Name (Label(Label))
 
 {-# INLINEABLE llvmOfFun1 #-}
 llvmOfFun1
-    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr, Intrinsic arch)
     => CompileArrayInstr arch arr
     -> PreOpenFun arr () (a -> b)
     -> IRFun1 arch (a -> b)
@@ -78,7 +79,7 @@ llvmOfFun1 _ _ = internalError "impossible evaluation"
 
 {-# INLINEABLE llvmOfFun2 #-}
 llvmOfFun2
-    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr, Intrinsic arch)
     => CompileArrayInstr arch arr
     -> PreOpenFun arr () (a -> b -> c)
     -> IRFun2 arch (a -> b -> c)
@@ -123,7 +124,7 @@ compileArrayInstrEnvs envs arr arg = case arr of
 
 {-# INLINEABLE llvmOfExp #-}
 llvmOfExp
-    :: forall arr arch t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    :: forall arr arch t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr, Intrinsic arch)
     => CompileArrayInstr arch arr
     -> PreOpenExp arr () t
     -> IROpenExp arch () t
@@ -135,7 +136,7 @@ llvmOfExp arrayInstr expr = llvmOfOpenExp arrayInstr expr Empty
 --
 {-# INLINEABLE llvmOfOpenExp #-}
 llvmOfOpenExp
-    :: forall arr arch env _t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    :: forall arr arch env _t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr, Intrinsic arch)
     => CompileArrayInstr arch arr
     -> PreOpenExp arr env _t
     -> Val env
@@ -218,12 +219,13 @@ llvmOfOpenExp arrayInstr top env = cvtE top
     cond tp p t e =
       A.ifThenElse (tp, bool p) t e
 
-    assert :: Text
+    assert :: Intrinsic arch
+           => Text
            -> IROpenExp arch env PrimBool
            -> IROpenExp arch env a
            -> IROpenExp arch env a
     assert msg c e = do -- TODO: Bericht printen??
-      A.unless (bool c) trap
+      A.unless (bool c) (trapWithMessage msg)
       e
 
     while :: TypeR a
