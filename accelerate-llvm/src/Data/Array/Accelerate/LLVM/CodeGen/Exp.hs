@@ -46,6 +46,7 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as L
 
 import Data.Primitive.Vec
+import Data.Text                                                    ( Text )
 
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Operand                                        ( Operand )
@@ -169,7 +170,7 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         ShapeSize shr sh            -> shapeSize shr =<< cvtE sh
         While c f x                 -> while (expType x) (cvtF1 c) (cvtF1 f) (cvtE x)
         Coerce t1 t2 x              -> coerce t1 t2 =<< cvtE x
-        Assert c e                  -> assert (cvtE c) (cvtE e)
+        Assert msg c e              -> assert msg (cvtE c) (cvtE e)
         Assume _ e                  -> cvtE e
 
     vecPack :: forall n single tuple. (HasCallStack, KnownNat n) => VecR n single tuple -> Operands tuple -> CodeGen arch (Operands (Vec n single))
@@ -218,10 +219,11 @@ llvmOfOpenExp arrayInstr top env = cvtE top
     cond tp p t e =
       A.ifThenElse (tp, bool p) t e
 
-    assert :: IROpenExp arch env PrimBool
+    assert :: Text
+           -> IROpenExp arch env PrimBool
            -> IROpenExp arch env a
            -> IROpenExp arch env a
-    assert c e = do
+    assert msg c e = do -- TODO: Bericht printen??
       A.unless (bool c) trap
       e
 
