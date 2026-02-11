@@ -30,7 +30,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Profile
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as Loop
 
-import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
+import {-# SOURCE #-} Data.Array.Accelerate.LLVM.Native.Target      ( Native )
 
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Operand
@@ -308,3 +308,9 @@ putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label 
                  []
 putString :: String -> CodeGen Native ()
 putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)
+
+fflush :: CodeGen Native ()
+fflush = void $
+  call' (Body VoidType Nothing (Label "fflush"))
+        ArgumentsNil
+        []

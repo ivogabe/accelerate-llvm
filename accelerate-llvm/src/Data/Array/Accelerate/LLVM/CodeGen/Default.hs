@@ -39,6 +39,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic (Intrinsic)
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
 import Data.Array.Accelerate.LLVM.Foreign
 
@@ -49,8 +50,8 @@ import LLVM.AST.Type.Instruction
 import Data.Maybe
 import Control.Monad
 
-type CG f = forall target op env idxEnv. CompileForeignExp target => Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
-type CGLoop f = forall target op env idxEnv. CompileForeignExp target => FlatOp op env idxEnv -> Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
+type CG f = forall target op env idxEnv. (CompileForeignExp target, Intrinsic target) => Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
+type CGLoop f = forall target op env idxEnv. (CompileForeignExp target, Intrinsic target) => FlatOp op env idxEnv -> Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
 
 data FoldOrScan = IsFold | IsScan deriving Eq
 data ScanInclusiveness = ScanInclusive | ScanExclusive deriving Eq
@@ -88,7 +89,7 @@ defaultCodeGenBackpermute (_ :>: input :>: output :>: _) (_ :>: IdxArgIdx depth 
 defaultCodeGenBackpermute _ _ = internalError "Missing index for argument of backpermute"
 
 defaultCodeGenPermute
-  :: (CompileForeignExp target, f ~ (Fun' (e -> e -> e) -> Mut sh' e -> In sh (PrimMaybe (sh', e)) -> ()))
+  :: (CompileForeignExp target, Intrinsic target, f ~ (Fun' (e -> e -> e) -> Mut sh' e -> In sh (PrimMaybe (sh', e)) -> ()))
   => (Envs env idxEnv -> Operand Int -> Operands sh' -> CodeGen target () -> CodeGen target ())
   -> Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
 defaultCodeGenPermute atomically (ArgFun combineFun :>: output :>: source :>: _) (_ :>: _ :>: IdxArgIdx depth sourceIdx :>: _) =

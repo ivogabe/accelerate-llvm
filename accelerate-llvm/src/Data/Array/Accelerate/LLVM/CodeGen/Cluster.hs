@@ -51,6 +51,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.Foreign
 
 import LLVM.AST.Type.Operand
@@ -60,7 +61,7 @@ import LLVM.AST.Type.Instruction
 import Data.Maybe
 
 opCodeGens
-  :: CompileForeignExp target
+  :: (CompileForeignExp target, Intrinsic target)
   => (forall idxEnv'. FlatOp op env idxEnv' -> (LoopDepth, OpCodeGen target op env idxEnv'))
   -> FlatOps op env idxEnv
   -> OpCodeGens target op env idxEnv

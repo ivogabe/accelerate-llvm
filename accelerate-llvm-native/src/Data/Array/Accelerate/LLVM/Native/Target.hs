@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Target
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -22,13 +23,18 @@ module Data.Array.Accelerate.LLVM.Native.Target (
 import Data.Array.Accelerate.LLVM.Native.Link.Cache                 ( LinkCache )
 import Data.Array.Accelerate.LLVM.Target                            ( Target(..) )
 import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
+import Data.Array.Accelerate.LLVM.CodeGen.Exp                       ( trap )
 
+
+import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic (liftInt)
 -- standard library
 import Data.ByteString                                              ( ByteString )
 import Data.ByteString.Short                                        ( ShortByteString )
 import System.IO.Unsafe
 import Data.Array.Accelerate.LLVM.Target.ClangInfo
-
+import Data.Text                                                    ( Text, unpack )
+import Data.Array.Accelerate.LLVM.CodeGen.Monad                     ( CodeGen )
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop               ( putString, fflush )
 
 -- | Native machine code JIT execution target
 --
@@ -40,4 +46,8 @@ instance Target Native where
   targetTriple     = Just nativeTargetTriple
   targetDataLayout = Nothing  -- LLVM will fill it in just fine for CPU targets
 
-instance Intrinsic Native
+instance Intrinsic Native where
+  trapWithMessage msg = do
+    _ <- putString (unpack msg)
+    _ <- fflush
+    trap
