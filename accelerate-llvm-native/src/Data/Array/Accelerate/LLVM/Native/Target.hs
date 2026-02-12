@@ -35,7 +35,7 @@ import System.IO.Unsafe
 import Data.Array.Accelerate.LLVM.Target.ClangInfo
 import Data.Text                                                    ( Text, unpack )
 import Data.Array.Accelerate.LLVM.CodeGen.Monad                     ( CodeGen )
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop               ( putString, abort )
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop               ( putString, fflush, abort )
 
 -- | Native machine code JIT execution target
 --
@@ -50,6 +50,7 @@ instance Target Native where
 instance Intrinsic Native where
   trapWithMessage msg = do
     _ <- putString (unpack msg ++ "\n")
+    _ <- fflush
 
     -- On Windows calling putString and llvm.trap consecutively causes
     -- the program to hang in an infinite loop, repeatedly printing newline characters.
