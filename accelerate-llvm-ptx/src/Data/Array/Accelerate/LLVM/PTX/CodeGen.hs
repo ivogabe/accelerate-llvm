@@ -69,7 +69,7 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant as Const
-import qualified Text.LLVM as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
 data PTXCode env = PTXCode
   { ptxCodeSize :: [Idx env Int] -- The product of these variables is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
@@ -283,7 +283,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
-    warpValue <- reduceWarpShfl
+    warpValue <- reduceWarp
       dev tp identity' fun'
       (if envsGpuFullWarp envs then Nothing else Just $ OP_Int32 $ envsGpuWarpActiveThreads envs)
       x

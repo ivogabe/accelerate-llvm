@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                   #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# OPTIONS_HADDOCK hide #-}
@@ -16,7 +15,7 @@ module LLVM.AST.Type.Instruction.Atomic
   where
 
 import LLVM.AST.Type.Downcast
-import qualified Text.LLVM                                          as LLVM
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LLVM
 
 
 -- | Atomic instructions take ordering parameters that determine which other

@@ -116,24 +116,24 @@ block = do
   type FutureR PTX = Future
 
   newtype Par PTX a = Par { runPar :: ReaderT ParState (LLVM PTX) a }
-    deriving ( Functor, Applicative, Monad, MonadIO, MonadReader ParState, MonadState PTX )
+    deriving ( Functor, Applicative, Monad, MonadIO )
 
   {-# INLINEABLE new     #-}
   {-# INLINEABLE newFull #-}
-  new       = Future <$> liftIO (newIORef Empty)
+  new       = Future <$> liftIO (newIORef (Empty (return ())))
   newFull v = Future <$> liftIO (newIORef (Full v))
 
   {-# INLINEABLE spawn #-}
   spawn m = do
     s' <- liftPar Stream.create
-    r  <- local (const (s', Nothing)) m
+    r  <- localParState (const (s', Nothing)) m
     liftIO (Stream.destroy s')
     return r
 
   {-# INLINEABLE fork #-}
   fork m = do
     s' <- liftPar (Stream.create)
-    () <- local (const (s', Nothing)) m
+    () <- localParState (const (s', Nothing)) m
     liftIO (Stream.destroy s')
 
   -- When we call 'put' the actual work may not have been evaluated yet; get
@@ -142,13 +142,16 @@ block = do
   --
   {-# INLINEABLE put #-}
   put (Future ref) v = do
-    stream <- asks ptxStream
-    kernel <- asks ptxKernel
+    stream <- asksParState ptxStream
+    kernel <- asksParState ptxKernel
     event  <- liftPar (Event.waypoint stream)
     ready  <- liftIO  (Event.query event)
-    liftIO . modifyIORef' ref $ \case
-      Empty -> if ready then Full v
-                        else Pending event kernel v
+    let cleanupK = case kernel of
+                     Just k -> touchLifetime k
+                     Nothing -> return ()
+    liftIO . atomicModifyIORef' ref $ \case
+      Empty cleanup -> if ready then (Full v, ())
+                                else (Pending event (cleanup >> cleanupK) v, ())
       _     -> internalError "multiple put"
 
   -- Get the value of Future. Since the actual cross-stream synchronisation
@@ -158,23 +161,21 @@ block = do
   --
   {-# INLINEABLE get #-}
   get (Future ref) = do
-    stream <- asks ptxStream
+    stream <- asksParState ptxStream
     liftIO  $ do
       ivar <- readIORef ref
       case ivar of
         Full v            -> return v
-        Pending event k v -> do
+        Pending event cleanup v -> do
           ready <- Event.query event
           if ready
             then do
               writeIORef ref (Full v)
-              case k of
-                Just f  -> touchLifetime f
-                Nothing -> return ()
+              cleanup
             else
               Event.after event stream
           return v
-        Empty           -> internalError "blocked on an IVar"
+        Empty _         -> internalError "blocked on an IVar"
 
   {-# INLINEABLE block #-}
   block = liftIO . wait
@@ -192,12 +193,36 @@ wait (Future ref) = do
   ivar <- readIORef ref
   case ivar of
     Full v            -> return v
-    Pending event k v -> do
+    Pending event cleanup v -> do
       Event.block event
       writeIORef ref (Full v)
-      case k of
-        Just f  -> touchLifetime f
-        Nothing -> return ()
+      cleanup
       return v
-    Empty           -> internalError "blocked on an IVar"
+    Empty _         -> internalError "blocked on an IVar"
+-}
+
+{-
+{-# INLINEABLE putCleanup #-}
+putCleanup :: HasCallStack => FutureR PTX a -> IO () -> a -> Par PTX ()
+putCleanup (Future ref) cleanup v = do
+  stream <- asksParState ptxStream
+  kernel <- asksParState ptxKernel
+  event  <- liftPar (Event.waypoint stream)
+  ready  <- liftIO  (Event.query event)
+  let cleanupK = case kernel of
+                   Just k -> touchLifetime k
+                   Nothing -> return ()
+  liftIO . atomicModifyIORef' ref $ \case
+    Empty cleanup2 -> if ready then (Full v, ())
+                               else (Pending event (cleanup2 >> cleanup >> cleanupK) v, ())
+    _     -> internalError "multiple put"
+
+{-# INLINEABLE addCleanup #-}
+addCleanup :: HasCallStack => FutureR PTX a -> IO () -> Par PTX ()
+addCleanup (Future ref) cleanup = liftIO $ do
+  toRunNow <- atomicModifyIORef' ref $ \case
+    Full v -> (Full v, cleanup)
+    Pending event cleanup2 v -> (Pending event (cleanup2 >> cleanup) v, return ())
+    Empty cleanup2 -> (Empty (cleanup2 >> cleanup), return ())
+  toRunNow
 -}

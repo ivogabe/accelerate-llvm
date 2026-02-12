@@ -1,7 +1,7 @@
 {-# LANGUAGE TypeApplications #-}
 module Data.Array.Accelerate.LLVM.Target.ClangInfo where
 
-import qualified Text.LLVM.PP                                       as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.PP  as LP
 
 -- standard library
 import qualified Control.Exception                                  as E
@@ -102,7 +102,14 @@ clangMachineVersionOutput :: String
 clangMachineVersionOutput =
   unsafePerformIO $ do
     mstderrOutput <- E.try @IOError $ do
-      (_ec, _out, err) <- readProcessWithExitCode clangExePath ["-E", "-", "-march=native", "-###"] ""
+      -- The -w flag is to suppress warnings.
+      -- The -march is for x86, and -mcpu is for ARM. Handling of these flags
+      -- is backend-dependent in clang and gcc and weirdly idiosyncratic; clang
+      -- barely documents this if at all, but forum posts imply that it tries
+      -- to match gcc's behaviour. Fortunately, it seems that clang still
+      -- prints all we need even if the incompatible flag is present, so we
+      -- just pass both.
+      (_ec, _out, err) <- readProcessWithExitCode clangExePath ["-E", "-", "-march=native", "-mcpu=native", "-w", "-###"] ""
       return err
     case mstderrOutput of
       Left _ -> do

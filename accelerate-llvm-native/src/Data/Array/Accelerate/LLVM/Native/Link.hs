@@ -30,7 +30,7 @@ import Data.Array.Accelerate.LLVM.Native.Link.Cache
 import Data.Array.Accelerate.LLVM.Native.Link.Object
 import Data.Array.Accelerate.LLVM.Native.Link.Runtime
 
-import Control.Monad.State
+import Control.Monad.Reader
 import Prelude                                                      hiding ( lookup )
 import Foreign.Ptr
 import Data.Coerce (coerce)
@@ -40,7 +40,7 @@ import Data.Coerce (coerce)
 --
 link :: ObjectR f -> LLVM Native (Lifetime (FunPtr f))
 link (ObjectR uid nm _ so) = do
-  cache <- gets linkCache
+  cache <- asks linkCache
   fun <- liftIO $ dlsym uid cache (loadSharedObject nm so)
   return $! castLifetimeFunPtr fun
 

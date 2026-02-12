@@ -59,7 +59,7 @@ import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Name
-import qualified Text.LLVM as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
 import Data.Bits
 import Control.Monad

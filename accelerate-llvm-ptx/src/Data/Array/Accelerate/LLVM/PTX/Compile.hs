@@ -1,10 +1,8 @@
-{-# LANGUAGE BangPatterns      #-}
-{-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 {-# LANGUAGE TemplateHaskell   #-}
 {-# LANGUAGE TypeFamilies      #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans   #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Compile
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -41,13 +39,13 @@ import qualified Foreign.CUDA.Analysis                              as CUDA
 
 import qualified LLVM.AST.Type.Name                                 as LLVM
 
-import qualified Text.LLVM                                          as LP
-import qualified Text.LLVM.PP                                       as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.PP  as LP
 import qualified Text.PrettyPrint                                   as Pretty
 
 import Control.DeepSeq
 import Control.Monad                                                ( when )
-import Control.Monad.State
+import Control.Monad.Reader
 import Data.ByteString.Short                                        ( ShortByteString )
 import Data.List                                                    ( intercalate )
 import qualified Data.List.NonEmpty                                 as NE
@@ -81,12 +79,16 @@ compile uid name config module' = do
   cacheFile <- cacheOfUID uid
   -- Generate code for this Acc operation
   --
-  dev                  <- gets ptxDeviceProperties
+  dev                  <- asks ptxDeviceProperties
   let CUDA.Compute m n = CUDA.computeCapability dev
   let arch             = printf "sm_%d%d" m n
   let ast              = downcast module'
 
   libdevice_bc <- liftIO libdeviceBitcodePath
+
+  case isDeviceSupported (CUDA.computeCapability dev) of
+    Nothing -> return ()  -- all fine
+    Just err -> internalError string err
 
   -- Lower the generated LLVM into a CUBIN object code.
   --
@@ -254,6 +256,15 @@ filterClangStderr = unlines . filter (not . isShflSyncWarn) . lines
       in takeWhile (/= ' ') presemi == "ptxas" &&
            postsemi == "; warning : Instruction 'shfl' without '.sync' is deprecated since " ++
                        "PTX ISA version 6.0 and will be discontinued in a future PTX ISA version"
+
+-- | Returns a human-readable error message in case the device is unsupported,
+-- and Nothing if everything is alright.
+isDeviceSupported :: CUDA.Compute -> Maybe String
+isDeviceSupported cc@(CUDA.Compute m _)
+  -- We require shfl instructions which are available only from CC 3.0.
+  | m >= 3 = Nothing
+  | otherwise = Just $
+      "Your GPU has compute capability " ++ show cc ++ ", but only >= 3.0 is supported."
 
 accPreludePTX :: String
 accPreludePTX = unlines

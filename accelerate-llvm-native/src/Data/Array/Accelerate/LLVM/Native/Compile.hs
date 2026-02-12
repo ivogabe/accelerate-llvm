@@ -33,8 +33,8 @@ import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function
 import LLVM.AST.Type.Global
 import LLVM.AST.Type.Name
-import qualified Text.LLVM                                          as P
-import qualified Text.LLVM.PP                                       as P
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as P
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.PP  as P
 import qualified Text.PrettyPrint                                   as P ( render )
 
 import Control.Applicative
@@ -205,7 +205,11 @@ compile uid name module' = do
         let clangFlags inputType outputFlags output =
               -- '-O3' is ignored when only assembling; let's avoid clang warning about that
               (if inputType == "assembler" then [] else ["-O3"]) ++
-              ["-march=native", "-c", "-o", output, "-x", inputType, "-"
+              (case takeWhile (/= '-') (SBS8.unpack nativeTargetTriple) of
+                 "aarch64" -> ["-mcpu=native"]  -- e.g. Ampere
+                 "arm64" -> ["-mcpu=native"]  -- e.g. Apple
+                 _ -> ["-march=native"]) ++  -- e.g. x86_64
+              ["-c", "-o", output, "-x", inputType, "-"
               -- clang knows better what the target triple (and the data
               -- layout) should be than us, so let it override the triple, and
               -- don't warn about it
@@ -265,17 +269,18 @@ compile uid name module' = do
         -- LLVM doesn't seem to provide a way to build a shared object file
         -- directly, so shell out to the system linker to do this.
         --
-        if Info.os == "darwin"
-          -- TODO: should we pass -lm on Darwin too? Seems likely. (The -lm on
-          -- Linux was added to properly declare dependency on libm, so that it
-          -- gets pulled in even if the main executable is statically-linked and
-          -- thus does not have a dynamic libm in its address space.)
-          then callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-undefined", "dynamic_lookup"]
-          else if Info.os == "mingw32"
-            -- On windows linking with the math library (-lm) is not needed.
-            -- The math functions are already defined in the MinGW standard library.
-            then callProcess ld ["--shared", "-o", sharedObjFile, objFile]
-            else callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-lm"]
+        case Info.os of
+          "darwin" ->
+            -- TODO: Unclear if -lm is necessary on Darwin too; let's add it
+            -- just in case. (The -lm on Linux was added to properly declare
+            -- dependency on libm, so that it gets pulled in even if the main
+            -- executable is statically-linked and thus does not have a dynamic
+            -- libm in its address space.)
+            callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-undefined", "dynamic_lookup", "-lm"]
+          "mingw32" ->  -- windows
+            callProcess ld ["--shared", "-o", sharedObjFile, objFile]  -- no -lm necessary on windows
+          _ ->  -- linux etc.
+            callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-lm"]
         Debug.traceM Debug.dump_cc ("cc: new shared object " % shown) uid
 
     return sharedObjFile
