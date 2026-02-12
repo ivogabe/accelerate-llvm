@@ -34,7 +34,7 @@ import System.IO.Unsafe
 import Data.Array.Accelerate.LLVM.Target.ClangInfo
 import Data.Text                                                    ( Text, unpack )
 import Data.Array.Accelerate.LLVM.CodeGen.Monad                     ( CodeGen )
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop               ( putString, fflush )
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop               ( putString, putInt, putchar, fflush, exit )
 
 -- | Native machine code JIT execution target
 --
@@ -48,6 +48,9 @@ instance Target Native where
 
 instance Intrinsic Native where
   trapWithMessage msg = do
-    _ <- putString (unpack msg)
+    _ <- putString ((unpack msg) ++ "\n")
+    -- _ <- putInt (liftInt 65)
+    -- _ <- putchar (liftInt 65)
     _ <- fflush
-    trap
+    exit 1
+    -- trap

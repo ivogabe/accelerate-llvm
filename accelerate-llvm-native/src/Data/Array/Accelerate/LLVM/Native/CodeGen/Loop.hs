@@ -37,6 +37,7 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.Volatile
+import LLVM.AST.Type.Constant
 import qualified LLVM.AST.Type.Instruction.RMW as RMW
 import Control.Monad (void)
 import Control.Monad.Trans
@@ -309,8 +310,18 @@ putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label 
 putString :: String -> CodeGen Native ()
 putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)
 
-fflush :: CodeGen Native ()
-fflush = void $
-  call' (Body VoidType Nothing (Label "fflush"))
-        ArgumentsNil
-        []
+fflush :: CodeGen Native (Operands Int)
+fflush = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "fflush"))
+              (ArgumentsCons (op TypeWord64 (liftWord64 0)) [] ArgumentsNil)
+              []
+
+-- exit :: CodeGen Native ()
+-- exit = void $ call (Body (PrimType primType) Nothing (Label "exit"))
+--               (ArgumentsCons (op TypeInt (liftInt 1)) [] ArgumentsNil)
+--               []
+--
+
+exit :: Int -> CodeGen Native ()
+exit n = void $ call (lamUnnamed primType $ Body VoidType Nothing (Label "exit"))
+                     (ArgumentsCons (op TypeInt (liftInt n)) [] ArgumentsNil)
+                     []
