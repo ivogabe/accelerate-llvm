@@ -33,7 +33,7 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 
 import Data.Array.Accelerate.LLVM.Foreign
-import Data.Array.Accelerate.LLVM.Native.Target
+import {-# SOURCE #-} Data.Array.Accelerate.LLVM.Native.Target     (Native)
 
 import Control.Monad.State
 import Data.Typeable

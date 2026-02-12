@@ -30,7 +30,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Profile
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as Loop
 
-import {-# SOURCE #-} Data.Array.Accelerate.LLVM.Native.Target      ( Native )
+import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Operand
@@ -39,11 +39,9 @@ import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Constant
 import qualified LLVM.AST.Type.Instruction.RMW as RMW
-import Control.Monad (void)
 import Control.Monad.Trans
 import Control.Monad.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
-import LLVM.AST.Type.Function
 import LLVM.AST.Type.Name
 
 -- | A standard 'for' loop, that steps from the start to end index executing the
@@ -289,33 +287,3 @@ atomicAdd :: MemoryOrdering -> Operand (Ptr Word64) -> Operand Word64 -> CodeGen
 atomicAdd ordering ptr increment = do
   instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)
 
----- debugging tools ----
-printf :: IsPrim a => String -> Operand a -> CodeGen Native (Operands Int)
-printf format val = do
-  (nm, l) <- global_string format
-  let strPtr = ConstantOperand $ derefGlobalString l nm
-  call (lamUnnamed primType $ lamUnnamed primType $ Body (PrimType primType) Nothing (Label "printf"))
-       (ArgumentsCons strPtr []
-         $ ArgumentsCons val []
-           ArgumentsNil)
-       []
-
-putInt :: Operands Int -> CodeGen Native ()
-putInt x = void $ printf "%d" (op TypeInt x)
-
-putchar :: Operands Int -> CodeGen Native (Operands Int)
-putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar")) 
-                 (ArgumentsCons (op TypeInt x) [] ArgumentsNil) 
-                 []
-putString :: String -> CodeGen Native ()
-putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)
-
-fflush :: CodeGen Native (Operands Int)
-fflush = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "fflush"))
-              (ArgumentsCons (op TypeWord64 (liftWord64 0)) [] ArgumentsNil)
-              []
-
-abort :: CodeGen Native ()
-abort = void $ call (Body VoidType Nothing (Label "abort"))
-                    ArgumentsNil
-                    []
