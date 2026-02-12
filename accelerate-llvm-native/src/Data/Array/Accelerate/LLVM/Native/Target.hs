@@ -20,6 +20,7 @@ module Data.Array.Accelerate.LLVM.Native.Target (
 ) where
 
 -- accelerate
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Base               ( putString, fflush, abort )
 import Data.Array.Accelerate.LLVM.Native.Link.Cache                 ( LinkCache )
 import Data.Array.Accelerate.LLVM.Target                            ( Target(..) )
 import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
@@ -35,7 +36,6 @@ import System.IO.Unsafe
 import Data.Array.Accelerate.LLVM.Target.ClangInfo
 import Data.Text                                                    ( Text, unpack )
 import Data.Array.Accelerate.LLVM.CodeGen.Monad                     ( CodeGen )
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop               ( putString, fflush, abort )
 
 -- | Native machine code JIT execution target
 --
