@@ -51,6 +51,11 @@ instance Intrinsic Native where
   trapWithMessage msg = do
     _ <- putString (unpack msg ++ "\n")
 
+    -- On Windows calling putString and llvm.trap consecutively causes
+    -- the program to hang in an infinite loop, repeatedly printing newline characters.
+    -- So instead of using llvm.trap, we call the abort function from the C standard library.
+    -- This is also what llvm.trap would be lowered to if the target does not have a trap instruction.
+    -- See: https://llvm.org/docs/LangRef.html#llvm-trap-intrinsic
     if Info.os == "mingw32"
       then abort
       else trap
