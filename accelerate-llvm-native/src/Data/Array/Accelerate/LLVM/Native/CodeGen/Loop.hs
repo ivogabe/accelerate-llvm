@@ -310,11 +310,6 @@ putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label 
 putString :: String -> CodeGen Native ()
 putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)
 
-fflush :: CodeGen Native (Operands Int)
-fflush = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "fflush"))
-              (ArgumentsCons (op TypeWord64 (liftWord64 0)) [] ArgumentsNil)
-              []
-
 abort :: CodeGen Native ()
 abort = void $ call (Body VoidType Nothing (Label "abort"))
                     ArgumentsNil
