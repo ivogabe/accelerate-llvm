@@ -20,3 +20,5 @@ data CodeGenContext
 newtype CodeGen target a = CodeGen
   { runCodeGen :: ReaderT CodeGenContext (StateT CodeGenState (LLVM target)) a }
 
+instance Monad (CodeGen target)
+

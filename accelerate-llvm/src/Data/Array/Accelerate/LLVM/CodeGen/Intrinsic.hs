@@ -45,6 +45,7 @@ class Intrinsic arch where
   intrinsicForTarget = llvmIntrinsic
 
   trapWithMessage :: Text -> CodeGen arch ()
+  trapWithMessage _ = return ()
 
 llvmIntrinsic :: HashMap ShortByteString Label
 llvmIntrinsic =
