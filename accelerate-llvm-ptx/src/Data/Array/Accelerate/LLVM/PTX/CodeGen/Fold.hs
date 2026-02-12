@@ -570,7 +570,7 @@ reduceFromSMem dev tp identity fun maxSize size smem
     lane <- laneId
     ptr <- tupleArrayGep tp smem lane
     value <- tupleLoad tp ptr
-    reduceWarpShfl dev tp identity fun (Just $ OP_Int32 size) value
+    reduceWarp dev tp identity fun (Just $ OP_Int32 size) value
 
 {-
 

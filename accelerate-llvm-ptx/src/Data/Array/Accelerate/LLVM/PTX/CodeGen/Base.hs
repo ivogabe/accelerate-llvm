@@ -73,7 +73,7 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant        as A
-import Data.Array.Accelerate (KernelMetadata)
+import Data.Array.Accelerate.Backend (KernelMetadata)
 
 import Foreign.CUDA.Analysis                                        ( Compute(..), computeCapability )
 import qualified Foreign.CUDA.Analysis                              as CUDA
@@ -728,7 +728,7 @@ sharedMemorySizeAdd tp n i = case tp of
     let
       bytes = bytesElt tp
       -- Align 'i' to the alignment of t
-      aligned = alignTo (scalarAlignment t) i
+      aligned = alignToInt (scalarAlignment t) i
     in
       aligned + bytes * n
 
@@ -802,6 +802,11 @@ alignTo align ptr = do
   x <- A.add numType ptr $ OP_Int32 $ A.integral TypeInt32 $ align - 1
   A.band TypeInt32 x $ OP_Int32 $ A.integral TypeInt32 $ Data.Bits.complement $ align - 1
 
+-- Align 'ptr' to the given alignment.
+-- Assumes 'align' is a power of 2.
+alignToInt :: Int -> Int -> Int
+alignToInt align ptr = (ptr + align - 1) .&. Data.Bits.complement (align - 1)
+
 -- Other functions
 -- ---------------
 
@@ -846,8 +851,3 @@ type KernelType env = Ptr (SizedArray Word) -> MarshalFun env
 scalarAlignment :: ScalarType t -> Int
 scalarAlignment t@(SingleScalarType _) = bytesElt (TupRsingle t)
 scalarAlignment (VectorScalarType (VectorType _ t)) = bytesElt (TupRsingle $ SingleScalarType t)
-
--- Align 'ptr' to the given alignment.
--- Assumes 'align' is a power of 2.
-alignTo :: Int -> Int -> Int
-alignTo align ptr = (ptr + align - 1) .&. Data.Bits.complement (align - 1)

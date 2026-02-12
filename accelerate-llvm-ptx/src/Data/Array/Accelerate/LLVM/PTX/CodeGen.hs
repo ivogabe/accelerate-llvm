@@ -64,7 +64,7 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 -- import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (atomically)
 import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists), flattenTupR)
 import Control.Monad
-import Control.Monad.State ( gets )
+import Control.Monad.Reader ( asks )
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
@@ -279,7 +279,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   )
   -- Code within the tile loop: perform reduction
   (\_ (_, smemWarp) _ envs -> do
-    dev <- liftCodeGen $ gets ptxDeviceProperties
+    dev <- liftCodeGen $ asks ptxDeviceProperties
     let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
@@ -313,7 +313,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   (\_ (smem, _) kernelMem envs -> warpPerThreadBlock $ do
     let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
-    dev <- liftCodeGen $ gets ptxDeviceProperties
+    dev <- liftCodeGen $ asks ptxDeviceProperties
 
     aggregate <-
       if foldOrScan == IsFold then
@@ -414,7 +414,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   )
   -- Code in next tile loop
   (if foldOrScan == IsFold then Nothing else Just (analysis, \(_, smemWarp) _ envs -> do
-    dev <- liftCodeGen $ gets ptxDeviceProperties
+    dev <- liftCodeGen $ asks ptxDeviceProperties
     let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
@@ -445,7 +445,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
       )
       (return x)
     
-    (scanned, reduced) <- scanWarpShfl
+    (scanned, reduced) <- scanWarp
       dir inclusiveness dev tp identity' fun'
       (if envsGpuFullWarp envs then Nothing else Just $ OP_Int32 $ envsGpuWarpActiveThreads envs)
       y

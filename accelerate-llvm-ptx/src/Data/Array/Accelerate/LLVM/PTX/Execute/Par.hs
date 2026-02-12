@@ -69,7 +69,7 @@ liftPar = Par . lift . lift
 
 spawnPar :: Par () -> Par ()
 spawnPar spawned = do
-  target <- liftPar $ gets llvmTarget
+  target <- liftPar $ asks llvmTarget
   stream <- asks ptxStream
   event <- liftPar $ Event.waypoint stream
   _ <- liftIO $ forkIO $ evalPTX target $ evalPar $ do

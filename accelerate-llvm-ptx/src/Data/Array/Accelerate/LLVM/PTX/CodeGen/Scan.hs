@@ -20,7 +20,7 @@
 
 module Data.Array.Accelerate.LLVM.PTX.CodeGen.Scan (
 
-  scanWarpShfl, scanFromSMem
+  scanWarp, scanFromSMem
 
 ) where
 
@@ -1343,7 +1343,7 @@ scanFromSMem dev tp identity fun maxSize size smem
     lane <- laneId
     ptr <- tupleArrayGep tp smem lane
     value <- tupleLoad tp ptr
-    (scanned, reduced) <- scanWarpShfl LeftToRight ScanExclusive dev tp identity fun (Just $ OP_Int32 size) value
+    (scanned, reduced) <- scanWarp LeftToRight ScanExclusive dev tp identity fun (Just $ OP_Int32 size) value
     tupleStore tp ptr scanned
     return reduced
 

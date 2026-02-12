@@ -122,7 +122,7 @@ create = do
 {-# INLINEABLE destroy #-}
 destroy :: Stream -> LLVM PTX ()
 destroy stream = do
-  PTX{..} <- gets llvmTarget
+  PTX{..} <- asks llvmTarget
   liftIO $ RSV.insert ptxStreamReservoir stream
 
 

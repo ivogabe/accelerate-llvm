@@ -56,7 +56,7 @@ import qualified Data.ByteString.Char8 as Char8
 import System.FilePath                                              ( FilePath, (<.>) )
 import System.IO.Unsafe
 import Control.DeepSeq
-import Control.Monad.State
+import Control.Monad.Reader
 import Data.Typeable
 import Foreign.Ptr
 import Prettyprinter
@@ -107,7 +107,7 @@ instance IsKernel PTXKernel where
 
   compileKernel env cluster args = unsafePerformIO $ evalPTX defaultTarget $ do
     ptxCode <- codegen fullName env cluster args
-    dev <- gets ptxDeviceProperties
+    dev <- asks ptxDeviceProperties
     -- TODO: Change simpleLaunchConfig to launchConfig when we use shared memory
     -- TODO: Also compile initialization and finalization kernels
     obj <- compile uid (fromString $ fullName) (simpleLaunchConfig dev) (ptxCodeWork ptxCode)
