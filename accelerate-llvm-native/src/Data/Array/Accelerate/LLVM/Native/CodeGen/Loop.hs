@@ -315,13 +315,7 @@ fflush = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "ff
               (ArgumentsCons (op TypeWord64 (liftWord64 0)) [] ArgumentsNil)
               []
 
--- exit :: CodeGen Native ()
--- exit = void $ call (Body (PrimType primType) Nothing (Label "exit"))
---               (ArgumentsCons (op TypeInt (liftInt 1)) [] ArgumentsNil)
---               []
---
-
-exit :: Int -> CodeGen Native ()
-exit n = void $ call (lamUnnamed primType $ Body VoidType Nothing (Label "exit"))
-                     (ArgumentsCons (op TypeInt (liftInt n)) [] ArgumentsNil)
-                     []
+abort :: CodeGen Native ()
+abort = void $ call (Body VoidType Nothing (Label "abort"))
+                    ArgumentsNil
+                    []

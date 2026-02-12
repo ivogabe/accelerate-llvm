@@ -30,11 +30,12 @@ import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic (liftInt)
 -- standard library
 import Data.ByteString                                              ( ByteString )
 import Data.ByteString.Short                                        ( ShortByteString )
+import qualified System.Info                                        as Info
 import System.IO.Unsafe
 import Data.Array.Accelerate.LLVM.Target.ClangInfo
 import Data.Text                                                    ( Text, unpack )
 import Data.Array.Accelerate.LLVM.CodeGen.Monad                     ( CodeGen )
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop               ( putString, putInt, putchar, fflush, exit )
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop               ( putString, fflush, abort )
 
 -- | Native machine code JIT execution target
 --
@@ -48,9 +49,10 @@ instance Target Native where
 
 instance Intrinsic Native where
   trapWithMessage msg = do
-    _ <- putString ((unpack msg) ++ "\n")
-    -- _ <- putInt (liftInt 65)
-    -- _ <- putchar (liftInt 65)
+    _ <- putString (unpack msg ++ "\n")
     _ <- fflush
-    exit 1
-    -- trap
+
+    if Info.os == "mingw32"
+      then abort
+      else trap
+
