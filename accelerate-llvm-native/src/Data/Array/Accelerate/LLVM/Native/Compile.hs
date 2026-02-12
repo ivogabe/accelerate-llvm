@@ -271,7 +271,11 @@ compile uid name module' = do
           -- gets pulled in even if the main executable is statically-linked and
           -- thus does not have a dynamic libm in its address space.)
           then callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-undefined", "dynamic_lookup"]
-          else callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-lm"]
+          else if Info.os == "mingw32"
+            -- On windows linking with the math library (-lm) is not needed.
+            -- The math functions are already defined in the MinGW standard library.
+            then callProcess ld ["--shared", "-o", sharedObjFile, objFile]
+            else callProcess ld ["--shared", "-o", sharedObjFile, objFile, "-lm"]
         Debug.traceM Debug.dump_cc ("cc: new shared object " % shown) uid
 
     return sharedObjFile
