@@ -225,7 +225,7 @@ llvmOfOpenExp arrayInstr top env = cvtE top
            -> IROpenExp arch env PrimBool
            -> IROpenExp arch env a
            -> IROpenExp arch env a
-    assert msg c e = do -- TODO: Bericht printen??
+    assert msg c e = do
       A.unless (bool c) (trapWithMessage msg)
       e
 
