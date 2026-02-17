@@ -20,12 +20,14 @@ module Data.Array.Accelerate.LLVM.Native.Target (
 ) where
 
 -- accelerate
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Base               ( putString, fflush, abort )
 import Data.Array.Accelerate.LLVM.Native.Link.Cache                 ( LinkCache )
 import Data.Array.Accelerate.LLVM.Target                            ( Target(..) )
 import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.CodeGen.Exp                       ( trap )
-
+import Data.Array.Accelerate.LLVM.CodeGen.IR
+import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic
+import Data.Array.Accelerate.LLVM.CodeGen.Base
+import Data.Array.Accelerate.LLVM.CodeGen.Profile
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic (liftInt)
 -- standard library
@@ -36,6 +38,12 @@ import System.IO.Unsafe
 import Data.Array.Accelerate.LLVM.Target.ClangInfo
 import Data.Text                                                    ( Text, unpack )
 import Data.Array.Accelerate.LLVM.CodeGen.Monad                     ( CodeGen )
+import Control.Monad                                                ( void )
+
+import LLVM.AST.Type.Representation
+import LLVM.AST.Type.Name
+import LLVM.AST.Type.Operand
+import LLVM.AST.Type.Function
 
 -- | Native machine code JIT execution target
 --
@@ -60,4 +68,34 @@ instance Intrinsic Native where
     if Info.os == "mingw32"
       then abort
       else trap
+
+printf :: IsPrim a => String -> Operand a -> CodeGen Native (Operands Int)
+printf format val = do
+  (nm, l) <- global_string format
+  let strPtr = ConstantOperand $ derefGlobalString l nm
+  call (lamUnnamed primType $ lamUnnamed primType $ Body (PrimType primType) Nothing (Label "printf"))
+       (ArgumentsCons strPtr []
+         $ ArgumentsCons val []
+           ArgumentsNil)
+       []
+
+putInt :: Operands Int -> CodeGen Native ()
+putInt x = void $ printf "%d" (op TypeInt x)
+
+putchar :: Operands Int -> CodeGen Native (Operands Int)
+putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar"))
+                 (ArgumentsCons (op TypeInt x) [] ArgumentsNil)
+                 []
+putString :: String -> CodeGen Native ()
+putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)
+
+fflush :: CodeGen Native (Operands Int)
+fflush = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "fflush"))
+              (ArgumentsCons (op TypeWord64 (liftWord64 0)) [] ArgumentsNil)
+              []
+
+abort :: CodeGen Native ()
+abort = void $ call (Body VoidType Nothing (Label "abort"))
+                    ArgumentsNil
+                    []
 
