@@ -57,7 +57,7 @@ instance Target Native where
 
 instance Intrinsic Native where
   trapWithMessage msg = do
-    _ <- putString (unpack msg ++ "\n")
+    _ <- putString (unpack msg)
     _ <- fflush
 
     -- On Windows calling putString and llvm.trap consecutively causes
@@ -86,8 +86,14 @@ putchar :: Operands Int -> CodeGen Native (Operands Int)
 putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar"))
                  (ArgumentsCons (op TypeInt x) [] ArgumentsNil)
                  []
-putString :: String -> CodeGen Native ()
-putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)
+
+putString :: String -> CodeGen Native (Operands Int)
+putString msg = do
+  (nm, l) <- global_string msg
+  let strPtr = ConstantOperand $ derefGlobalString l nm
+  call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "puts"))
+       (ArgumentsCons strPtr [] ArgumentsNil)
+       []
 
 fflush :: CodeGen Native (Operands Int)
 fflush = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "fflush"))
