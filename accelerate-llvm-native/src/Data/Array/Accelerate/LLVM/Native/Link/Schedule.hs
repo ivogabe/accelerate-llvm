@@ -26,7 +26,7 @@ import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.IdxSet ( IdxSet(..) )
 import qualified Data.Array.Accelerate.AST.IdxSet as IdxSet
 import Data.Array.Accelerate.AST.LeftHandSide
-import Data.Array.Accelerate.AST.Schedule.Uniform
+import Data.Array.Accelerate.AST.Schedule.Uniform hiding (Select)
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
