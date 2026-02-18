@@ -226,7 +226,7 @@ llvmOfOpenExp arrayInstr top env = cvtE top
            -> IROpenExp arch env a
            -> IROpenExp arch env a
     assert msg c e = do
-      A.unless (bool c) (trapWithMessage msg)
+      A.unless (bool c) (trapWithMessage $ "*** Assertion failed: " <> msg)
       e
 
     while :: TypeR a
