@@ -29,7 +29,9 @@ import qualified Data.Map                                           as Map
 
 #if __GLASGOW_HASKELL__ >= 902
 import GHC.Driver.Backend
+#if __GLASGOW_HASKELL__ < 910
 import GHC.Linker
+#endif
 import GHC.Linker.Loader                                            ( loadCmdLineLibs )
 import GHC.Plugins
 import GHC.Runtime.Interpreter
@@ -49,9 +51,13 @@ import SysTools
 -- 'Data.Array.Accelerate.LLVM.Native.runQ'* which must be linked into the final
 -- executable.
 --
--- To use it, add the following to the .cabal file of your project:
+-- This plugin is automatically installed when using runQ. In older versions of
+-- GHC, it was necessary to manually add the plugin using:
 --
 -- > ghc-options: -fplugin=Data.Array.Accelerate.LLVM.Native.Plugin
+--
+-- That is no longer needed.
+
 --
 plugin :: Plugin
 plugin = defaultPlugin

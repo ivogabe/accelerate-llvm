@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RecordWildCards     #-}
@@ -54,7 +53,7 @@ import LLVM.AST.Type.Representation
 import Foreign.CUDA.Analysis
 
 import Control.Monad                                                ( void )
-import Control.Monad.State                                          ( gets )
+import Control.Monad.Reader                                         ( asks )
 import Prelude
 
 {-
@@ -125,7 +124,7 @@ mkPermute_rmw
     -> MIRDelayed PTX aenv (Array sh e)
     -> CodeGen    PTX      (IROpenAcc PTX aenv (Array sh' e))
 mkPermute_rmw uid aenv (ArrayR shr tp) shr' rmw update project marr = do
-  dev <- liftCodeGen $ gets ptxDeviceProperties
+  dev <- liftCodeGen $ asks ptxDeviceProperties
   --
   let
       outR                = ArrayR shr' tp
@@ -269,7 +268,7 @@ atomically
 atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
   | irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
   = do
-    dev <- liftCodeGen $ gets ptxDeviceProperties
+    dev <- liftCodeGen $ asks ptxDeviceProperties
     if computeCapability dev >= Compute 7 0
       then atomically_thread bufptr i action
       else atomically_warp   bufptr i action

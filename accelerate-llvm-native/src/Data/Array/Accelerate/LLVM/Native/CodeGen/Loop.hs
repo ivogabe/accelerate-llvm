@@ -37,12 +37,11 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.Volatile
+import LLVM.AST.Type.Constant
 import qualified LLVM.AST.Type.Instruction.RMW as RMW
-import Control.Monad (void)
 import Control.Monad.Trans
 import Control.Monad.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
-import LLVM.AST.Type.Function
 import LLVM.AST.Type.Name
 
 -- | A standard 'for' loop, that steps from the start to end index executing the
@@ -288,28 +287,3 @@ chunkEnd (ShapeRsnoc shr) (OP_Pair sh0 sz0) (OP_Pair sh1 sz1) (OP_Pair sh2 sz2) 
 atomicAdd :: MemoryOrdering -> Operand (Ptr Word64) -> Operand Word64 -> CodeGen Native (Operand Word64)
 atomicAdd ordering ptr increment = do
   instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)
-
-atomicRead :: MemoryOrdering -> Operand (Ptr Word64) -> CodeGen Native (Operand Word64)
--- TODO: actually use load
-atomicRead ordering ptr = atomicAdd ordering ptr (integral TypeWord64 0)
-
----- debugging tools ----
-printf :: IsPrim a => String -> Operand a -> CodeGen Native (Operands Int)
-printf format val = do
-  (nm, l) <- global_string format
-  let strPtr = ConstantOperand $ derefGlobalString l nm
-  call (lamUnnamed primType $ lamUnnamed primType $ Body (PrimType primType) Nothing (Label "printf"))
-       (ArgumentsCons strPtr []
-         $ ArgumentsCons val []
-           ArgumentsNil)
-       []
-
-putInt :: Operands Int -> CodeGen Native ()
-putInt x = void $ printf "%d" (op TypeInt x)
-
-putchar :: Operands Int -> CodeGen Native (Operands Int)
-putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar")) 
-                 (ArgumentsCons (op TypeInt x) [] ArgumentsNil) 
-                 []
-putString :: String -> CodeGen Native ()
-putString str = foldl (>>) (return ()) (map (void . putchar . liftInt . fromEnum) str)

@@ -52,7 +52,7 @@ import Data.Array.Accelerate.Representation.Array                   ( Array, Arr
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 
-import qualified Text.LLVM                                          as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LP
 
 import Data.Monoid
 import Data.String

@@ -19,6 +19,7 @@ module Data.Array.Accelerate.LLVM.PTX.Execute.Event (
 
 import Data.Array.Accelerate.Lifetime
 
+import qualified Data.Array.Accelerate.LLVM.PTX.Context             as Context
 import Data.Array.Accelerate.LLVM.PTX.Target                        ( PTX(..) )
 import Data.Array.Accelerate.LLVM.State
 import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
@@ -30,7 +31,7 @@ import qualified Foreign.CUDA.Driver.Stream                         as Stream
 
 import Control.Exception
 import Control.Monad
-import Control.Monad.State
+import Control.Monad.Reader
 import Data.Text.Lazy.Builder
 import Formatting
 
@@ -47,15 +48,18 @@ type Event = Lifetime Event.Event
 {-# INLINEABLE create #-}
 create :: LLVM PTX Event
 create = do
+  ctx   <- asks ptxContext
   e     <- create'
   event <- liftIO $ newLifetime e
-  liftIO $ addFinalizer event $ do message ("destroy " % formatEvent) e
-                                   Event.destroy e
+  liftIO $ addFinalizer event $ do
+             message ("destroy " % formatEvent) e
+             Context.contextFinalizeResource ctx $
+               Event.destroy e
   return event
 
 create' :: LLVM PTX Event.Event
 create' = do
-  -- PTX{ptxMemoryTable} <- gets llvmTarget
+  -- PTX{ptxMemoryTable} <- asks llvmTarget
   me      <- attempt "create/new" (liftIO . catchOOM $ Event.create [Event.DisableTiming])
              {- `orElse` do
                Remote.reclaim ptxMemoryTable

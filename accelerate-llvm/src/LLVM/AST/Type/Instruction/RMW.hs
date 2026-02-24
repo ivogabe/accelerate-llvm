@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                   #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
@@ -21,7 +20,7 @@ import Data.Array.Accelerate.Error
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Representation
 
-import qualified Text.LLVM                                          as LLVM
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LLVM
 
 
 -- | Operations for the 'AtomicRMW' instruction.

@@ -15,8 +15,8 @@ module LLVM.AST.Type.Module
 
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Global
-import qualified Text.LLVM as LP
-import qualified Text.LLVM.Triple as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.Triple as LP
 
 import qualified Data.Map as Map
 

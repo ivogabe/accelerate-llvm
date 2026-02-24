@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen
@@ -14,6 +15,7 @@
 
 module Data.Array.Accelerate.LLVM.PTX.CodeGen (
 
+  PTXCode(..),
   codegen,
   KernelMetadata,
 
@@ -49,7 +51,7 @@ import Data.Maybe
 
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
-import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW
@@ -62,36 +64,53 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 -- import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (atomically)
 import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists), flattenTupR)
 import Control.Monad
-import Control.Monad.State ( gets )
+import Control.Monad.Reader ( asks )
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
-import Data.Array.Accelerate.LLVM.CodeGen.Constant
-import qualified Text.LLVM as LP
+import Data.Array.Accelerate.LLVM.CodeGen.Constant as Const
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
-codegen :: String
+data PTXCode env = PTXCode
+  { ptxCodeSize :: [Idx env Int] -- The product of these variables is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
+  , ptxCodeKernelMemory :: Int  -- The size of the kernel data, shared by all threads working on this kernel.
+  , ptxCodeInit :: Maybe (Module (KernelType env))
+  , ptxCodeWork :: Module (KernelType env)
+  , ptxCodeFinish :: Maybe (Module (KernelType env))
+  }
+
+codegen :: forall env args.
+           String
         -> Env AccessGroundR env
         -> Clustered PTXOp args
         -> Args env args
-        -> LLVM PTX
-           ( ( [Idx env Int] -- The product of these variables is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
-             , Int ) -- The size of the kernel data, shared by all threads working on this kernel.
-           , Module (KernelType env))
+        -> LLVM PTX (PTXCode env)
 codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth
  , Refl <- marshalFunResultUnit env =
-  codeGenKernel name (LLVM.Lam kernelDataRawType "kernel_data" . bindArgs) $ do
-    extractEnv
-    if parallelDepth == 0 && rank shr /= 0 then do
-      internalError "TODO: Implement parallel collective operations on one-dimensional arrays"
-    else if parallelDepth /= rank shr then do
-      internalError "TODO: Implement parallel collective operations on multi-dimensional arrays"
-    else do
-      -- Parallelise over all independent dimensions
-      let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
-      let parSizes = parallelIterSize parallelShr loops
+  if parallelDepth == 0 && rank shr /= 0 then do
+    -- Parallelise over the first dimension using parallel folds or scans
+    let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+    let ((idxVar, direction, size), loops') = case loops of
+          [] -> internalError "Expected at least one loop since rank shr /= 0"
+          (l:ls) -> (l, ls)
+
+    case parCodeGens (parCodeGen $ undefined {- isDescending -} direction) 0 $ opCodeGens opCodeGen flatOps of
+      Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
+      Just (Exists parCodes) -> do
+
+        -- index <- atomicAdd Monotonic undefined (integral TypeWord64 1)
+
+        undefined
+
+  else do
+    -- Parallelise over all independent dimensions
+    let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+    let parSizes = parallelIterSize parallelShr loops
+
+    kernelWork <- codeGenKernel' "" $ do
       parSize <- shapeSize parallelShr parSizes
 
       imapFromTo (A.liftInt 0) parSize $ \linearIdx -> do
@@ -109,10 +128,19 @@ codegen name env cluster args
 
       return_
 
-    let maxGridSize = map sizeVar $ flattenTupR sizes
-    let kernelMemSize = 0 -- We don't use kernel data yet
-    return (maxGridSize, kernelMemSize)
+    return $ PTXCode
+      (map sizeVar $ flattenTupR sizes)
+      0 -- We don't need kernel memory here
+      Nothing -- No need to initialize kernel memory
+      kernelWork
+      Nothing -- No need to finalize kernel memory
   where
+    codeGenKernel'
+      :: LLVM.Result (MarshalFun env) ~ ()
+      => String -> CodeGen PTX () -> LLVM PTX (Module (KernelType env))
+    codeGenKernel' postfix body =
+      snd <$> codeGenKernel (name ++ postfix) (LLVM.Lam kernelDataRawType "kernel_data" . bindArgs) (extractEnv >> body)
+
     (bindArgs, extractEnv, gamma) = bindEnvArgs @PTX env
     kernelDataRawType :: PrimType (Ptr (SizedArray Word))
     kernelDataRawType = PtrPrimType (ArrayPrimType 0 primType) defaultAddrSpace
@@ -251,11 +279,11 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   )
   -- Code within the tile loop: perform reduction
   (\_ (_, smemWarp) _ envs -> do
-    dev <- liftCodeGen $ gets ptxDeviceProperties
+    dev <- liftCodeGen $ asks ptxDeviceProperties
     let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
-    warpValue <- reduceWarpShfl
+    warpValue <- reduceWarp
       dev tp identity' fun'
       (if envsGpuFullWarp envs then Nothing else Just $ OP_Int32 $ envsGpuWarpActiveThreads envs)
       x
@@ -285,7 +313,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   (\_ (smem, _) kernelMem envs -> warpPerThreadBlock $ do
     let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
-    dev <- liftCodeGen $ gets ptxDeviceProperties
+    dev <- liftCodeGen $ asks ptxDeviceProperties
 
     aggregate <-
       if foldOrScan == IsFold then
@@ -311,7 +339,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
             )
             (\_ -> return OP_Unit) -- TODO: Maybe add nanosleep here
             OP_Unit
-          _ <- instr' $ Fence (CrossThread, Acquire)
+          _ <- instr' $ LLVM.Fence (CrossThread, Acquire)
           
           OP_Pair exclusive inclusive <-
             if isNothing seed then
@@ -319,7 +347,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
               -- The other tiles must combine their result with the given operator.
               A.ifThenElse (TupRpair tp tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
                 (do
-                  return $ OP_Pair (undefs tp) aggregate
+                  return $ OP_Pair (Const.undefs tp) aggregate
                 )
                 (do
                   prefix <- tupleLoad tp valuePtrs
@@ -343,7 +371,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
 
           tupleStore tp valuePtrs inclusive
 
-          _ <- instr' $ Fence (CrossThread, Release)
+          _ <- instr' $ LLVM.Fence (CrossThread, Release)
           OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
           _ <- instr' $ Store Volatile idxPtr nextIdx
           return exclusive
@@ -386,7 +414,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   )
   -- Code in next tile loop
   (if foldOrScan == IsFold then Nothing else Just (analysis, \(_, smemWarp) _ envs -> do
-    dev <- liftCodeGen $ gets ptxDeviceProperties
+    dev <- liftCodeGen $ asks ptxDeviceProperties
     let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
@@ -417,7 +445,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
       )
       (return x)
     
-    (scanned, reduced) <- scanWarpShfl
+    (scanned, reduced) <- scanWarp
       dir inclusiveness dev tp identity' fun'
       (if envsGpuFullWarp envs then Nothing else Just $ OP_Int32 $ envsGpuWarpActiveThreads envs)
       y

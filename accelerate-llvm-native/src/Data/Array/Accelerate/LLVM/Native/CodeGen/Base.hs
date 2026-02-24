@@ -4,6 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies        #-}
 {-# LANGUAGE TypeOperators       #-}
+{-# OPTIONS_GHC -Wno-orphans     #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 -- Copyright   : [2015..2020] The Accelerate Team
@@ -17,17 +18,10 @@
 module Data.Array.Accelerate.LLVM.Native.CodeGen.Base
   where
 
-import Data.Array.Accelerate.LLVM.CodeGen.Base
-import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
-import Data.Array.Accelerate.LLVM.CodeGen.Profile
-import Data.Array.Accelerate.LLVM.CodeGen.Sugar
-import Data.Array.Accelerate.LLVM.Compile.Cache
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import Data.Array.Accelerate.LLVM.Native.Foreign                    ()
-import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
 import Data.Primitive.Vec
@@ -36,8 +30,6 @@ import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Operand
-import LLVM.AST.Type.Name
-import LLVM.AST.Type.Module
 
 import Data.String
 import qualified Data.ByteString.Short.Char8                        as S8

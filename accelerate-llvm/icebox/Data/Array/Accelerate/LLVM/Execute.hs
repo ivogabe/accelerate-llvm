@@ -1,6 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes   #-}
 {-# LANGUAGE BangPatterns          #-}
-{-# LANGUAGE CPP                   #-}
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
@@ -31,7 +30,7 @@ import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Array.Data
-import Data.Array.Accelerate.Interpreter                        ( evalPrim, evalPrimConst, evalCoerceScalar, atraceOp )
+import Data.Array.Accelerate.Interpreter                        ( evalPrim, evalCoerceScalar, atraceOp )
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Shape
@@ -500,7 +499,6 @@ executeOpenExp rootExp env aenv = travE rootExp
                                      executeOpenExp body env' aenv
       Undef tp                  -> newFull $ undefElt (TupRsingle tp)
       Const _ c                 -> newFull c
-      PrimConst c               -> newFull (evalPrimConst c)
       PrimApp f x               -> lift1 (newFull . evalPrim f) (travE x)
       Nil                       -> newFull ()
       Pair e1 e2                -> liftF2 (,) (travE e1) (travE e2)

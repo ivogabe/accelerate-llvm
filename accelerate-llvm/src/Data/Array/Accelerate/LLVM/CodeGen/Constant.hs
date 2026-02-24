@@ -12,14 +12,12 @@
 
 module Data.Array.Accelerate.LLVM.CodeGen.Constant (
 
-  primConst,
   constant, scalar, single, vector, num, integral, floating, boolean,
   undef, undefs,
 
 ) where
 
 
-import Data.Array.Accelerate.AST                                ( PrimConst(..) )
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
@@ -29,23 +27,6 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
 import Data.Primitive.Vec
-
-
--- | Primitive constant values
---
-primConst :: PrimConst t -> t
-primConst (PrimMinBound t) = primMinBound t
-primConst (PrimMaxBound t) = primMaxBound t
-primConst (PrimPi t)       = primPi t
-
-primMinBound :: BoundedType a -> a
-primMinBound (IntegralBoundedType t) | IntegralDict <- integralDict t = minBound
-
-primMaxBound :: BoundedType a -> a
-primMaxBound (IntegralBoundedType t) | IntegralDict <- integralDict t = maxBound
-
-primPi :: FloatingType a -> a
-primPi t | FloatingDict <- floatingDict t = pi
 
 
 -- | A constant value
