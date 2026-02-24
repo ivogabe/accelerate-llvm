@@ -661,7 +661,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
           )
           (\_ -> return OP_Unit)
           OP_Unit
-        _ <- instr' $ Fence (CrossThread, Acquire)
+        _ <- instr' $ LLVM.Fence (CrossThread, Acquire)
 
         local <- tupleLoad tp accumVar
 
@@ -695,7 +695,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
         tupleStoreArray tp NonVolatile shardArray idxCacheWidth shardValueIdx new 
 
 
-        _ <- instr' $ Fence (CrossThread, Release)
+        _ <- instr' $ LLVM.Fence (CrossThread, Release)
         nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
         _ <- tupleStoreArray (TupRsingle scalarTypeInt) Volatile shardArray idxCacheWidth shardIdxIdx nextIdx
         return ()
