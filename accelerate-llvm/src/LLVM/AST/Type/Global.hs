@@ -23,7 +23,7 @@ import LLVM.AST.Type.Name
 
 import qualified Data.Map as Map
 
-import qualified Text.LLVM                                          as LLVM
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LLVM
 
 
 -- | An external global function definition.

@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE MultiWayIf          #-}
@@ -9,6 +8,7 @@
 {-# LANGUAGE TypeFamilies        #-}
 {-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE ViewPatterns        #-}
+{-# OPTIONS_GHC -Wno-orphans     #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -44,10 +44,10 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
 
   -- Warp shuffle instructions
   __shfl_up, __shfl_down, __shfl_idx, __broadcast,
-  canShfl,
 
   -- Shared memory
   staticSharedMem, staticSharedMemTuple,
+  sharedMemorySizeAdd,
   dynamicSharedMem,
   sharedMemAddrSpace, sharedMemVolatility,
 
@@ -73,7 +73,7 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant        as A
-import Data.Array.Accelerate (KernelMetadata)
+import Data.Array.Accelerate.Backend (KernelMetadata)
 
 import Foreign.CUDA.Analysis                                        ( Compute(..), computeCapability )
 import qualified Foreign.CUDA.Analysis                              as CUDA
@@ -93,11 +93,11 @@ import LLVM.AST.Type.Module
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
-import qualified Text.LLVM                                          as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LP
 
 import Control.Applicative
 import Control.Monad                                                ( void )
-import Control.Monad.State                                          ( gets )
+import Control.Monad.Reader                                         ( asks )
 import Data.Bits
 import Data.Proxy
 import Data.String
@@ -168,7 +168,7 @@ perThreadBlock = warpPerThreadBlock . perWarp
 --
 warpId :: CodeGen PTX (Operands Int32)
 warpId = do
-  dev <- liftCodeGen $ gets ptxDeviceProperties
+  dev <- liftCodeGen $ asks ptxDeviceProperties
   tid <- threadIdx
   A.quot integralType tid (A.liftInt32 (P.fromIntegral (CUDA.warpSize dev)))
 
@@ -278,7 +278,7 @@ __syncwarp = __syncwarp_mask (liftWord32 0xffffffff)
 __syncwarp_mask :: HasCallStack => Operands Word32 -> CodeGen PTX ()
 __syncwarp_mask mask = do
   llvmver <- getLLVMversion
-  dev <- liftCodeGen $ gets ptxDeviceProperties
+  dev <- liftCodeGen $ asks ptxDeviceProperties
   case (computeCapability dev >= Compute 7 0, llvmver >= 6) of
     (True, True) ->
       void $ call
@@ -333,7 +333,7 @@ atomicAdd_f t addr val = do
          void . instr' $ AtomicRMW (FloatingNumType t) NonVolatile RMW.Add addr val (CrossThread, AcquireRelease)
 
      | otherwise ->
-         error "atomic fadd not supported on llvm <10"
+         internalError "LLVM < 10 not supported"
 
 
 -- Warp shuffle functions
@@ -375,11 +375,6 @@ __shfl_idx = shfl Idx
 --
 __broadcast :: TypeR a -> Operands a -> CodeGen PTX (Operands a)
 __broadcast aR a = __shfl_idx aR a (liftWord32 0)
-
--- Warp shuffle instructions are available for compute capability >= 3.0
---
-canShfl :: DeviceProperties -> Bool
-canShfl dev = CUDA.computeCapability dev >= Compute 3 0
 
 
 shfl :: ShuffleOp
@@ -462,13 +457,13 @@ shfl sop tR val delta = go tR val
               let raw :: LP.Type -> LP.Instr -> CodeGen PTX (LP.Typed LP.Value)
                   raw ty ins = do
                     name <- freshLocalName
-                    instr_ (LP.Result (nameToPrettyI name) ins [])
+                    instr_ (LP.Result (nameToPrettyI name) ins [] [])
                     return (LP.Typed ty (LP.ValIdent (nameToPrettyI name)))
 
                   rawUp :: Type u -> LP.Instr -> CodeGen PTX (Operand u)
                   rawUp ty ins = do
                     name <- freshLocalName
-                    instr_ (LP.Result (nameToPrettyI name) ins [])
+                    instr_ (LP.Result (nameToPrettyI name) ins [] [])
                     return (LocalReference ty name)
 
 
@@ -488,11 +483,11 @@ shfl sop tR val delta = go tR val
                         t3 = downcast t3Up
 
                     b <- raw t1 (LP.Conv LP.BitCast (downcast (op v a)) t1)
-                    c <- raw t2 (LP.Conv LP.ZExt b t2)
+                    c <- raw t2 (LP.Conv (LP.ZExt False) b t2)
                     d <- rawUp t3Up (LP.Conv LP.BitCast c t3)
                     e <- vector v' (ir v' d)
                     f <- raw t2 (LP.Conv LP.BitCast (downcast (op v' e)) t2)
-                    g <- raw t1 (LP.Conv LP.Trunc f t1)
+                    g <- raw t1 (LP.Conv (LP.Trunc False False) f t1)
                     h <- rawUp t0Up (LP.Conv LP.BitCast g t0)
                     return (ir v h)
                in
@@ -549,7 +544,7 @@ shfl_op
     -> CodeGen PTX (Operands a)     -- value received
 shfl_op sop t delta val
   | Refl <- result t = do
-  dev <- liftCodeGen $ gets ptxDeviceProperties
+  dev <- liftCodeGen $ asks ptxDeviceProperties
 
   let
       -- The CUDA __shfl* instruction take an optional final parameter
@@ -718,6 +713,24 @@ initialiseDynamicSharedMemory = do
                                  (ScalarConstant (scalarType @Int32) 0)
                                  (GEPArray (ScalarConstant (scalarType @Int32) 0) GEPEmpty))
 
+sharedMemorySizeAdd
+  :: TypeR e
+  -> Int -- number of array elements
+  -> Int -- #bytes of shared memory the have already been allocated
+  -> Int
+sharedMemorySizeAdd tp n i = case tp of
+  TupRunit -> i
+  TupRpair t2 t1 ->
+    -- First handle the second element of the tuple, then the first,
+    -- to match the behaviour of dynamicSharedMem
+    sharedMemorySizeAdd t2 n $ sharedMemorySizeAdd t1 n i
+  TupRsingle t ->
+    let
+      bytes = bytesElt tp
+      -- Align 'i' to the alignment of t
+      aligned = alignToInt (scalarAlignment t) i
+    in
+      aligned + bytes * n
 
 {- dynamicSharedMem
     :: forall e int.
@@ -739,10 +752,14 @@ dynamicSharedMem tp int n@(op int -> m) (op int -> offset)
           (i2, p2) <- go t2 i1
           return $ (i2, OP_Pair p2 p1)
         go (TupRsingle t)   i  = do
-          p <- instr' $ GetElementPtr (GEP1 scalarType smem i)
+          let bytes = bytesElt (TupRsingle t)
+          let align = scalarAlignment t
+          i' <- instr' $ Add numTp i (A.integral int $ P.fromIntegral $ align - 1)
+          aligned <- instr' $ BAnd int i' (A.integral int $ P.fromIntegral $ Data.Bits.complement $ align - 1)
+          p <- instr' $ GetElementPtr (GEP1 scalarType smem aligned)
           q <- instr' $ PtrCast (PtrPrimType (ScalarPrimType t) sharedMemAddrSpace) p
-          a <- instr' $ Mul numTp m (A.integral int (P.fromIntegral (bytesElt (TupRsingle t))))
-          b <- instr' $ Add numTp i a
+          a <- instr' $ Mul numTp m (A.integral int (P.fromIntegral bytes))
+          b <- instr' $ Add numTp aligned a
           return (b, ir t (unPtr q))
     --
     (_, ad) <- go tp offset
@@ -785,6 +802,11 @@ alignTo align ptr = do
   x <- A.add numType ptr $ OP_Int32 $ A.integral TypeInt32 $ align - 1
   A.band TypeInt32 x $ OP_Int32 $ A.integral TypeInt32 $ Data.Bits.complement $ align - 1
 
+-- Align 'ptr' to the given alignment.
+-- Assumes 'align' is a power of 2.
+alignToInt :: Int -> Int -> Int
+alignToInt align ptr = (ptr + align - 1) .&. Data.Bits.complement (align - 1)
+
 -- Other functions
 -- ---------------
 
@@ -824,3 +846,8 @@ codeGenKernel name args body =
     declare = args $ Body VoidType (Just Tail) (fromString name)
 
 type KernelType env = Ptr (SizedArray Word) -> MarshalFun env
+
+-- TODO: Ivo: I think we have a different function elsewhere that also computes the alignment.
+scalarAlignment :: ScalarType t -> Int
+scalarAlignment t@(SingleScalarType _) = bytesElt (TupRsingle t)
+scalarAlignment (VectorScalarType (VectorType _ t)) = bytesElt (TupRsingle $ SingleScalarType t)

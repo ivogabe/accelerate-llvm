@@ -1,6 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes  #-}
 {-# LANGUAGE BangPatterns         #-}
-{-# LANGUAGE CPP                  #-}
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE GADTs                #-}
 {-# LANGUAGE OverloadedStrings    #-}
@@ -90,6 +89,7 @@ module Data.Array.Accelerate.LLVM.PTX (
 ) where
 
 import Data.Array.Accelerate
+import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Sharing
 import Data.Array.Accelerate.AST.Schedule.Uniform
 

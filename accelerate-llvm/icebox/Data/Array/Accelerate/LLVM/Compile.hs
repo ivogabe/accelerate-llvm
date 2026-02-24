@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE EmptyCase           #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE OverloadedStrings   #-}
@@ -372,7 +371,6 @@ compileOpenAcc = traverseAcc
       case exp of
         Evar v                  -> return $ pure $ Evar v
         Const tp c              -> return $ pure $ Const tp c
-        PrimConst c             -> return $ pure $ PrimConst c
         Undef tp                -> return $ pure $ Undef tp
         Foreign tp ff f x       -> foreignE tp ff f x
         --

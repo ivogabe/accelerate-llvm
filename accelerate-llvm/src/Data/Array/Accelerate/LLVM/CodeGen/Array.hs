@@ -79,7 +79,7 @@ readArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx = do
     read (TupRsingle t)   (TupRsingle buffer)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- envsPrjBuffer buffer env
-      = ir t <$> readBuffer t TypeInt irbuffer linearIdx' (Just $ op TypeInt $ envsTileLocalIndex env)
+      = ir t <$> readBuffer t TypeInt irbuffer linearIdx' (Just $ op TypeInt $ envsTileStorageIndex env)
     read _ _ = internalError "Tuple mismatch"
   read tp buffers
 
@@ -144,7 +144,7 @@ writeArray' env (ArgArray _ (ArrayR shr tp) sh buffers) idx val = do
     write (TupRsingle t)   (TupRsingle buffer) (op t -> value)
       | Refl <- reprIsSingle @ScalarType @t @Buffer t
       , irbuffer <- envsPrjBuffer buffer env
-      = writeBuffer t TypeInt irbuffer linearIdx' (Just $ op TypeInt $ envsTileLocalIndex env) value
+      = writeBuffer t TypeInt irbuffer linearIdx' (Just $ op TypeInt $ envsTileStorageIndex env) value
     write _ _ _ = internalError "Tuple mismatch"
   write tp buffers val
 

@@ -99,6 +99,13 @@ data Envs env idxEnv = Envs
   , envsTileIndex :: Operands Int
   -- The index within the tile, if this is in a parallel tiled loop
   , envsTileLocalIndex :: Operands Int
+  -- The index in thread memory where the current envsTileLocalIndex should be located.
+  -- If a tile is handled by a single thread (eg on a CPU), this should be equal to envsTileLocalIndex.
+  -- If a tile is handled by a group of thread (eg on a GPU), then each thread will handle a part of a tile.
+  -- Each thread may allocate a short array, so all threads together can store the entire tile.
+  -- This index is the index into that short array.
+  -- See IRBufferScopeTile
+  , envsTileStorageIndex :: Operands Int
   -- Whether the iteration at the current loop depth is the first iteration of
   -- the loop. If this is in a tile loop, this says if this is the first
   -- iteration of that tile loop.
@@ -148,6 +155,7 @@ initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
       , envsIdx = PEnd
       , envsTileIndex = OP_Int $ scalar scalarTypeInt 0
       , envsTileLocalIndex = OP_Int $ scalar scalarTypeInt 0
+      , envsTileStorageIndex = OP_Int $ scalar scalarTypeInt 0
       , envsIsFirst = OP_Bool $ boolean True
       , envsDescending = False
       , envsShardIdx = Nothing

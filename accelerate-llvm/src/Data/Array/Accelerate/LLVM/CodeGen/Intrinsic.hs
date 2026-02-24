@@ -19,6 +19,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Intrinsic (
 
 -- accelerate-llvm
 import LLVM.AST.Type.Name
+import {-# SOURCE #-} Data.Array.Accelerate.LLVM.CodeGen.Monad  ( CodeGen )
 
 -- libraries
 import Data.Monoid
@@ -26,7 +27,7 @@ import Data.ByteString.Short                                    ( ShortByteStrin
 import Data.HashMap.Strict                                      ( HashMap )
 import qualified Data.HashMap.Strict                            as HashMap
 import Prelude                                                  as P
-
+import Data.Text                                                ( Text )
 
 -- | During code generation we need to know the name of functions implementing
 -- certain intrinsic maths operations. Depending on the backend, these functions
@@ -43,6 +44,8 @@ class Intrinsic arch where
   intrinsicForTarget :: HashMap ShortByteString Label
   intrinsicForTarget = llvmIntrinsic
 
+  trapWithMessage :: Text -> CodeGen arch ()
+  trapWithMessage _ = return ()
 
 llvmIntrinsic :: HashMap ShortByteString Label
 llvmIntrinsic =

@@ -9,13 +9,3 @@ source-repository-package
     tag:      405affe705d8f52e1c3e8dbf764f6524b7d1f896
     -- Required for Cabal < 3.8
     -- post-checkout-command: bash -c "! git submodule update --init --recursive"
-
-source-repository-package
-    type:     git
-    location: https://github.com/tomsmeding/llvm-pretty.git
-    tag:      a253a7fc1c62f4825ffce6b2507eebc5dadff32c
-
-source-repository-package
-    type:     git
-    location: https://github.com/tomsmeding/cuda.git
-    tag:      26083f0d000076d3bba6c462952820ccad318c65

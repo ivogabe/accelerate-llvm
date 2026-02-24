@@ -41,11 +41,13 @@ import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.Foreign
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as L
 
 import Data.Primitive.Vec
+import Data.Text                                                    ( Text )
 
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Operand                                        ( Operand )
@@ -55,6 +57,11 @@ import Control.Monad
 import Prelude                                                      hiding ( exp, any )
 
 import GHC.TypeNats
+import Data.Primitive (Ptr(Ptr))
+import Data.Array.Accelerate.LLVM.CodeGen.Base (call, call')
+import qualified LLVM.AST.Type.Function as F
+import LLVM.AST.Type.Representation (IsPrim(primType), Type(..))
+import LLVM.AST.Type.Name (Label(Label))
 
 
 -- Scalar expressions
@@ -62,7 +69,7 @@ import GHC.TypeNats
 
 {-# INLINEABLE llvmOfFun1 #-}
 llvmOfFun1
-    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr, Intrinsic arch)
     => CompileArrayInstr arch arr
     -> PreOpenFun arr () (a -> b)
     -> IRFun1 arch (a -> b)
@@ -72,7 +79,7 @@ llvmOfFun1 _ _ = internalError "impossible evaluation"
 
 {-# INLINEABLE llvmOfFun2 #-}
 llvmOfFun2
-    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    :: (HasCallStack, CompileForeignExp arch, IsArrayInstr arr, Intrinsic arch)
     => CompileArrayInstr arch arr
     -> PreOpenFun arr () (a -> b -> c)
     -> IRFun2 arch (a -> b -> c)
@@ -117,7 +124,7 @@ compileArrayInstrEnvs envs arr arg = case arr of
 
 {-# INLINEABLE llvmOfExp #-}
 llvmOfExp
-    :: forall arr arch t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    :: forall arr arch t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr, Intrinsic arch)
     => CompileArrayInstr arch arr
     -> PreOpenExp arr () t
     -> IROpenExp arch () t
@@ -129,7 +136,7 @@ llvmOfExp arrayInstr expr = llvmOfOpenExp arrayInstr expr Empty
 --
 {-# INLINEABLE llvmOfOpenExp #-}
 llvmOfOpenExp
-    :: forall arr arch env _t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr)
+    :: forall arr arch env _t. (HasCallStack, CompileForeignExp arch, IsArrayInstr arr, Intrinsic arch)
     => CompileArrayInstr arch arr
     -> PreOpenExp arr env _t
     -> Val env
@@ -148,8 +155,6 @@ llvmOfOpenExp arrayInstr top env = cvtE top
                                           llvmOfOpenExp arrayInstr body (env `pushE` (lhs, x))
         Evar (Var tp ix)            -> return $ ir tp $ prj ix env
         Const tp c                  -> return $ ir tp $ scalar tp c
-        PrimConst c                 -> let tp = (SingleScalarType $ primConstType c)
-                                       in  return $ ir tp $ scalar tp $ primConst c
         PrimApp f x                 -> primFun f x
         Undef tp                    -> return $ ir tp $ undef tp
         Nil                         -> return $ OP_Unit
@@ -157,33 +162,17 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         VecPack   vecr e            -> vecPack   vecr =<< cvtE e
         VecUnpack vecr e            -> vecUnpack vecr =<< cvtE e
         Foreign tp asm f x          -> foreignE tp asm f =<< cvtE x
-        Case tag xs mx              -> A.caseof (expType (snd (head xs))) (cvtE tag) [(t,cvtE e) | (t,e) <- xs] (fmap cvtE mx)
+        Case _   [] _               -> internalError "Empty Case"
+        Case tag xs@((_, e1):_) mx  -> A.caseof (expType e1) (cvtE tag) [(t,cvtE e) | (t,e) <- xs] (fmap cvtE mx)
         Cond c t e                  -> cond (expType t) (cvtE c) (cvtE t) (cvtE e)
-        IndexSlice slice slix sh    -> indexSlice slice <$> cvtE slix <*> cvtE sh
-        IndexFull slice slix sh     -> indexFull slice  <$> cvtE slix <*> cvtE sh
         ToIndex shr sh ix           -> join $ intOfIndex shr <$> cvtE sh <*> cvtE ix
         FromIndex shr sh ix         -> join $ indexOfInt shr <$> cvtE sh <*> cvtE ix
         ArrayInstr arr arg          -> arrayInstr arr =<< cvtE arg
         ShapeSize shr sh            -> shapeSize shr =<< cvtE sh
         While c f x                 -> while (expType x) (cvtF1 c) (cvtF1 f) (cvtE x)
         Coerce t1 t2 x              -> coerce t1 t2 =<< cvtE x
-
-    indexSlice :: SliceIndex slix sl co sh -> Operands slix -> Operands sh -> Operands sl
-    indexSlice SliceNil              OP_Unit               OP_Unit          = OP_Unit
-    indexSlice (SliceAll sliceIdx)   (OP_Pair slx OP_Unit) (OP_Pair sl sz)  =
-      let sl' = indexSlice sliceIdx slx sl
-        in OP_Pair sl' sz
-    indexSlice (SliceFixed sliceIdx) (OP_Pair slx _i)      (OP_Pair sl _sz) =
-      indexSlice sliceIdx slx sl
-
-    indexFull :: SliceIndex slix sl co sh -> Operands slix -> Operands sl -> Operands sh
-    indexFull SliceNil              OP_Unit               OP_Unit         = OP_Unit
-    indexFull (SliceAll sliceIdx)   (OP_Pair slx OP_Unit) (OP_Pair sl sz) =
-      let sh' = indexFull sliceIdx slx sl
-        in OP_Pair sh' sz
-    indexFull (SliceFixed sliceIdx) (OP_Pair slx sz)      sl              =
-      let sh' = indexFull sliceIdx slx sl
-        in OP_Pair sh' sz
+        Assert msg c e              -> assert msg (cvtE c) (cvtE e)
+        Assume _ e                  -> cvtE e
 
     vecPack :: forall n single tuple. (HasCallStack, KnownNat n) => VecR n single tuple -> Operands tuple -> CodeGen arch (Operands (Vec n single))
     vecPack vecr tuple = ir tp <$> go vecr n tuple
@@ -230,6 +219,15 @@ llvmOfOpenExp arrayInstr top env = cvtE top
          -> IROpenExp arch env a
     cond tp p t e =
       A.ifThenElse (tp, bool p) t e
+
+    assert :: Intrinsic arch
+           => Text
+           -> IROpenExp arch env PrimBool
+           -> IROpenExp arch env a
+           -> IROpenExp arch env a
+    assert msg c e = do
+      A.unless (bool c) (trapWithMessage $ "*** Assertion failed: " <> msg)
+      e
 
     while :: TypeR a
           -> IROpenFun1 arch env (a -> PrimBool)
@@ -335,12 +333,10 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         PrimLOr                   -> A.uncurry lor                  =<< cvtE x
         PrimIsNaN t               -> primbool $ A.isNaN t           =<< cvtE x
         PrimIsInfinite t          -> primbool $ A.isInfinite t      =<< cvtE x
-        PrimLt t                  -> primbool $ A.uncurry (A.lt t)  =<< cvtE x
-        PrimGt t                  -> primbool $ A.uncurry (A.gt t)  =<< cvtE x
-        PrimLtEq t                -> primbool $ A.uncurry (A.lte t) =<< cvtE x
-        PrimGtEq t                -> primbool $ A.uncurry (A.gte t) =<< cvtE x
-        PrimEq t                  -> primbool $ A.uncurry (A.eq t)  =<< cvtE x
-        PrimNEq t                 -> primbool $ A.uncurry (A.neq t) =<< cvtE x
+        PrimCmp t CmpLt           -> primbool $ A.uncurry (A.lt t)  =<< cvtE x
+        PrimCmp t CmpGtEq         -> primbool $ A.uncurry (A.gte t) =<< cvtE x
+        PrimCmp t CmpEq           -> primbool $ A.uncurry (A.eq t)  =<< cvtE x
+        PrimCmp t CmpNEq          -> primbool $ A.uncurry (A.neq t) =<< cvtE x
         PrimLNot                  -> primbool $ A.lnot              =<< bool (cvtE x)
           -- no missing patterns, whoo!
 
@@ -406,3 +402,7 @@ pushE env (LeftHandSideSingle tp , e)               = env `Push` op tp e
 pushE env (LeftHandSideWildcard _, _)               = env
 pushE env (LeftHandSidePair l1 l2, (OP_Pair e1 e2)) = pushE env (l1, e1) `pushE` (l2, e2)
 
+trap :: CodeGen arch ()
+trap = do
+  _ <- call' (F.Body VoidType Nothing (Label "llvm.trap")) F.ArgumentsNil []
+  return ()

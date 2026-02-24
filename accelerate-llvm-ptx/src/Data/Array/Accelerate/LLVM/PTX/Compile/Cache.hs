@@ -1,5 +1,4 @@
-{-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Compile.Cache
 -- Copyright   : [2017..2020] The Accelerate Team
@@ -20,7 +19,7 @@ import Data.Array.Accelerate.LLVM.Compile.Cache
 import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Array.Accelerate.LLVM.Target.ClangInfo                  ( hostLLVMVersion )
 
-import Control.Monad.State
+import Control.Monad.Reader
 import Data.Foldable                                                ( toList )
 import Data.List                                                    ( intercalate )
 import Data.Version
@@ -34,7 +33,7 @@ import Paths_accelerate_llvm_ptx
 
 instance Persistent PTX where
   targetCacheTemplate = do
-    Compute m n <- gets (computeCapability . ptxDeviceProperties)
+    Compute m n <- asks (computeCapability . ptxDeviceProperties)
     return $ "accelerate-llvm-ptx-" ++ showVersion version
          </> "llvmpr-" ++ intercalate "." (map show (toList hostLLVMVersion))
          </> S8.unpack ptxTargetTriple

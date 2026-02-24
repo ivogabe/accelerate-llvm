@@ -41,6 +41,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Type
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.Foreign
 
 import LLVM.AST.Type.Instruction
@@ -82,7 +83,7 @@ data IRPermuteFun arch t where
 -- let-bindings.
 --
 llvmOfPermuteFun
-    :: forall arch aenv e. CompileForeignExp arch
+    :: forall arch aenv e. (CompileForeignExp arch, Intrinsic arch)
     => Fun aenv (e -> e -> e)
     -> Gamma aenv
     -> IRPermuteFun arch (e -> e -> e)

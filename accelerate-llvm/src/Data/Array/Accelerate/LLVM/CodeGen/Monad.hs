@@ -49,7 +49,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Monad (
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
-import Data.Array.Accelerate.LLVM.State                             ( LLVM )
+import Data.Array.Accelerate.LLVM.State                             ( LLVM, getLLVMVer )
 import Data.Array.Accelerate.LLVM.Target
 import Data.Array.Accelerate.Representation.Tag
 import Data.Array.Accelerate.Representation.Type
@@ -67,13 +67,13 @@ import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Terminator
-import qualified Text.LLVM                                          as LP
-import qualified Text.LLVM.PP                                       as LP
-import qualified Text.LLVM.Triple.Parse                             as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.PP  as LP
+import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.Triple.Parse as LP
 
 import Control.Applicative
 import Control.Monad
-import Control.Monad.Reader                                         ( ReaderT, MonadReader, runReaderT, ask, asks )
+import Control.Monad.Reader                                         ( ReaderT, MonadReader, runReaderT, asks )
 import Control.Monad.State
 import Data.ByteString.Short                                        ( ShortByteString )
 import qualified Data.ByteString.Short.Char8                        as SBS8
@@ -147,7 +147,7 @@ codeGenFunction
   -> CodeGen arch a
   -> LLVM arch (a, Module f)
 codeGenFunction linkage name returnTp bind body = do
-  llvmver <- ask
+  llvmver <- getLLVMVer
   let context = CodeGenContext
         { codegenLLVMversion = llvmver }
   -- Execute the CodeGen monad and retrieve the code of the function and final state.
@@ -341,18 +341,18 @@ instrMD' ins md =
   -- LLVM-5 does not allow instructions of type void to have a name.
   case typeOf ins of
     VoidType -> do
-      instr_ $ LP.Effect (downcast ins) (downcastInstructionMetadata md)
+      instr_ $ LP.Effect (downcast ins) [] (downcastInstructionMetadata md)
       return $ LocalReference VoidType (Name B.empty)
     --
     ty -> do
       name <- freshLocalName
-      instr_ $ LP.Result (nameToPrettyI name) (downcast ins) (downcastInstructionMetadata md)
+      instr_ $ LP.Result (nameToPrettyI name) (downcast ins) [] (downcastInstructionMetadata md)
       return $ LocalReference ty name
 
 -- | Execute an unnamed instruction
 --
 do_ :: HasCallStack => Instruction () -> CodeGen arch ()
-do_ ins = instr_ $ LP.Effect (downcast ins) []
+do_ ins = instr_ $ LP.Effect (downcast ins) [] []
 
 -- | Add raw assembly instructions to the execution stream
 --
@@ -422,7 +422,7 @@ phi' tp target = go tp
 phi1 :: HasCallStack => Block -> Name a -> [(Operand a, Block)] -> CodeGen arch (Operand a)
 phi1 target crit incoming =
   let cmp       = (==) `on` blockLabel
-      update b  = b { instructions = LP.Result (nameToPrettyI crit) (downcast $ Phi t [ (p,blockLabel) | (p,Block{..}) <- incoming ]) [] Seq.<| instructions b }
+      update b  = b { instructions = LP.Result (nameToPrettyI crit) (downcast $ Phi t [ (p,blockLabel) | (p,Block{..}) <- incoming ]) [] [] Seq.<| instructions b }
       t         = case incoming of
                     []        -> internalError "no incoming values specified"
                     (o,_):_   -> case typeOf o of
@@ -439,7 +439,7 @@ hoistAlloca :: PrimType t -> CodeGen arch (Operand (Ptr t))
 hoistAlloca tp = do
   name <- freshAllocaName
   let update = \b -> b { instructions =
-    (LP.Result (nameToPrettyI name) (downcast $ Alloca tp) []) Seq.<| instructions b }
+    (LP.Result (nameToPrettyI name) (downcast $ Alloca tp) [] []) Seq.<| instructions b }
 
   state $ \s ->
     case Seq.findIndexR (\b -> blockLabel b == "entry") (blockChain s) of
@@ -458,7 +458,7 @@ terminateMD term md =
   state $ \s ->
     case Seq.viewr (blockChain s) of
       Seq.EmptyR  -> internalError "empty block chain"
-      bs Seq.:> b -> ( b, s { blockChain = bs Seq.|> b { terminator = LP.Effect (downcast term) (downcastInstructionMetadata md) } } )
+      bs Seq.:> b -> ( b, s { blockChain = bs Seq.|> b { terminator = LP.Effect (downcast term) [] (downcastInstructionMetadata md) } } )
 
 -- | Add a global variable declaration to the module
 --

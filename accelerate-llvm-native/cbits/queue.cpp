@@ -7,7 +7,7 @@
 // Should be in sync with Task in ./types.h (that file is not included here to prevent C vs C++ issues)
 struct Task {
   void* program;
-  uint location;
+  unsigned int location;
 };
 typedef moodycamel::ConcurrentQueue<Task> Queue;
 
