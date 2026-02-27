@@ -1,4 +1,0 @@
-#!/bin/sh
-export LD_LIBRARY_PATH=/usr/local/cuda-11/nvvm/lib64:/usr/local/cuda-11.8/lib64:/opt/gurobi912/linux64/lib:/opt/gurobi912/linux64/lib
-export LC_ALL=en_US.UTF-8
-exec /home/dpvanbalen/accelerate-llvm/accelerate-llvm-ptx/.stack-work/dist/x86_64-linux-tinfo6/Cabal-3.8.1.0/build/nofib-llvm-ptx/nofib-llvm-ptx >out 2>out2
