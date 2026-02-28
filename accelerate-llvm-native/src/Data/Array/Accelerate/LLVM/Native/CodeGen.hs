@@ -57,7 +57,6 @@ import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.GetElementPtr
-import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
@@ -107,9 +106,6 @@ codegen name env cluster args
             [] -> internalError "Expected at least one loop since rank shr /= 0"
             (l:ls) -> (l, ls)
 
-      -- let opCode = opCodeGens opCodeGen flatOps
-      -- let parGen = parCodeGens (parCodeGen (isDescending direction)) 0 opCode
-      -- let parGenSharded = parCodeGens (parCodeGenSharded (isDescending direction)) 0 opCode
       -- Parallelise over first dimension using parallel folds or scans
       case parCodeGens (
         (if useSharded then parCodeGenSharded else parCodeGen) -- Use sharded if operation has a fold
@@ -117,20 +113,16 @@ codegen name env cluster args
         Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
         Just (Exists parCodes) -> do
           let hasScan = parCodeGenHasMultipleTileLoops parCodes
-          let tileSize =
-                if rank shr > 1 then
-                  32
-                else if hasScan then
-                  -- We need to choose a tile size such that the values in the
-                  -- first tile loop (the reduce step of the chained scan) are
-                  -- still in the cache during the second tile loop (the scan
-                  -- step of the chained scan).
-                  1024 * 2
-                else if useSharded then
-                  512 -- Use smaller tile size when we are using sharded self scheduling
-                else
-                  1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
-
+          let tileSize
+                | rank shr > 1 = 32
+                -- We need to choose a tile size such that the values in the
+                -- first tile loop (the reduce step of the chained scan) are
+                -- still in the cache during the second tile loop (the scan
+                -- step of the chained scan).
+                | hasScan = 1024 * 2
+                -- Use smaller tile size when we are using sharded self scheduling
+                | useSharded = 512
+                | otherwise = 1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
           let envs' = envs{
             envsLoopDepth = 0,
             envsDescending = isDescending direction

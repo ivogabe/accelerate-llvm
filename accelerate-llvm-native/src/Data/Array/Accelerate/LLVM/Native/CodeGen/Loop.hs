@@ -21,13 +21,12 @@ module Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape                   hiding ( eq )
 
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Base               (shardAmount, valuesPerCacheLine)
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Base               (valuesPerCacheLine)
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                hiding ( lift )
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
-
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Profile
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as Loop
@@ -46,7 +45,6 @@ import Control.Monad.State
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.GetElementPtr
-
 
 -- | A standard 'for' loop, that steps from the start to end index executing the
 -- given function at each index.
@@ -183,6 +181,10 @@ iterFromTo
 iterFromTo tp start end seed body =
   Loop.iterFromStepTo [] tp start (liftInt 1) end seed body
 
+-- | Sharded self-scheduling is an alternative to workassist, where work is divided over a number of shards, 
+-- and threads atomically claim work from these shards. This reduces contention on the atomic counter.
+-- Can only be used for independent operations, as tiles are not guaranteed to be executed in order.
+-- Shards must be initialised before calling this function.
 shardedSelfScheduling
     :: Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
@@ -191,6 +193,14 @@ shardedSelfScheduling
     -> (Operand Bool -> Operand Word64 -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
 shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards shardAmount' doWork = do
+  -- The sharded self scheduling loop is structured as follows:
+  -- 1. Claim a shard by incrementing the next shard index (high 32 bits of nextShardFinishedShards) by 1.
+  -- 2. Check if work is done by comparing the amount of finished shards (low 32 bits of nextShardFinishedShards) 
+  -- with the total amount of shards. If done, exit, otherwise continue with the claimed shard.
+  -- 3. Do the work of the shard, by atomically incrementing the shard index and comparing it to the shard size 
+  -- until the shard is finished.
+  -- 4. If this thread is the one to finish the last tile of the shard, increment the amount of finished shards by 1.
+  -- 5. Go back to step 1.
   entry    <- getBlock
   start    <- newBlock "workassist.shards.start"
   outer    <- newBlock "workassist.shards.outer"
@@ -231,6 +241,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards shardAmoun
 
   setBlock outer
 
+  -- Get next shard index by shifting right the next shard index by 32.
   nextShard' <- A.shiftR TypeWord64 finishCount (A.liftInt 32)
   OP_Word64 shardToWorkOn <- A.rem TypeWord64 nextShard' shardAmount'
 
@@ -238,6 +249,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards shardAmoun
   OP_Word64 shardIdx <- A.mul numType (A.liftWord64 $ valuesPerCacheLine scalarTypeWord64) (OP_Word64 shardToWorkOn)
   shard <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray shardIdx GEPEmpty
   
+  -- Get shard size from shard sizes array, no need to multiply by cache width as shard sizes are only read.
   shardSizeIdx <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty
   shardSize <- instr' $ Load scalarType NonVolatile shardSizeIdx
 
