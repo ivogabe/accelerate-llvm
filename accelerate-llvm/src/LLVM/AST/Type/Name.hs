@@ -63,6 +63,9 @@ data Name a
 instance IsString (Name a) where
   fromString = Name . fromString
 
+castName :: Name a -> Name b
+castName (Name n) = Name n
+castName (UnName n) = UnName n
 
 -- TLM: 'Name' is used a lot over the place, to refer to things like variables
 --      as well as basic block labels. In the first case the type makes sense,

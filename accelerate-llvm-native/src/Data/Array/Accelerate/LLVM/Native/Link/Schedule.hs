@@ -136,7 +136,7 @@ loadRuntime = mapM_ load $ Prelude.zip [0..] runtime
       -- Pointee types don't match, as we use a Ptr Int8 as a function pointer.
       -- This code thus doesn't work on older version of LLVM.
       ptr <- instr' $ GetElementPtr $ GEP operandRuntimeLib idx' GEPEmpty
-      instr_ $ downcast $ name := LoadPtr NonVolatile ptr
+      instr_ $ downcast $ name := Load NonVolatile ptr Nothing
     -- Fields of RuntimeLib in cbits/types.h.
     -- Order and names should match.
     runtime =
@@ -210,12 +210,12 @@ codegenSchedule schedule
         instr_ $ downcast $ "awhile_is_first" := Alloca BoolPrimType
         isFirstBits <- instr' $ BAnd TypeWord32 operandLocation $ integral TypeWord32 $ 1 `shiftL` 27
         isFirst <- instr' $ Cmp singleType Compare.NE isFirstBits $ integral TypeWord32 0
-        _ <- instr' $ Store NonVolatile operandAwhileIsFirst isFirst
+        _ <- instr' $ Store NonVolatile operandAwhileIsFirst isFirst Nothing
 
         instr_ $ downcast $ "awhile_slot_idx" := Alloca (ScalarPrimType $ scalarType @Word8)
         slot' <- instr' $ ShiftRL TypeWord32 operandLocation $ integral TypeWord32 28
         slot <- instr' $ Trunc (IntegralBoundedType integralType) (IntegralBoundedType integralType) slot'
-        _ <- instr' $ Store NonVolatile operandAwhileSlotIdx slot
+        _ <- instr' $ Store NonVolatile operandAwhileSlotIdx slot Nothing
 
         _ <- switch
           (ir scalarType blockIdx)
@@ -277,7 +277,7 @@ destructor fullState (TupRsingle tp) idx = do
       -- for how these are kept alive during execution.
       return ()
     PtrPrimType _ _ -> do
-      ptr <- instr' $ LoadPtr NonVolatile ptrPtr
+      ptr <- instr' $ Load NonVolatile ptrPtr Nothing
       ptr' <- instr' $ PtrCast (primType @(Ptr Int8)) ptr
       _ <- callLocal
         (LLVM.lamUnnamed primType $
@@ -584,7 +584,7 @@ convert inAwhile (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbo
       -- phase2*Sub* since the LeftHandSides may declare variables that are not used.
       phase2Sub step1 imports fullState structVars3 PEnd (tupleLeft importsIdx) (tupleRight $ tupleLeft stateIdx) nextBlock
       conditionalPtr <- getBool
-      conditional <- instr' $ Load scalarType NonVolatile conditionalPtr
+      conditional <- instr' $ Load NonVolatile conditionalPtr Nothing
       conditional' <- instr $ IntToBool TypeWord8 conditional
       _ <- cbr conditional' blockContinue blockExit
 
@@ -646,7 +646,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
         -- Note: we cannot simply perform GetElementPtr now and only
         -- remember the result, as the function may suspend in 'step'.
         getCurrentIterState = do
-          idx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+          idx <- instr' $ Load NonVolatile operandAwhileSlotIdx Nothing
           getIterStateAt idx
 
         getInput = do
@@ -661,34 +661,34 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
           instr' $ GetElementPtr $ gepStruct (primType @Word8) state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
 
         getOutput = do
-          idx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+          idx <- instr' $ Load NonVolatile operandAwhileSlotIdx Nothing
           idx1 <- instr' $ Add numType idx $ integral TypeWord8 1
           idx2 <- instr' $ BAnd TypeWord8 idx1 $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
           state <- getIterStateAt idx2
           instr' $ GetElementPtr $ gepStruct ioType state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf
 
         getOutputSignalResolver = do
-          idx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+          idx <- instr' $ Load NonVolatile operandAwhileSlotIdx Nothing
           idx1 <- instr' $ Add numType idx $ integral TypeWord8 1
           idx2 <- instr' $ BAnd TypeWord8 idx1 $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
           state <- getIterStateAt idx2
           instr' $ GetElementPtr $ gepStruct (primType @Word) state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
 
         getOutputCondition = do
-          idx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+          idx <- instr' $ Load NonVolatile operandAwhileSlotIdx Nothing
           idx1 <- instr' $ Add numType idx $ integral TypeWord8 1
           idx2 <- instr' $ BAnd TypeWord8 idx1 $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
           state <- getIterStateAt idx2
           instr' $ GetElementPtr $ gepStruct (primType @Word8) state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
 
-      _ <- instr' $ Store NonVolatile operandAwhileIsFirst $ boolean True
-      _ <- instr' $ Store NonVolatile operandAwhileSlotIdx $ integral TypeWord8 0
+      _ <- instr' $ Store NonVolatile operandAwhileIsFirst (boolean True) Nothing
+      _ <- instr' $ Store NonVolatile operandAwhileSlotIdx (integral TypeWord8 0) Nothing
 
       -- Set all Signals of the conditions to 0 (unresolved)
       forM_ [0 .. fromIntegral awhileConcurrentStates - 1] $ \idx -> do
         state <- getIterStateAt $ integral TypeWord8 idx
         signalPtr <- instr' $ GetElementPtr $ gepStruct (primType @Word) state $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
-        _ <- instr' $ Store NonVolatile signalPtr $ integral TypeWord 0
+        _ <- instr' $ Store NonVolatile signalPtr (integral TypeWord 0) Nothing
         if idx == 0 || idx == fromIntegral awhileConcurrentStates - 1 then
           return ()
         else do
@@ -722,12 +722,12 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
       -- Reset the current signal to zero, for a later iteration
       currentState <- getCurrentIterState
       currentSignal <- instr' $ GetElementPtr $ gepStruct (primType @Word) currentState $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
-      _ <- instr' $ Store NonVolatile currentSignal $ integral TypeWord 0
+      _ <- instr' $ Store NonVolatile currentSignal (integral TypeWord 0) Nothing
 
       -- Branch based on the condition of the previous iteration.
       -- 0 is exit, 1 is continue, and 2 means that a prior iteration has stopped the loop.
       condPtr <- getInputCondition
-      condValue <- instr' $ Load scalarType NonVolatile condPtr
+      condValue <- instr' $ Load NonVolatile condPtr Nothing
       _ <- switch 
         (ir scalarType condValue)
         blockCleanUp
@@ -737,7 +737,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
       do
         condValueSub <- instr' $ Sub numType condValue $ integral TypeWord8 1
         cond <- getOutputCondition
-        _ <- instr' $ Store NonVolatile cond condValueSub
+        _ <- instr' $ Store NonVolatile cond condValueSub Nothing
         signal <- getOutputSignalResolver
         _ <- callLocal
           (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
@@ -773,12 +773,12 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
 
       -- Start working on a next iteration
       do
-        currentIdx <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+        currentIdx <- instr' $ Load NonVolatile operandAwhileSlotIdx Nothing
 
         nextIdx <- instr' $ Add numType currentIdx $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
         nextIdx' <- instr' $ BAnd TypeWord8 nextIdx $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
-        _ <- instr' $ Store NonVolatile operandAwhileSlotIdx nextIdx'
-        _ <- instr' $ Store NonVolatile operandAwhileIsFirst $ boolean False
+        _ <- instr' $ Store NonVolatile operandAwhileSlotIdx nextIdx' Nothing
+        _ <- instr' $ Store NonVolatile operandAwhileIsFirst (boolean False) Nothing
         nextState <- getIterStateAt nextIdx'
         nextSignal <- instr' $ GetElementPtr $ gepStruct (primType @Word) nextState $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
         location <- computeAwhileLocation nextIdx' (boolean False) $ fromIntegral nextBlock
@@ -801,7 +801,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
 
       setBlock blockExit
       cond <- getOutputCondition
-      _ <- instr' $ Store NonVolatile cond $ integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1
+      _ <- instr' $ Store NonVolatile cond (integral TypeWord8 $ fromIntegral awhileConcurrentStates - 1) Nothing
       signal <- getOutputSignalResolver
       _ <- callLocal
         (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
@@ -842,18 +842,18 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       -- Fill arguments struct
       -- Header
       workFnPtr' <- instr' $ GetElementPtr $ gepStruct kernelTp imports (tupleLeft importsIdx)
-      workFn <- instr' $ LoadPtr NonVolatile workFnPtr'
+      workFn <- instr' $ Load NonVolatile workFnPtr' Nothing
       workFnPtr <- instr' $ GetElementPtr $ gepStruct kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile workFnPtr workFn
+      _ <- instr' $ Store NonVolatile workFnPtr workFn Nothing
       programPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile programPtr operandProgram
+      _ <- instr' $ Store NonVolatile programPtr operandProgram Nothing
       location <- computeLocation inAwhile $ fromIntegral nextBlock
       locationPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile locationPtr location
+      _ <- instr' $ Store NonVolatile locationPtr location Nothing
       threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) -- active_threads
+      _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) Nothing -- active_threads
       workIdxPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 1) -- work_index
+      _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 1) Nothing -- work_index
       -- Arguments
       args' <- instr' $ GetElementPtr $ gepStruct argsTp' args $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
       storeKernelArgs structVars localVars kargs args' TupleIdxSelf
@@ -952,7 +952,7 @@ convert inAwhile (Effect (SignalResolve signals) next)
           Just (StructVar True _ m) -> do
             mvarPtr <- m
             mvarPtr' <- instr' $ PtrCast (PtrPrimType (primType @(Ptr Int8)) defaultAddrSpace) mvarPtr
-            mvar <- instr' $ LoadPtr NonVolatile mvarPtr'
+            mvar <- instr' $ Load NonVolatile mvarPtr' Nothing
             _ <- callLocal
               (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
                 LLVM.Body VoidType Nothing (Label "hs_try_putmvar")) 
@@ -1004,7 +1004,7 @@ convert inAwhile (Effect (RefWrite ref value) next)
             []
           return ()
         GroundRscalar _ -> do
-          _ <- instr' $ Store NonVolatile ref' value'
+          _ <- instr' $ Store NonVolatile ref' value' Nothing
           return ()
       phase2Sub next1 imports fullState structVars localVars' importsIdx stateIdx nextBlock
   }
@@ -1050,7 +1050,7 @@ convert inAwhile (Alet lhs (NewSignal _) next)
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
       let getPtr' = stateField fullState primType $ tupleLeft stateIdx
       ptr <- getPtr'
-      _ <- instr' $ Store NonVolatile ptr $ integral TypeWord 0
+      _ <- instr' $ Store NonVolatile ptr (integral TypeWord 0) Nothing
       let (structVars', localVars') = pushTwoSame lhs structVars localVars getPtr'
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }
@@ -1088,11 +1088,12 @@ convert inAwhile (Alet lhs (NewRef (GroundRbuffer tp)) next)
 
       ptr <- getPtr'
       ptr' <- instr' $ PtrCast primType ptr
-      _ <- instr' $ Store NonVolatile ptr' $ integral TypeWord
+      _ <- instr' $ Store NonVolatile ptr'
         -- Least significant bit is a tag.
         -- The reference count of an unfilled Ref is stored in the other bits.
         -- See: [reference counting for Ref]
-        (initialRefCount * 2 + 1)
+        (integral TypeWord $ initialRefCount * 2 + 1)
+        Nothing
 
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }
@@ -1155,7 +1156,7 @@ convert inAwhile (Alet lhs (Use tp _ buffer) next)
     maySuspend = maySuspend next1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
       ptrPtr <- instr' $ GetElementPtr $ gepStruct ptrTp imports (tupleLeft importsIdx)
-      ptr <- instr' $ LoadPtr NonVolatile ptrPtr
+      ptr <- instr' $ Load NonVolatile ptrPtr Nothing
       callBufferRetain ptr
       (structVars', localVars') <- bPhase2 bnd structVars localVars fullState (tupleLeft stateIdx) ptr
       phase2Sub next1 imports fullState structVars' localVars' (tupleRight importsIdx) (tupleRight stateIdx) nextBlock
@@ -1181,7 +1182,7 @@ convert inAwhile (Alet lhs (Unit (Var tp idx)) next)
           LLVM.ArgumentsNil)
         []
       (localVars', value) <- getValue structVars localVars (GroundRscalar tp) idx
-      _ <- instr' $ Store NonVolatile ptr value
+      _ <- instr' $ Store NonVolatile ptr value Nothing
       (structVars', localVars'') <- bPhase2 bnd structVars localVars' fullState (tupleLeft stateIdx) ptr
       phase2Sub next1 imports fullState structVars' localVars'' importsIdx (tupleRight stateIdx) nextBlock
   }
@@ -1221,7 +1222,7 @@ convert inAwhile (Alet lhs (RefRead ref) next)
             return (partialRemove (varIdx ref) structVars, Nothing)
           -- Default case: we do need to perform buffer_retain
           | otherwise -> do
-            value <- instr' $ LoadPtr NonVolatile ptr
+            value <- instr' $ Load NonVolatile ptr Nothing
             callBufferRetain value
             return (structVars, Just value)
       let
@@ -1269,8 +1270,8 @@ computeLocation :: Bool -> Word32 -> CodeGen Native (Operand Word32)
 computeLocation False blockIdx = return $ integral TypeWord32 blockIdx
 -- Bit pack the blockIdx, awhileIsFirst and awhileSlotIdx
 computeLocation True blockIdx = do
-  isFirst <- instr' $ LoadBool NonVolatile operandAwhileIsFirst
-  slot <- instr' $ Load scalarType NonVolatile operandAwhileSlotIdx
+  isFirst <- instr' $ Load NonVolatile operandAwhileIsFirst Nothing
+  slot <- instr' $ Load NonVolatile operandAwhileSlotIdx Nothing
   computeAwhileLocation slot isFirst blockIdx
 
 computeAwhileLocation :: Operand Word8 -> Operand Bool -> Word32 -> CodeGen Native (Operand Word32)
@@ -1298,12 +1299,10 @@ convertArrayInstr structVars localVars arr arg = case arr of
     | Refl <- scalarReprBase tp -> do
       (_, value) <- getValue structVars localVars (GroundRscalar tp) idx
       return $ ir tp value
-  Index (Var tp idx)
-    | GroundRbuffer tp' <- tp -> do
-      (_, ptr) <- getValue structVars localVars tp idx
-      ptr' <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt arg
-      instr $ Load tp' NonVolatile ptr'
-    | otherwise -> internalError "Buffer impossible"
+  Index (Var tp idx) -> do
+    (_, ptr) <- getValue structVars localVars tp idx
+    ptr' <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt arg
+    instr $ Load NonVolatile ptr' Nothing
 
 blockName :: Int -> String
 blockName 0 = "block.start"
@@ -1322,8 +1321,8 @@ getValue structVars localVars groundR idx
     ptr <- m
     value <- case groundR of
       GroundRscalar tp
-        | Refl <- scalarReprBase tp -> instr' $ Load tp NonVolatile ptr
-      GroundRbuffer _ -> instr' $ LoadPtr NonVolatile ptr
+        | Refl <- scalarReprBase tp -> instr' $ Load NonVolatile ptr Nothing
+      GroundRbuffer _ -> instr' $ Load NonVolatile ptr Nothing
     return (partialUpdate (LocalVar value) idx localVars, value)
   | otherwise = internalError "Idx missing in StructVars."
 
@@ -1369,7 +1368,7 @@ pushBindingSingle (LeftHandSideSingle tp) inStruct
     \structVars localVars fullState tupleIdx value -> do
       let getPtr' = stateField fullState tp' tupleIdx
       ptr <- getPtr'
-      _ <- instr' $ Store NonVolatile ptr value
+      _ <- instr' $ Store NonVolatile ptr value Nothing
       return (structVars `PPush` StructVar False tp getPtr', localVars `PPush` LocalVar value)
   | otherwise = Exists $ Push1 TupRunit $
     \structVars localVars _ _ value -> do
@@ -1471,12 +1470,12 @@ storeKernelArgs structVars localVars (SArgScalar (Var tp idx) :>: sargs) struct 
   | Refl <- scalarReprBase tp = do
     (localVars', value) <- getValue structVars localVars (GroundRscalar tp) idx
     ptr <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType tp) struct (tupleLeft structIdx)
-    _ <- instr' $ Store NonVolatile ptr value
+    _ <- instr' $ Store NonVolatile ptr value Nothing
     storeKernelArgs structVars localVars' sargs struct (tupleRight structIdx)
 storeKernelArgs structVars localVars (SArgBuffer _ (Var tp idx) :>: sargs) struct structIdx = do
   (localVars', value) <- getValue structVars localVars tp idx
   ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct (tupleLeft structIdx)
-  _ <- instr' $ Store NonVolatile ptr value
+  _ <- instr' $ Store NonVolatile ptr value Nothing
   storeKernelArgs structVars localVars' sargs struct (tupleRight structIdx)
   where
     tp' = case tp of
@@ -1542,7 +1541,7 @@ subEnv = \structVars localVars used -> do
     -- Release a Buffer only present in StructVars
     release (Just (StructVar _ (BaseRground GroundRbuffer{}) m)) _ = do
       ptrPtr <- m
-      ptr <- instr' $ LoadPtr NonVolatile ptrPtr
+      ptr <- instr' $ Load NonVolatile ptrPtr Nothing
       callBufferRelease ptr
     release _ _ = return ()
 
@@ -1590,7 +1589,7 @@ forkEnv = \structVars localVars usedLeft usedRight -> do
     -- Retain a Buffer only present in StructVars
     retain (Just (StructVar _ (BaseRground GroundRbuffer{}) m)) _ = do
       ptrPtr <- m
-      ptr <- instr' $ LoadPtr NonVolatile ptrPtr
+      ptr <- instr' $ Load NonVolatile ptrPtr Nothing
       callBufferRetain ptr
     retain _ _ = return () 
 
@@ -1653,8 +1652,8 @@ awhileIOMatch InputOutputRunit = Refl
 awhileSeqPrepareNext :: InputOutputR input output -> Operand (Ptr (Struct (ReprBasesR output))) -> Operand (Ptr (Struct (ReprBasesR input))) -> CodeGen Native ()
 awhileSeqPrepareNext io current next
   | Refl <- awhileIOMatch io = do
-    value <- instr' $ LoadStruct NonVolatile current
-    _ <- instr' $ Store NonVolatile next value
+    value <- instr' $ Load NonVolatile current Nothing
+    _ <- instr' $ Store NonVolatile next value Nothing
     return ()
 
 -- For a sequential awhile, copy the initial values to the state of the loop.
@@ -1677,13 +1676,13 @@ awhileSeqSetInitial structVars localVars inputOutput inputVars struct = go input
     go (InputOutputRref t@(GroundRbuffer t')) (TupRsingle (Var _ idx)) tupleIdx = do
       (_, value) <- getValue structVars localVars t idx
       ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType t') defaultAddrSpace) struct tupleIdx
-      _ <- instr' $ Store NonVolatile ptr value
+      _ <- instr' $ Store NonVolatile ptr value Nothing
       return ()
     go (InputOutputRref t@(GroundRscalar t')) (TupRsingle (Var _ idx)) tupleIdx
       | Refl <- scalarReprBase t' = do
       (_, value) <- getValue structVars localVars t idx
       ptr <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType t') struct tupleIdx
-      _ <- instr' $ Store NonVolatile ptr value
+      _ <- instr' $ Store NonVolatile ptr value Nothing
       return ()
     go (InputOutputRpair io1 io2) (TupRpair v1 v2) tupleIdx = do
       go io1 v1 (tupleLeft tupleIdx)
@@ -1706,12 +1705,12 @@ awhilePrepareOutput inputOutput lhs output = go inputOutput lhs TupleIdxSelf
       ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType tp) defaultAddrSpace) output idx
       ptr' <- instr' $ PtrCast primType ptr
       -- Set the reference count of the Ref
-      _ <- instr' $ Store NonVolatile ptr' $ integral TypeWord $ fromIntegral $ lhsSize lhs * 2 + 1
+      _ <- instr' $ Store NonVolatile ptr' (integral TypeWord $ fromIntegral $ lhsSize lhs * 2 + 1) Nothing
       return ()
     go (InputOutputRref (GroundRscalar _)) _ _ = return ()
     go InputOutputRsignal _ idx = do
       ptr <- instr' $ GetElementPtr $ gepStruct primType output idx
-      _ <- instr' $ Store NonVolatile ptr $ integral TypeWord 0
+      _ <- instr' $ Store NonVolatile ptr (integral TypeWord 0) Nothing
       return ()
     go (InputOutputRpair io1 io2) (LeftHandSidePair l1 l2) idx = do
       go io1 l1 (tupleLeft idx)
@@ -1810,7 +1809,7 @@ awhileParBindInput getStruct env0 = go TupleIdxSelf
     go idx (InputOutputRref tp@(GroundRbuffer tp')) (TupRsingle initial) (LeftHandSideSingle _) env = PPush env $
       StructVar False (BaseRref tp) $ do
         initialPtr <- getPtr env0 $ varIdx initial
-        first <- instr' $ LoadBool NonVolatile operandAwhileIsFirst
+        first <- instr' $ Load NonVolatile operandAwhileIsFirst Nothing
         struct <- getStruct
         ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct idx
         instr' $ Select first initialPtr ptr
@@ -1818,14 +1817,14 @@ awhileParBindInput getStruct env0 = go TupleIdxSelf
       | Refl <- scalarReprBase tp' = PPush env $
       StructVar False (BaseRref tp) $ do
         initialPtr <- getPtr env0 $ varIdx initial
-        first <- instr' $ LoadBool NonVolatile operandAwhileIsFirst
+        first <- instr' $ Load NonVolatile operandAwhileIsFirst Nothing
         struct <- getStruct
         ptr <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType tp') struct idx
         instr' $ Select first initialPtr ptr
     go idx InputOutputRsignal (TupRsingle initial) (LeftHandSideSingle _) env = PPush env $
       StructVar False BaseRsignal $ do
         initialPtr <- getPtr env0 $ varIdx initial
-        first <- instr' $ LoadBool NonVolatile operandAwhileIsFirst
+        first <- instr' $ Load NonVolatile operandAwhileIsFirst Nothing
         struct <- getStruct
         ptr <- instr' $ GetElementPtr $ gepStruct primType struct idx
         instr' $ Select first initialPtr ptr

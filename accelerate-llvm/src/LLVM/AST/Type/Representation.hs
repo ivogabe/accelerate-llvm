@@ -45,6 +45,7 @@ import Foreign.Storable
 import Formatting
 import Text.Printf
 import qualified Data.ByteString.Short.Char8                        as S8
+import Data.Typeable                                                ( (:~:)(..) )
 
 
 -- Witnesses to observe the LLVM type hierarchy:
@@ -91,6 +92,17 @@ data PrimType a where
   ArrayPrimType   :: Word64 -> PrimType a    -> PrimType (SizedArray a) -- static arrays
   StructPrimType  :: Bool -> TupR PrimType l -> PrimType (Struct l) -- aggregate structures
   NamedPrimType   :: Label -> PrimType (Struct a) -> PrimType (Struct a)          -- typedef
+
+instance Distributes PrimType where
+  reprIsSingle BoolPrimType = Refl
+  reprIsSingle (ScalarPrimType tp) = reprIsSingle tp
+  reprIsSingle PtrPrimType{} = Refl
+  reprIsSingle ArrayPrimType{} = Refl
+  reprIsSingle StructPrimType{} = Refl
+  reprIsSingle NamedPrimType{} = Refl
+
+  pairImpossible (ScalarPrimType tp) = pairImpossible tp
+  unitImpossible (ScalarPrimType tp) = unitImpossible tp
 
 skipTypeAlias :: PrimType a -> PrimType a
 skipTypeAlias (NamedPrimType _ t) = skipTypeAlias t
@@ -397,10 +409,8 @@ primSizeAlignment :: PrimType a -> (Int, Int)
 primSizeAlignment BoolPrimType = (1, 1)
 primSizeAlignment (ScalarPrimType (SingleScalarType tp)) = (sz, sz)
   where sz = bytesElt $ TupRsingle $ SingleScalarType tp
-primSizeAlignment (ScalarPrimType (VectorScalarType (VectorType n tp)))
-  | popCount n == 1 = (sz * n, sz * n)
-  | otherwise = (sz * n, sz)
-  where sz = bytesElt $ TupRsingle $ SingleScalarType tp
+primSizeAlignment (ScalarPrimType (VectorScalarType _)) =
+  internalError "Cannot compute alignment of VectorScalarType, as we never store that in an array. Via BufferEltR it should be converted to a SizedArray."
 primSizeAlignment (PtrPrimType _ _) = (sz, sz)
   where sz = sizeOf (undefined :: Ptr ())
 primSizeAlignment (ArrayPrimType n tp) = (sz' * fromIntegral n, a)

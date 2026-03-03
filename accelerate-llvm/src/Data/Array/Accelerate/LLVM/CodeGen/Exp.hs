@@ -265,12 +265,9 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         Nothing | Lam lhs (Body b) <- no -> llvmOfOpenExp compileNoArrayInstr b (Empty `pushE` (lhs, x))
         _                                -> error "when a grid's misaligned with another behind / that's a moiré..."
 
-    -- TODO: This function should work on VectorScalarType
-    -- LLVM doesn't like bitcast on array types
     coerce :: ScalarType a -> ScalarType b -> Operands a -> IROpenExp arch env b
     coerce s t x
       | Just Refl <- matchScalarType s t = return $ x
-      -- BitCast in LLVM only works on non-aggregate types, and arrays are aggregate types.
       | otherwise                        = ir t <$> instr' (BitCast t (op s x))
 
     primFun :: PrimFun (a -> r)

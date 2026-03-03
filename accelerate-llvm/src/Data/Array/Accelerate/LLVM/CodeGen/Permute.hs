@@ -218,7 +218,7 @@ atomicCAS_rmw' t i update addr = withDict (integralElt i) $ do
   exit  <- newBlock "rmw.exit"
 
   addr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType si) defaultAddrSpace) addr
-  init' <- instr' $ Load si NonVolatile addr'
+  init' <- instr' $ Load NonVolatile addr' Nothing
   old'  <- fresh  $ TupRsingle si
   top   <- br spin
 
@@ -309,7 +309,7 @@ atomicCAS_cmp' t i cmp addr val = withDict (singleElt t) $ do
   old   <- fresh  $ TupRsingle $ SingleScalarType t
 
   -- Read the current value at the address
-  start <- instr' $ Load (SingleScalarType t) NonVolatile addr
+  start <- instr' $ Load NonVolatile addr Nothing
   top   <- br test
 
   -- Compare the new value with the current contents at that memory slot. If the

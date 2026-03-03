@@ -48,6 +48,7 @@ import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape
+import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Error
 
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
@@ -57,7 +58,6 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant        as A
-
 
 -- | Read a value from an array at the given index
 --
@@ -112,15 +112,15 @@ readBuffer
     -> Operand int
     -> Maybe (Operand Int) -- Index within a tile, if in a tile loop
     -> CodeGen arch (Operand e)
-readBuffer e i (IRBuffer buffer a v IRBufferScopeArray alias) ix _ = do
-  p <- getElementPtr a e i buffer ix
-  load a e v p alias
-readBuffer e i (IRBuffer buffer a v IRBufferScopeSingle alias) _ _ = do
-  p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
-  load a e v p alias
-readBuffer e i (IRBuffer buffer a v IRBufferScopeTile alias) _ (Just localIx) = do
-  p <- getElementPtr a e TypeInt buffer localIx
-  load a e v p alias
+readBuffer e i (IRBuffer buffer _ v IRBufferScopeArray alias) ix _ = do
+  p <- instr' $ GetElementPtr $ GEP1 buffer ix
+  load v e p alias
+readBuffer e i (IRBuffer buffer _ v IRBufferScopeSingle alias) _ _ = do
+  p <- instr' $ GetElementPtr $ GEP1 buffer (scalar scalarTypeInt 0)
+  load v e p alias
+readBuffer e i (IRBuffer buffer _ v IRBufferScopeTile alias) _ (Just localIx) = do
+  p <- instr' $ GetElementPtr $ GEP1 buffer localIx
+  load v e p alias
 readBuffer _ _ _ _ _ = internalError "Cannot read from buffer in Tile scope"
 
 -- | Write a value into an array at the given index
@@ -211,109 +211,108 @@ writeBuffer
     -> Maybe (Operand Int) -- The local index within a tile, if in a tile loop
     -> Operand e
     -> CodeGen arch ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeArray alias) ix _ x = do
-  p <- getElementPtr a e i buffer ix
-  _ <- store a v e p x alias
+writeBuffer e i (IRBuffer buffer _ v IRBufferScopeArray alias) ix _ x = do
+  p <- instr' $ GetElementPtr $ GEP1 buffer ix
+  _ <- store v e p x alias
   return ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeSingle alias) ix _ x = do
-  p <- getElementPtr a e TypeInt buffer (scalar scalarTypeInt 0)
-  _ <- store a v e p x alias
+writeBuffer e i (IRBuffer buffer _ v IRBufferScopeSingle alias) ix _ x = do
+  p <- instr' $ GetElementPtr $ GEP1 buffer (scalar scalarTypeInt 0)
+  _ <- store v e p x alias
   return ()
-writeBuffer e i (IRBuffer buffer a v IRBufferScopeTile alias) _ (Just localIx) x = do
-  p <- getElementPtr a e TypeInt buffer localIx
-  _ <- store a v e p x alias
+writeBuffer e i (IRBuffer buffer _ v IRBufferScopeTile alias) _ (Just localIx) x = do
+  p <- instr' $ GetElementPtr $ GEP1 buffer localIx
+  _ <- store v e p x alias
   return ()
 writeBuffer _ _ _ _ _ _ = internalError "Cannot write to buffer in Tile scope"
 
 
--- | A wrapper around the GetElementPtr instruction, which correctly
--- computes the pointer offset for non-power-of-two SIMD types
---
-getElementPtr
-    :: AddrSpace
-    -> ScalarType e
-    -> IntegralType int
-    -> Operand (Ptr e)
-    -> Operand int
-    -> CodeGen arch (Operand (Ptr e))
-getElementPtr _ _ _ arr ix = instr' $ GetElementPtr $ GEP1 arr ix
-
-
 -- | A wrapper around the Load instruction.
--- This function used to be needed when we treated Vector types (Vec)
--- differently, now it directly emits a single Load instruction.
+-- This function handles the BufferEltR conversion.
 --
-load :: AddrSpace
+load :: Volatility
      -> ScalarType e
-     -> Volatility
-     -> Operand (Ptr e)
+     -> Operand (Ptr (BufferEltR e))
      -> Maybe (MetadataNodeID, MetadataNodeID)
      -> CodeGen arch (Operand e)
-load addrspace e v p alias = instrMD' (Load e v p) (bufferMetadata' alias)
+load v e p alias = do
+  let (p', align) = ptrAsUnalignedVecPtr e p
+  instrMD' (Load v p' align) (bufferMetadata' alias)
 
 
 -- | A wrapper around the Store instruction.
--- This function used to be needed when we treated Vector types (Vec)
--- differently, now it directly emits a single Store instruction.
+-- This function handles the BufferEltR conversion.
 --
-store :: AddrSpace
-      -> Volatility
+store :: Volatility
       -> ScalarType e
-      -> Operand (Ptr e)
+      -> Operand (Ptr (BufferEltR e))
       -> Operand e
       -> Maybe (MetadataNodeID, MetadataNodeID)
       -> CodeGen arch ()
-store addrspace volatility e p v alias = do
-    _ <- instrMD' (Store volatility p v) (bufferMetadata' alias)
-    return ()
+store volatility e p v alias = do
+  let (p', align) = ptrAsUnalignedVecPtr e p
+  _ <- instrMD' (Store volatility p' v align) (bufferMetadata' alias)
+  return ()
 
-tupleAlloca :: forall e arch. TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr e))
+-- Converts a pointer to a BufferEltR type to a pointer to the standard type.
+-- In case of a Vec, this may yield an unaligned pointer.
+-- We thus also report the alignment of the pointer, if it is unaligned.
+-- A Vec is only aligned to the alignment of its elements, whereas LLVM expects
+-- a higher alignment.
+ptrAsUnalignedVecPtr :: ScalarType e -> Operand (Ptr (BufferEltR e)) -> (Operand (Ptr e), Maybe Int)
+ptrAsUnalignedVecPtr (SingleScalarType tp) ptr
+  | Refl <- singleTypeBufferEltR tp = (ptr, Nothing)
+ptrAsUnalignedVecPtr (VectorScalarType tp@(VectorType _ t)) ptr =
+  (ptrCast (ScalarPrimType $ VectorScalarType tp) ptr, Just $ bytesElt $ TupRsingle $ SingleScalarType t)
+
+tupleAlloca :: forall e arch. TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR e)))
 tupleAlloca TupRunit = return TupRunit
 tupleAlloca (TupRpair t1 t2) = TupRpair <$> tupleAlloca t1 <*> tupleAlloca t2
 tupleAlloca (TupRsingle tp)
-  | Refl <- reprIsSingle @ScalarType @e @Ptr tp
-  = TupRsingle <$> hoistAlloca (ScalarPrimType tp)
+  | tp' <- bufferEltR tp
+  , Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr tp'
+  = TupRsingle <$> hoistAlloca tp'
 
-tuplePtrs :: forall full arch. TypeR full -> Operand (Ptr (Struct full)) -> CodeGen arch (TupR Operand (Distribute Ptr full))
+tuplePtrs :: forall full arch. TypeR full -> Operand (Ptr (Struct (BufferEltR full))) -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR full)))
 tuplePtrs tp ptr = go TupleIdxSelf tp
   where
-    go :: forall e. TupleIdx full e -> TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr e))
+    go :: forall e. TupleIdx (BufferEltR full) (BufferEltR e) -> TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR e)))
     go _ TupRunit = return TupRunit
     go tupleIdx (TupRpair t1 t2)
       = TupRpair <$> go (tupleLeft tupleIdx) t1 <*> go (tupleRight tupleIdx) t2
     go tupleIdx (TupRsingle t)
-      | Refl <- reprIsSingle @ScalarType @e @Ptr t
-      = TupRsingle <$> instr' (GetElementPtr $ gepStruct (ScalarPrimType t) ptr tupleIdx)
+      | t' <- bufferEltR t
+      , Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr t'
+      = TupRsingle <$> instr' (GetElementPtr $ gepStruct t' ptr tupleIdx)
 
-tupleStore :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> Operands e -> CodeGen arch ()
+tupleStore :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr (BufferEltR e)) -> Operands e -> CodeGen arch ()
 tupleStore TupRunit _ _ = return ()
 tupleStore (TupRpair t1 t2) (TupRpair p1 p2) (OP_Pair v1 v2) =
   tupleStore t1 p1 v1 >> tupleStore t2 p2 v2
 tupleStore (TupRsingle tp) (TupRsingle ptr) value 
-  | Refl <- reprIsSingle @ScalarType @e @Ptr tp = do
-    _ <- instr' $ Store NonVolatile ptr $ op tp value
-    return ()
+  | Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr $ bufferEltR tp =
+    store NonVolatile tp ptr (op tp value) Nothing
 tupleStore _ _ _ = internalError "Tuple mismatch"
 
-tupleLoad :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr e) -> CodeGen arch (Operands e)
+tupleLoad :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr (BufferEltR e)) -> CodeGen arch (Operands e)
 tupleLoad TupRunit _ = return OP_Unit
 tupleLoad (TupRpair t1 t2) (TupRpair p1 p2) = OP_Pair <$> tupleLoad t1 p1 <*> tupleLoad t2 p2
 tupleLoad (TupRsingle tp) (TupRsingle ptr)
-  | Refl <- reprIsSingle @ScalarType @e @Ptr tp
-  = instr $ Load tp NonVolatile ptr
+  | Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr $ bufferEltR tp =
+    ir tp <$> load NonVolatile tp ptr Nothing
 tupleLoad _ _ = internalError "Tuple mismatch"
 
 tupleArrayGep
   :: forall e arch.
      TypeR e
-  -> TupR Operand (Distribute Ptr (Distribute SizedArray e))
+  -> TupR Operand (Distribute Ptr (Distribute SizedArray (BufferEltR e)))
   -> Operands Int32
-  -> CodeGen arch (TupR Operand (Distribute Ptr e))
+  -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR e)))
 tupleArrayGep TupRunit _ _ = return TupRunit
 tupleArrayGep (TupRpair t1 t2) (TupRpair p1 p2) idx = TupRpair <$> tupleArrayGep t1 p1 idx <*> tupleArrayGep t2 p2 idx
 tupleArrayGep (TupRsingle tp) (TupRsingle ptr) idx
-  | Refl <- reprIsSingle @ScalarType @e @Ptr tp
-  , Refl <- reprIsSingle @ScalarType @e @SizedArray tp = do
+  | tp' <- bufferEltR tp
+  , Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr tp'
+  , Refl <- reprIsSingle @PrimType @(BufferEltR e) @SizedArray tp' = do
     ptr' <- instr' $ GetElementPtr $ GEP ptr (A.num numType 0 :: Operand Int32) $ GEPArray ptr GEPEmpty
     return $ TupRsingle ptr'
 tupleArrayGep _ _ _ = internalError "Tuple mismatch"
