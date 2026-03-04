@@ -185,10 +185,7 @@ peekGround (GroundRscalar (VectorScalarType _)) _ = internalError "Not yet suppo
 
 groundSizeAlignment :: GroundR a -> (Int, Int)
 groundSizeAlignment (GroundRbuffer _) = (sizeOf (0 :: Int), sizeOf (0 :: Int))
-groundSizeAlignment (GroundRscalar (SingleScalarType tp)) = (s, s)
-  where s = bytesElt $ TupRsingle $ SingleScalarType tp
-groundSizeAlignment (GroundRscalar (VectorScalarType (VectorType n tp))) = (n * s, s)
-  where s = bytesElt $ TupRsingle $ SingleScalarType tp
+groundSizeAlignment (GroundRscalar tp) = scalarTypeSizeAlignment tp
 
 {-# NOINLINE defaultRuntimeWorkers #-}
 defaultRuntimeWorkers :: Ptr Int8

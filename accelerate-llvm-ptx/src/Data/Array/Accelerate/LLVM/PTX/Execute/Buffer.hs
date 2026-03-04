@@ -47,7 +47,7 @@ mallocDevice tp size = do
   -- For now we just change them to a 1-byte allocation for simplicity.
   -- Since zero-sized arrays are not that common, this is probably fine.
   let size' = max size 1
-  let byteSize = bytesElt (TupRsingle tp) * size'
+  let byteSize = scalarTypeSize tp * size'
   array <- liftIO $ CUDA.mallocArray byteSize
   lifetime <- liftIO $ newLifetime $ CUDA.castDevPtr (array :: CUDA.DevicePtr Word8)
   liftIO $ addFinalizer lifetime $ CUDA.free array
@@ -70,14 +70,14 @@ copyToDevice tp buffer@(Buffer hostPtr) = do
 
   lifetime <- liftIO $ newLifetime $ CUDA.castDevPtr (devicePtr :: CUDA.DevicePtr Word8)
   liftIO $ addFinalizer lifetime $ CUDA.free devicePtr
-  let size = fromIntegral byteSize `div` bytesElt (TupRsingle tp)
+  let size = fromIntegral byteSize `div` scalarTypeSize tp
   return $ PTXBuffer size lifetime
 
 copyToHost :: ScalarType t -> PTXBuffer t -> Par (Buffer t)
 copyToHost tp (PTXBuffer size lifetime) = do
   let devicePtr1 = unsafeGetValue lifetime
   let devicePtr2 = CUDA.castDevPtr devicePtr1 :: CUDA.DevicePtr Word8
-  let byteSize = bytesElt (TupRsingle tp) * size
+  let byteSize = scalarTypeSize tp * size
   buffer@(Buffer hostPtr) <- unsafeFreezeBuffer <$> liftIO (newBuffer tp size)
   hostPtr1 <- liftIO $ withForeignPtr hostPtr (return . castPtr)
   hostPtr2 <- liftIO $ CUDA.registerArray [] (fromIntegral byteSize) hostPtr1
@@ -99,7 +99,7 @@ readFromDevice tp (PTXBuffer size lifetime) idx
   | ScalarDict <- scalarDict tp = do
     let devicePtr1 = unsafeGetValue lifetime `CUDA.advanceDevPtr` idx
     let devicePtr2 = CUDA.castDevPtr devicePtr1 :: CUDA.DevicePtr Word8
-    let byteSize = bytesElt (TupRsingle tp)
+    let byteSize = scalarTypeSize tp
     buffer@(Buffer hostPtr) <- unsafeFreezeBuffer <$> liftIO (newBuffer tp size)
     hostPtr1 <- liftIO $ withForeignPtr hostPtr (return . castPtr)
     hostPtr2 <- liftIO $ CUDA.registerArray [] (fromIntegral byteSize) hostPtr1

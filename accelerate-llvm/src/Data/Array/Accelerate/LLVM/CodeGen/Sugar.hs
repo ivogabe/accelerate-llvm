@@ -3,6 +3,7 @@
 {-# LANGUAGE RankNTypes        #-}
 {-# LANGUAGE RoleAnnotations   #-}
 {-# LANGUAGE TypeFamilies      #-}
+{-# LANGUAGE TypeOperators     #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.CodeGen.Sugar
@@ -21,15 +22,20 @@ module Data.Array.Accelerate.LLVM.CodeGen.Sugar (
 
   IRBuffer(..), IRBufferScope(..),
 
-  bufferMetadata, bufferMetadata'
+  bufferMetadata, bufferMetadata',
+
+  BufferEltR, bufferEltR, bufferEltsR, singleTypeBufferEltR,
 
 ) where
 
 import Data.Array.Accelerate.Array.Buffer
+import Data.Array.Accelerate.Representation.Type
+import Data.Primitive.Vec
+import Data.Typeable                                                ( (:~:)(..) )
 import Foreign.Ptr
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Instruction.Volatile
-import LLVM.AST.Type.Representation                                 ( AddrSpace )
+import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Metadata
 
 import Data.Array.Accelerate.Representation.Array
@@ -63,10 +69,44 @@ data IROpenFun2 arch env t where
 -- Arrays
 -- ------
 
+type family BufferEltR t where
+  BufferEltR (Vec n s) = SizedArray s
+  BufferEltR (a, b) = (BufferEltR a, BufferEltR b)
+  BufferEltR t = t
+
+bufferEltR :: ScalarType t -> PrimType (BufferEltR t)
+bufferEltR (VectorScalarType (VectorType n tp)) =
+  ArrayPrimType (fromIntegral n) $ ScalarPrimType $ SingleScalarType tp
+bufferEltR (SingleScalarType tp)
+  | Refl <- singleTypeBufferEltR tp
+  = ScalarPrimType $ SingleScalarType tp
+
+bufferEltsR :: TypeR t -> TupR PrimType (BufferEltR t)
+bufferEltsR TupRunit = TupRunit
+bufferEltsR (TupRpair t1 t2) = bufferEltsR t1 `TupRpair` bufferEltsR t2
+bufferEltsR (TupRsingle t) = TupRsingle $ bufferEltR t
+
+singleTypeBufferEltR :: SingleType t -> t :~: BufferEltR t
+singleTypeBufferEltR (NumSingleType (IntegralNumType t)) = case t of
+  TypeInt    -> Refl
+  TypeInt8   -> Refl
+  TypeInt16  -> Refl
+  TypeInt32  -> Refl
+  TypeInt64  -> Refl
+  TypeWord   -> Refl
+  TypeWord8  -> Refl
+  TypeWord16 -> Refl
+  TypeWord32 -> Refl
+  TypeWord64 -> Refl
+singleTypeBufferEltR (NumSingleType (FloatingNumType t)) = case t of
+  TypeHalf   -> Refl
+  TypeFloat  -> Refl
+  TypeDouble -> Refl
+
 data IRBuffer e
   = IRBuffer
       -- The pointer to the value or values of the buffer
-      (Operand (Ptr e))
+      (Operand (Ptr (BufferEltR e)))
       AddrSpace
       Volatility
       -- The scope of this pointer: whether it refers to a single value (of a

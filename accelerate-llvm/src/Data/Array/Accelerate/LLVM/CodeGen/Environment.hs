@@ -182,9 +182,8 @@ bindLocals depth = \envs -> foldlM go envs $ envsLocal envs
       | Just _ <- prjPartial idx (envsGround envs) = return envs -- Already bound
       | otherwise = do
         -- Introduce a new mutable variable on the stack
-        ptr <- hoistAlloca $ ScalarPrimType tp
-        ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType tp) defaultAddrSpace) ptr
-        let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeSingle Nothing
+        ptr <- hoistAlloca $ bufferEltR tp
+        let value = IRBuffer ptr defaultAddrSpace NonVolatile IRBufferScopeSingle Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
 bindLocalsInTile
@@ -200,8 +199,8 @@ bindLocalsInTile needsTileArray depth tileSize = \envs -> foldlM go envs $ envsL
       | not (needsTileArray idx) = return envs
       | otherwise = do
         -- Introduce a new mutable variable on the stack
-        ptr <- hoistAlloca $ ArrayPrimType (fromIntegral tileSize) (ScalarPrimType tp)
-        ptr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType tp) defaultAddrSpace) ptr
+        ptr <- hoistAlloca $ ArrayPrimType (fromIntegral tileSize) (bufferEltR tp)
+        ptr' <- instr' $ PtrCast (PtrPrimType (bufferEltR tp) defaultAddrSpace) ptr
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeTile Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }
 
@@ -313,7 +312,7 @@ arraySize :: HasCallStack => Arg genv (m sh e) -> Envs genv idxEnv -> Operands s
 arraySize (ArgArray _ (ArrayR shr _) sh _) = envsPrjParameters $ shapeExpVars shr sh
 
 type family MarshalArg a where
-  MarshalArg (Buffer e) = Ptr e
+  MarshalArg (Buffer e) = Ptr (BufferEltR e)
   MarshalArg e = e
 
 -- | Converts a typed environment into a function type.
@@ -389,7 +388,7 @@ bindEnvArgs environment =
         name' = prefix ++ show freshBuffer
         name = fromString name'
         irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray alias
-        ptrType = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+        ptrType = PtrPrimType (bufferEltR tp) defaultAddrSpace
 
         mutOutCount'
           | In <- m = mutOutCount
@@ -460,7 +459,7 @@ envStructType Empty = TupRunit
 envStructType (Push env (AccessGroundRscalar tp))
   | Refl <- marshalScalarArg tp = envStructType env `TupRpair` TupRsingle (ScalarPrimType tp)
 envStructType (Push env (AccessGroundRbuffer _ tp))
-  = envStructType env `TupRpair` TupRsingle (PtrPrimType (ScalarPrimType tp) defaultAddrSpace)
+  = envStructType env `TupRpair` TupRsingle (PtrPrimType (bufferEltR tp) defaultAddrSpace)
 
 bindEnvFromStruct
   :: forall arch env. Env AccessGroundR env
@@ -494,7 +493,7 @@ bindEnvFromStruct environment =
             namePtr := GetElementPtr (gepStruct (ScalarPrimType tp) operandEnv $ toTupleIdx $ TupleIdxRight TupleIdxSelf)
           )
           >> instr_ (downcast $
-            name := Load tp NonVolatile operandPtr
+            name := Load NonVolatile operandPtr Nothing
           )
           >> codegen
         , gamma `Push` GroundOperandParam operand
@@ -513,7 +512,7 @@ bindEnvFromStruct environment =
           namePtr := GetElementPtr (gepStruct ptrType operandEnv $ toTupleIdx $ TupleIdxRight TupleIdxSelf)
         )
         >> instr_ (downcast $
-          name := LoadPtr NonVolatile operandPtr
+          name := Load NonVolatile operandPtr Nothing
         )
         >> annotation
         >> codegen
@@ -536,7 +535,7 @@ bindEnvFromStruct environment =
         irbuffer :: IRBuffer t
         irbuffer = IRBuffer operand defaultAddrSpace NonVolatile IRBufferScopeArray alias
         ptrType :: PrimType (MarshalArg (Buffer t))
-        ptrType = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+        ptrType = PtrPrimType (bufferEltR tp) defaultAddrSpace
 
         mutOutCount'
           | In <- m = mutOutCount
