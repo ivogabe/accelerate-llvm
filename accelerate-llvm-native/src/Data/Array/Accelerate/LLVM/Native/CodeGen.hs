@@ -140,7 +140,7 @@ codegen name env cluster args
             -- Decide whether tileCount is large enough
 
             OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
-            value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
+            value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
             retval_ value
 
           setBlock finishBlock
@@ -293,7 +293,7 @@ codegen name env cluster args
         -- We are not using kernel memory, so no need to initialize it.
 
         OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
-        value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
+        value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
         retval_ value
 
       setBlock finishBlock

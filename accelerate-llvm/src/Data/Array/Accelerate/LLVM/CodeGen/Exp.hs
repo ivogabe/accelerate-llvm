@@ -49,7 +49,7 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as L
 import Data.Primitive.Vec
 import Data.Text                                                    ( Text )
 
-import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction                                    hiding ( Select )
 import LLVM.AST.Type.Operand                                        ( Operand )
 
 import Control.Applicative                                          hiding ( Const )
@@ -165,6 +165,7 @@ llvmOfOpenExp arrayInstr top env = cvtE top
         Case _   [] _               -> internalError "Empty Case"
         Case tag xs@((_, e1):_) mx  -> A.caseof (expType e1) (cvtE tag) [(t,cvtE e) | (t,e) <- xs] (fmap cvtE mx)
         Cond c t e                  -> cond (expType t) (cvtE c) (cvtE t) (cvtE e)
+        Select c t e                -> select (expType t) (cvtE c) (cvtE t) (cvtE e)
         ToIndex shr sh ix           -> join $ intOfIndex shr <$> cvtE sh <*> cvtE ix
         FromIndex shr sh ix         -> join $ indexOfInt shr <$> cvtE sh <*> cvtE ix
         ArrayInstr arr arg          -> arrayInstr arr =<< cvtE arg
@@ -219,6 +220,17 @@ llvmOfOpenExp arrayInstr top env = cvtE top
          -> IROpenExp arch env a
     cond tp p t e =
       A.ifThenElse (tp, bool p) t e
+
+    select :: TypeR a
+         -> IROpenExp arch env PrimBool
+         -> IROpenExp arch env a
+         -> IROpenExp arch env a
+         -> IROpenExp arch env a
+    select tp p t e = do
+      p' <- bool p
+      t' <- t
+      e' <- e
+      A.select tp p' t' e'
 
     assert :: Intrinsic arch
            => Text
