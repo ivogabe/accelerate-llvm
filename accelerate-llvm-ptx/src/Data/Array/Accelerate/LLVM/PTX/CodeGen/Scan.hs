@@ -1335,7 +1335,7 @@ scanFromSMem
     -> IRFun2 PTX (e -> e -> e)
     -> Int
     -> Operand Int32 -- Number of warps = number of used entries in shared memory
-    -> TupR Operand (Distribute Ptr (Distribute SizedArray e))
+    -> TupR Operand (Distribute Ptr (Distribute SizedArray (BufferEltR e)))
     -> CodeGen PTX (Operands e)
 scanFromSMem dev tp identity fun maxSize size smem
   | maxSize /= CUDA.warpSize dev = internalError "Expected that the maximum number of warps is equal to the warp size"

@@ -646,10 +646,11 @@ sharedMemVolatility = Volatile
 staticSharedMem
     :: ScalarType e
     -> Word64
-    -> CodeGen PTX (Operand (Ptr (SizedArray e)))
+    -> CodeGen PTX (Operand (Ptr (SizedArray (BufferEltR e))))
 staticSharedMem tp n = do
   name <- freshGlobalName
-  let arrayTp = ArrayPrimType n (ScalarPrimType tp)
+  let tp' = bufferEltR tp
+  let arrayTp = ArrayPrimType n tp'
   let ptrArrayTp = PrimType (PtrPrimType arrayTp sharedMemAddrSpace)
   let sm = ConstantOperand $ GlobalReference ptrArrayTp name
 
@@ -660,9 +661,9 @@ staticSharedMem tp n = do
         , LP.gaVisibility = Nothing
         , LP.gaAddrSpace = sharedMemAddrSpace
         , LP.gaConstant = False }
-    , LP.globalType = LP.Array n (downcast tp)
+    , LP.globalType = downcast arrayTp
     , LP.globalValue = Just LP.ValUndef
-    , LP.globalAlign = Just (4 `P.max` P.fromIntegral (bytesElt $ TupRsingle tp))
+    , LP.globalAlign = Just (4 `P.max` P.fromIntegral (P.snd $ primSizeAlignment tp'))
     , LP.globalMetadata = mempty
     }
 
@@ -679,13 +680,14 @@ staticSharedMemTuple
   :: forall e.
      TypeR e
   -> Word64
-  -> CodeGen PTX (TupR Operand (Distribute Ptr (Distribute SizedArray e)))
+  -> CodeGen PTX (TupR Operand (Distribute Ptr (Distribute SizedArray (BufferEltR e))))
 staticSharedMemTuple tp n = case tp of
   TupRunit -> return TupRunit
   TupRpair t1 t2 -> TupRpair <$> staticSharedMemTuple t1 n <*> staticSharedMemTuple t2 n
   TupRsingle t
-    | Refl <- reprIsSingle @ScalarType @e @Ptr t
-    , Refl <- reprIsSingle @ScalarType @e @SizedArray t ->
+    | t' <- bufferEltR t
+    , Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr t'
+    , Refl <- reprIsSingle @PrimType @(BufferEltR e) @SizedArray t' ->
       TupRsingle <$> staticSharedMem t n
 
 -- External declaration in shared memory address space. This must be declared in
@@ -787,7 +789,7 @@ dynamicSharedMem scope tp n offset = do
   -- Align 'offset' to compute start offset & pointer
   OP_Int32 start <- alignTo tpSize offset
   startPtr <- instr' $ GetElementPtr (GEP1 smem start)
-  startPtr' <- instr' $ PtrCast (PtrPrimType (ScalarPrimType tp) sharedMemAddrSpace) startPtr
+  startPtr' <- instr' $ PtrCast (PtrPrimType (bufferEltR tp) sharedMemAddrSpace) startPtr
   -- Compute allocated size and end of this allocation
   size' <- A.mul numType n $ OP_Int32 $ A.integral TypeInt32 $ tpSize
   end <- A.add numType (OP_Int32 start) size'

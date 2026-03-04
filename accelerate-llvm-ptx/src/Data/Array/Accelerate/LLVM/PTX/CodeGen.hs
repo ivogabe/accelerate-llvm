@@ -58,7 +58,7 @@ import LLVM.AST.Type.Instruction.RMW
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
-import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
+import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 -- import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (atomically)
@@ -245,14 +245,14 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
   -- of that block.
-  (mapTupR ScalarPrimType memoryTp)
+  (bufferEltsR memoryTp)
   -- Initialize kernel memory
   (\kernelMem envs -> do
     ptrs <- tuplePtrs memoryTp kernelMem
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0)
+        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0) Nothing
         case seed of
           Nothing -> return ()
           Just s -> do
@@ -334,7 +334,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           -- Wait on our turn
           _ <- Loop.while [] TupRunit
             (\_ -> do
-              idx <- instr $ Load scalarTypeInt Volatile idxPtr
+              idx <- instr $ Load Volatile idxPtr Nothing
               A.neq singleType idx (envsTileIndex envs)
             )
             (\_ -> return OP_Unit) -- TODO: Maybe add nanosleep here
@@ -373,7 +373,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
 
           _ <- instr' $ LLVM.Fence (CrossThread, Release)
           OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-          _ <- instr' $ Store Volatile idxPtr nextIdx
+          _ <- instr' $ Store Volatile idxPtr nextIdx Nothing
           return exclusive
     
     when (foldOrScan == IsScan) $ do
