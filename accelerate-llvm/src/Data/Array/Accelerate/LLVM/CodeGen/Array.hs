@@ -262,7 +262,7 @@ ptrAsUnalignedVecPtr :: ScalarType e -> Operand (Ptr (BufferEltR e)) -> (Operand
 ptrAsUnalignedVecPtr (SingleScalarType tp) ptr
   | Refl <- singleTypeBufferEltR tp = (ptr, Nothing)
 ptrAsUnalignedVecPtr (VectorScalarType tp@(VectorType _ t)) ptr =
-  (ptrCast (ScalarPrimType $ VectorScalarType tp) ptr, Just $ bytesElt $ TupRsingle $ SingleScalarType t)
+  (ptrCast (ScalarPrimType $ VectorScalarType tp) ptr, Just $ singleTypeSize t)
 
 tupleAlloca :: forall e arch. TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR e)))
 tupleAlloca TupRunit = return TupRunit

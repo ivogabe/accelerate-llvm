@@ -1128,7 +1128,7 @@ convert inAwhile (Alet lhs (Alloc shr tp sz) next)
           computeSize localVars'' shr' vs accum'
         computeSize _ _ _ _ = internalError "Pair impossible"
 
-      (localVars1, sz') <- computeSize localVars shr sz (integral TypeWord64 $ fromIntegral $ bytesElt $ TupRsingle tp)
+      (localVars1, sz') <- computeSize localVars shr sz (integral TypeWord64 $ fromIntegral $ scalarTypeSize tp)
       ptr <- callLocal
         (LLVM.lamUnnamed primType $
           LLVM.Body (PrimType ptrTp) Nothing (Label "accelerate_buffer_alloc"))
@@ -1178,7 +1178,7 @@ convert inAwhile (Alet lhs (Unit (Var tp idx)) next)
       ptr <- callLocal
         (LLVM.lamUnnamed primType $
           LLVM.Body (PrimType ptrTp) Nothing (Label "accelerate_buffer_alloc"))
-        (LLVM.ArgumentsCons (integral TypeWord64 $ fromIntegral $ bytesElt $ TupRsingle tp) []
+        (LLVM.ArgumentsCons (integral TypeWord64 $ fromIntegral $ scalarTypeSize tp) []
           LLVM.ArgumentsNil)
         []
       (localVars', value) <- getValue structVars localVars (GroundRscalar tp) idx

@@ -728,9 +728,9 @@ sharedMemorySizeAdd tp n i = case tp of
     sharedMemorySizeAdd t2 n $ sharedMemorySizeAdd t1 n i
   TupRsingle t ->
     let
-      bytes = bytesElt tp
+      bytes = scalarTypeSize t
       -- Align 'i' to the alignment of t
-      aligned = alignToInt (scalarAlignment t) i
+      aligned = alignToInt (scalarTypeAlignment t) i
     in
       aligned + bytes * n
 
@@ -785,7 +785,7 @@ dynamicSharedMem
     -> CodeGen PTX (Operands Int32, IRBuffer e)
 dynamicSharedMem scope tp n offset = do
   smem <- initialiseDynamicSharedMemory
-  let tpSize = P.fromIntegral $ bytesElt $ TupRsingle tp
+  let tpSize = P.fromIntegral $ scalarTypeSize tp
   -- Align 'offset' to compute start offset & pointer
   OP_Int32 start <- alignTo tpSize offset
   startPtr <- instr' $ GetElementPtr (GEP1 smem start)
@@ -848,8 +848,3 @@ codeGenKernel name args body =
     declare = args $ Body VoidType (Just Tail) (fromString name)
 
 type KernelType env = Ptr (SizedArray Word) -> MarshalFun env
-
--- TODO: Ivo: I think we have a different function elsewhere that also computes the alignment.
-scalarAlignment :: ScalarType t -> Int
-scalarAlignment t@(SingleScalarType _) = bytesElt (TupRsingle t)
-scalarAlignment (VectorScalarType (VectorType _ t)) = bytesElt (TupRsingle $ SingleScalarType t)

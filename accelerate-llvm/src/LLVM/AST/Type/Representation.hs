@@ -408,7 +408,7 @@ llvmTypeToAccTypeR _ = Nothing
 primSizeAlignment :: PrimType a -> (Int, Int)
 primSizeAlignment BoolPrimType = (1, 1)
 primSizeAlignment (ScalarPrimType (SingleScalarType tp)) = (sz, sz)
-  where sz = bytesElt $ TupRsingle $ SingleScalarType tp
+  where sz = singleTypeSize tp
 primSizeAlignment (ScalarPrimType (VectorScalarType _)) =
   internalError "Cannot compute alignment of VectorScalarType, as we never store that in an array. Via BufferEltR it should be converted to a SizedArray."
 primSizeAlignment (PtrPrimType _ _) = (sz, sz)
