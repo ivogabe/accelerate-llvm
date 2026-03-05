@@ -5,6 +5,7 @@
 #endif
 
 #include "types.h"
+#include "tracy.h"
 #include <unistd.h>
 #include <sched.h>
 
@@ -242,6 +243,8 @@ void* accelerate_worker(void *data_packed) {
 }
 
 struct Workers* accelerate_start_workers(uint64_t thread_count) {
+  ___tracy_emit_message("hello world", 11, 0);
+
   struct Workers *workers = malloc(sizeof(struct Workers));
 
   workers->scheduler.queue = accelerate_queue_new();
