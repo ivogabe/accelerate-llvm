@@ -378,7 +378,7 @@ initShards
   -> Operands Word64 -- Amount of tiles to be divided over the shards. Must be greater than the number of shards
   -> CodeGen Native ()
 initShards shardIndexes shardSizes finishedShards tileCount = do
-  _ <- instr' $ Store NonVolatile finishedShards (integral TypeWord64 0)
+  _ <- instr' $ Store NonVolatile finishedShards (integral TypeWord64 0) Nothing
 
   -- Determine the size of every shard
   -- start = tileCount * i / shardAmount
@@ -394,7 +394,7 @@ initShards shardIndexes shardSizes finishedShards tileCount = do
     -- Multiply the index by the cache width in bytes to ensure every shard is on a separate cache line.
     OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 $ valuesPerCacheLine scalarTypeWord64)
     shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
-    _ <- instr' $ Store NonVolatile shardIdxArr shardStart
+    _ <- instr' $ Store NonVolatile shardIdxArr shardStart Nothing
     return ()
     )
 
@@ -406,7 +406,7 @@ initShards shardIndexes shardSizes finishedShards tileCount = do
 
     -- Multiplying by the cache width is not necessary here as shardSizes is only read.
     shardSizeArray <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray i GEPEmpty
-    _ <- instr' $ Store NonVolatile shardSizeArray shardEnd
+    _ <- instr' $ Store NonVolatile shardSizeArray shardEnd Nothing
     return ()
     )
 

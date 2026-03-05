@@ -328,7 +328,7 @@ tupleStoreArray t vol a idx structIdx v = go t a v structIdx
     go (TupRsingle tp) array value i 
       | Refl <- reprIsSingle @ScalarType @input' @Ptr tp = do
         ptr <- instr' $ GetElementPtr $ GEP array (integral TypeWord64 0) $ GEPArray idx $ GEPStruct (ScalarPrimType tp) i GEPEmpty
-        _ <- instr' $ Store vol ptr $ op tp value
+        _ <- instr' $ Store vol ptr (op tp value) Nothing
         return ()
 
 tupleLoad :: forall e arch. TypeR e -> TupR Operand (Distribute Ptr (BufferEltR e)) -> CodeGen arch (Operands e)
@@ -359,7 +359,7 @@ tupleLoadArray t vol a idx = go t a
     go (TupRsingle tp) array i 
       | Refl <- reprIsSingle @ScalarType @output' @Ptr tp = do
         ptr <- instr' $ GetElementPtr $ GEP array (integral TypeWord64 0) $ GEPArray idx $ GEPStruct (ScalarPrimType tp) i GEPEmpty
-        instr $ Load tp vol ptr
+        instr $ Load vol ptr Nothing
 
 tupleArrayGep
   :: forall e arch.

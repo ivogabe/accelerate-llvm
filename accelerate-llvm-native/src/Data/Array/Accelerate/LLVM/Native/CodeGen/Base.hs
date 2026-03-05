@@ -24,7 +24,6 @@ import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import Data.Array.Accelerate.LLVM.Native.Foreign                    ()
 import Data.Array.Accelerate.Representation.Type
-import Data.Array.Accelerate.Representation.Elt (bytesElt)
 import Data.Array.Accelerate.Type
 import Data.Primitive.Vec
 
@@ -53,9 +52,6 @@ instance CalcValuesPerCacheLine PrimType where
 instance CalcValuesPerCacheLine ScalarType where
   valuesPerCacheLine tp = valuesPerCacheLine $ ScalarPrimType tp
 
-instance CalcValuesPerCacheLine TypeR where
-  valuesPerCacheLine tp = (cacheWidth + byteSize - 1) `div` byteSize
-    where byteSize = fromIntegral (bytesElt tp)
 
 -- The struct passed as argument to a call contains:
 --  * work_function: ptr

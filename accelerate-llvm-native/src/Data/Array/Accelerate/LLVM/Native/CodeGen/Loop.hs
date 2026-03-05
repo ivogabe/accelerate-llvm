@@ -251,7 +251,7 @@ shardedSelfScheduling shardIndexes shardSizes nextShardFinishedShards shardAmoun
   
   -- Get shard size from shard sizes array, no need to multiply by cache width as shard sizes are only read.
   shardSizeIdx <- instr' $ GetElementPtr $ GEP shardSizes (integral TypeWord64 0) $ GEPArray shardToWorkOn GEPEmpty
-  shardSize <- instr' $ Load scalarType NonVolatile shardSizeIdx
+  shardSize <- instr' $ Load NonVolatile shardSizeIdx Nothing
 
   _ <- br inner
 
