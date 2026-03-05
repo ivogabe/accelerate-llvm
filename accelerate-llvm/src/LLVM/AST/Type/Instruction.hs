@@ -213,38 +213,17 @@ data Instruction a where
 
   -- <http://llvm.org/docs/LangRef.html#load-instruction>
   --
-  -- TODO: Instead of a specific Load instructions, could we have a single one?
-  -- The reason we currently have alternatives is that Load requires a
-  -- ScalarType, but could we just drop that?
-  Load            :: ScalarType a
-                  -> Volatility
+  Load            :: Volatility
                   -> Operand (Ptr a)
+                  -> Maybe Align
                   -> Instruction a
-
-  LoadAtomic      :: ScalarType a
-                  -> Volatility
-                  -> Operand (Ptr a)
-                  -> MemoryOrdering
-                  -> LP.Align
-                  -> Instruction a
-
-  LoadBool        :: Volatility
-                  -> Operand (Ptr Bool)
-                  -> Instruction Bool
-
-  LoadPtr         :: Volatility
-                  -> Operand (Ptr (Ptr a))
-                  -> Instruction (Ptr a)
-
-  LoadStruct      :: Volatility
-                  -> Operand (Ptr (Struct a))
-                  -> Instruction (Struct a)
 
   -- <http://llvm.org/docs/LangRef.html#store-instruction>
   --
   Store           :: Volatility
                   -> Operand (Ptr a)
                   -> Operand a
+                  -> Maybe Align
                   -> Instruction ()
 
   -- <http://llvm.org/docs/LangRef.html#getelementptr-instruction>
@@ -401,6 +380,7 @@ data Named ins a where
   (:=) :: Name a -> ins a -> Named ins a
   Do   :: ins ()          -> Named ins ()
 
+type Align = Int
 
 -- | Convert to llvm-pretty
 --
@@ -421,20 +401,12 @@ instance Downcast (Instruction a) LP.Instr where
     LOr x y               -> LP.Bit LP.Or (downcast x) (LP.typedValue (downcast y))
     BXor _ x y            -> LP.Bit LP.Xor (downcast x) (LP.typedValue (downcast y))
     LNot x                -> LP.Bit LP.Xor (downcast x) (LP.ValInteger 1)
-    -- If we decide to compile power-of-two Vecs to LLVM Vectors (instead of Arrays),
-    -- then we must use InsertElt and ExtractElt instead of InsertValue and ExtractValue.
-    InsertElement i v x   -> LP.InsertValue (downcast v) (downcast x) [i]
-      -- | vecIsPowerOfTwo v -> LP.InsertElt (downcast v) (downcast x) (constant i)
-    ExtractElement i v    -> LP.ExtractValue (downcast v) [i]
-      -- | vecIsPowerOfTwo v -> LP.ExtractElt (downcast v) (constant i)
+    InsertElement i v x   -> LP.InsertElt (downcast v) (downcast x) (constant i)
+    ExtractElement i v    -> LP.ExtractElt (downcast v) (constant i)
     ExtractValue _ i s    -> extractStruct i s
     Alloca tp             -> LP.Alloca (downcast tp) Nothing Nothing
-    Store vol p x         -> LP.Store (downcast vol) (downcast x) (downcast p) atomicity alignment
-    Load t vol p          -> LP.Load (downcast vol) (downcast t) (downcast p) atomicity alignment
-    LoadAtomic t vol p at al  -> LP.Load (downcast vol) (downcast t) (downcast p) (Just $ downcast at) (Just al)
-    LoadBool vol p        -> LP.Load (downcast vol) (downcast BoolPrimType) (downcast p) atomicity alignment
-    LoadPtr vol p         -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment
-    LoadStruct vol p      -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity alignment
+    Store vol p x align   -> LP.Store (downcast vol) (downcast x) (downcast p) atomicity align
+    Load vol p align      -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity align
     GetElementPtr (GEP n i1 path) -> case typeOf n of
       PrimType (PtrPrimType t _) ->
         LP.GEP inbounds (downcast t) (downcast n) (downcast i1 : downcastGEPIndex constantTyped path t)
@@ -452,9 +424,6 @@ instance Downcast (Instruction a) LP.Instr where
     FExt _ t x            -> LP.Conv LP.FpExt (downcast x) (downcast t)
     FPToInt _ b x         -> float2int b (downcast x)
     IntToFP a b x         -> int2float a b (downcast x)
-    -- TODO: BitCast in llvm doesn't work on our VectorScalarType, as we compile that to an array type in LLVM.
-    -- Solution might be to convert an array to a vector, and then bitcast the vector.
-    -- (And if the output is a vector: bitcast to a vector, then convert the vector to an array).
     BitCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
     PtrCast t x           -> LP.Conv LP.BitCast (downcast x) (downcast t)
     PtrToInt t x          -> LP.Conv LP.PtrToInt (downcast x) (downcast t)
@@ -525,11 +494,6 @@ instance Downcast (Instruction a) LP.Instr where
         | signed t  = LP.Arith LP.SRem x y
         | otherwise = LP.Arith LP.URem x y
 
-      -- vecIsPowerOfTwo :: Operand (Vec n a1) -> Bool
-      -- vecIsPowerOfTwo v = case typeOf v of
-      --   PrimType (ScalarPrimType (VectorScalarType (VectorType n _))) -> popCount n == 1
-      --   _ -> internalError "Vector impossible"
-
       extractStruct :: TupleIdx s t -> Operand (Struct s) -> LP.Instr
       extractStruct ix s = LP.ExtractValue (downcast s) [fromIntegral int]
         where
@@ -586,10 +550,6 @@ instance Downcast (Instruction a) LP.Instr where
           ui GT = LP.Iugt
           ui GE = LP.Iuge
 
-      pointeeType :: Type (Ptr t) -> PrimType t
-      pointeeType (PrimType (PtrPrimType tp _)) = tp
-      pointeeType _ = internalError "Ptr impossible"
-
       call :: Function Callable t -> Arguments t -> LP.Instr
       call f args = LP.Call tail fmFlags fun_ty target $ travArgs args
         where
@@ -627,6 +587,9 @@ instance Downcast (Named Instruction a) LP.Stmt where
   downcast (x := op) = LP.Result (nameToPrettyI x) (downcast op) [] []
   downcast (Do op)   = LP.Effect (downcast op) [] []
 
+pointeeType :: Type (Ptr t) -> PrimType t
+pointeeType (PrimType (PtrPrimType tp _)) = tp
+pointeeType _ = internalError "Ptr impossible"
 
 instance TypeOf Instruction where
   typeOf = \case
@@ -649,15 +612,7 @@ instance TypeOf Instruction where
     InsertElement _ x _   -> typeOf x
     ExtractValue t _ _    -> PrimType t
     Alloca t              -> PrimType $ PtrPrimType t defaultAddrSpace
-    Load t _ _            -> scalar t
-    LoadAtomic t _ _ _ _  -> scalar t
-    LoadBool _ _          -> PrimType BoolPrimType
-    LoadPtr _ x           -> case typeOf x of
-      PrimType (PtrPrimType t _) -> PrimType t
-      _ -> internalError "Ptr impossible"
-    LoadStruct _ x        -> case typeOf x of
-      PrimType (PtrPrimType t _) -> PrimType t
-      _ -> internalError "Ptr impossible"
+    Load _ ptr _          -> PrimType $ pointeeType $ typeOf ptr
     Store{}               -> VoidType
     GetElementPtr gep     -> typeOf gep
     Fence{}               -> VoidType

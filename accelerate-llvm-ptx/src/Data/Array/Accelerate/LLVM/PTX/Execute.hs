@@ -74,6 +74,7 @@ import Control.Monad.Reader                                         ( asks )
 import Control.Monad.State                                          ( liftIO )
 import Control.Concurrent.MVar
 import Data.Maybe                                                   ( fromMaybe )
+import qualified Data.Text                                          as Text
 
 instance Execute UniformScheduleFun PTXKernel where
   data Linked UniformScheduleFun PTXKernel t = PTXLinked (UniformScheduleFun PTXKernel () t)
@@ -196,9 +197,9 @@ executeEffect env = \case
     , Refl <- reprIsSingle @Value @_ @Value value -> do
       liftIO $ putMVar mvar value
     | otherwise -> internalError "Ref or scalar impossible"
-  Aassert cond -> do
+  Aassert msg cond -> do
     result <- evalExp cond $ evalArrayInstr env
-    unless (result == 1) $ error "Assertion failed"
+    unless (result == 1) $ errorWithoutStackTrace $ "\n*** Assertion failed: " ++ Text.unpack msg
 
 size' :: ShapeR sh -> Distribute Value sh -> Int
 size' ShapeRz _ = 1

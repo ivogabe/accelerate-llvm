@@ -46,6 +46,7 @@ import Foreign.Storable
 import Formatting
 import Text.Printf
 import qualified Data.ByteString.Short.Char8                        as S8
+import Data.Typeable                                                ( (:~:)(..) )
 
 
 -- Witnesses to observe the LLVM type hierarchy:
@@ -95,19 +96,14 @@ data PrimType a where
 
 instance Distributes PrimType where
   reprIsSingle BoolPrimType = Refl
-  reprIsSingle (ScalarPrimType t) = reprIsSingle t
-  reprIsSingle (PtrPrimType _ _) = Refl
-  reprIsSingle (ArrayPrimType _ _) = Refl
-  reprIsSingle (StructPrimType _ t) = case t of
-    TupRunit     -> Refl
-    TupRsingle s -> case reprIsSingle s of Refl -> Refl
-    TupRpair _ _ -> Refl
-  reprIsSingle (NamedPrimType _ t) = reprIsSingle t
+  reprIsSingle (ScalarPrimType tp) = reprIsSingle tp
+  reprIsSingle PtrPrimType{} = Refl
+  reprIsSingle ArrayPrimType{} = Refl
+  reprIsSingle StructPrimType{} = Refl
+  reprIsSingle NamedPrimType{} = Refl
 
-  pairImpossible (ScalarPrimType t) = pairImpossible t
-  
-  unitImpossible (ScalarPrimType t) = unitImpossible t
-
+  pairImpossible (ScalarPrimType tp) = pairImpossible tp
+  unitImpossible (ScalarPrimType tp) = unitImpossible tp
 
 skipTypeAlias :: PrimType a -> PrimType a
 skipTypeAlias (NamedPrimType _ t) = skipTypeAlias t
@@ -413,11 +409,9 @@ llvmTypeToAccTypeR _ = Nothing
 primSizeAlignment :: PrimType a -> (Int, Int)
 primSizeAlignment BoolPrimType = (1, 1)
 primSizeAlignment (ScalarPrimType (SingleScalarType tp)) = (sz, sz)
-  where sz = bytesElt $ TupRsingle $ SingleScalarType tp
-primSizeAlignment (ScalarPrimType (VectorScalarType (VectorType n tp)))
-  | popCount n == 1 = (sz * n, sz * n)
-  | otherwise = (sz * n, sz)
-  where sz = bytesElt $ TupRsingle $ SingleScalarType tp
+  where sz = singleTypeSize tp
+primSizeAlignment (ScalarPrimType (VectorScalarType _)) =
+  internalError "Cannot compute alignment of VectorScalarType, as we never store that in an array. Via BufferEltR it should be converted to a SizedArray."
 primSizeAlignment (PtrPrimType _ _) = (sz, sz)
   where sz = sizeOf (undefined :: Ptr ())
 primSizeAlignment (ArrayPrimType n tp) = (sz' * fromIntegral n, a)

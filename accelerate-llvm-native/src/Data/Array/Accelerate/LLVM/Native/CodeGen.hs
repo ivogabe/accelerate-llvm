@@ -64,7 +64,7 @@ import LLVM.AST.Type.Instruction.RMW
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
-import Data.Array.Accelerate.LLVM.CodeGen.Sugar (IROpenFun2 (app2))
+import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically)
@@ -151,7 +151,7 @@ codegen name env cluster args
 
             -- Decide whether tileCount is large enough
             OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
-            value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
+            value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
             retval_ value
 
           setBlock finishBlock
@@ -327,8 +327,7 @@ codegen name env cluster args
         initShards shardIndexes shardSizes workassistIndex tileCount64
 
         OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
-        value <- instr' $ Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
-
+        value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
         retval_ value
 
       setBlock finishBlock
@@ -771,14 +770,14 @@ parCodeGenFoldCommutative _ fun seed identity input index codeEnd = Exists $ Par
   -- In kernel memory, store a lock (Word8) and the
   -- reduced value so far. The lock must be acquired to read or update the total value.
   -- Value 0 means unlocked, 1 is locked.
-  (mapTupR ScalarPrimType memoryTp)
+  (bufferEltsR memoryTp)
   -- Initialize kernel memory
   (\ptr envs -> do
     ptrs <- tuplePtrs memoryTp ptr
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeWord8 0) -- unlocked
+        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeWord8 0) Nothing -- unlocked
         value <- llvmOfExp (compileArrayInstrEnvs envs) seed
         tupleStore tp valuePtrs value
   )
@@ -834,7 +833,8 @@ parCodeGenFoldCommutative _ fun seed identity input index codeEnd = Exists $ Par
 
         -- Release the lock
         _ <- instr' $ LLVM.Fence (CrossThread, Release)
-        _ <- instr' $ Store Volatile lock (scalar scalarTypeWord8 0)
+        -- TODO: Change to atomic store
+        _ <- instr' $ Store Volatile lock (scalar scalarTypeWord8 0) Nothing
         return ()
   )
   -- Code after the loop
@@ -882,14 +882,14 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
   -- of that block.
-  (mapTupR ScalarPrimType memoryTp)
+  (bufferEltsR memoryTp)
   -- Initialize kernel memory
   (\ptr envs -> do
     ptrs <- tuplePtrs memoryTp ptr
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0)
+        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0) Nothing
         case seed of
           Nothing -> return ()
           Just s -> do
@@ -987,7 +987,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         else do
           _ <- Loop.while [] TupRunit
             (\_ -> do
-              idx <- instr $ Load scalarTypeInt Volatile idxPtr
+              idx <- instr $ Load Volatile idxPtr Nothing
               A.neq singleType idx (envsTileIndex envs)
             )
             (\_ -> return OP_Unit)
@@ -1036,7 +1036,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
 
         _ <- instr' $ LLVM.Fence (CrossThread, Release)
         OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-        _ <- instr' $ Store Volatile idxPtr nextIdx
+        _ <- instr' $ Store Volatile idxPtr nextIdx Nothing
         return ()
   )
   (\_ _ _ -> return ())

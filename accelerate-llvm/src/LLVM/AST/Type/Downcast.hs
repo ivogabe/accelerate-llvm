@@ -62,15 +62,11 @@ instance Downcast (SingleType a) LLVM.Type where
 
 instance Downcast (VectorType a) LLVM.Type where
   -- Our Vec is packed, whereas LLVM's Vector includes padding.
-  -- Instead of a Vec, we use an Array as that does not add padding,
-  -- and aligns individual values based on the alignment of t only.
+  -- To work around this difference, we never store Vec values in memory as
+  -- Vectors, and instead store them as SizedArrays. This conversion happens
+  -- via BufferEltR.
   downcast (VectorType n t)
-    -- We could add a special case for power-of-two vectors,
-    -- since they don't need padding anyway. However, depending on
-    -- the architecture this may require more alignment, and we would need to
-    -- encorporate that for instance in primSizeAlignment
-    -- | popCount n == 1 = LLVM.Vector (fromIntegral n) (downcast t)
-    = LLVM.Array  (fromIntegral n) (downcast t)
+    = LLVM.Vector (fromIntegral n) (downcast t)
 
 instance Downcast (BoundedType t) LLVM.Type where
   downcast (IntegralBoundedType t) = downcast t
