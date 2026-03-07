@@ -304,7 +304,7 @@ codegen name env cluster args
 
             retval_ $ scalar (scalarType @Word8) 0
             -- Return the size of kernel memory
-            pure $ fst $ primSizeAlignment memoryTp
+            pure $ shardStorageSize + fst (primSizeAlignment memoryTp)
     else do
       -- Parallelise over all independent dimensions
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -359,7 +359,7 @@ codegen name env cluster args
             }
           genSequential envs' (drop parallelDepth loops) $ opCodeGens opCodeGen flatOps
 
-        pure 0
+        pure shardStorageSize
   where
     (argTp, extractEnv, shardIndexes, shardSizes, workassistIndex, flag, kernelMem', gamma) = bindHeaderEnv env
 

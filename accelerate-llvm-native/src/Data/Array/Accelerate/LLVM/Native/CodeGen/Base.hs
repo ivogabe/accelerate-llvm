@@ -62,16 +62,26 @@ instance CalcValuesPerCacheLine ScalarType where
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = ((((((Ptr (Struct Int8), Ptr Int8), Word32), Word32), SizedArray Word64), SizedArray Word64), Word64)
+type Header = ((((Ptr (Struct Int8), Ptr Int8), Word32), Word32), Word64)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
-  `TupRpair` TupRsingle (ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeWord64) primType)
-  `TupRpair` TupRsingle (ArrayPrimType shardAmount primType)
   `TupRpair` TupRsingle primType
+
+shardIndexesTp :: PrimType (SizedArray Word64)
+shardIndexesTp = ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeWord64) primType
+
+shardSizesTp :: PrimType (SizedArray Word64)
+shardSizesTp = ArrayPrimType shardAmount primType
+
+shardStorageTp :: PrimType (Struct (SizedArray Word64, SizedArray Word64))
+shardStorageTp = StructPrimType False $ TupRsingle shardIndexesTp `TupRpair` TupRsingle shardSizesTp
+
+shardStorageSize :: Int
+shardStorageSize = fst $ primSizeAlignment shardStorageTp
 
 type KernelType env
   -- Ptr to the kernel struct
@@ -98,14 +108,16 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameShards         := GetElementPtr (gepStruct (ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeWord64) (ScalarPrimType scalarType)) arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameShardSizes     := GetElementPtr (gepStruct (ArrayPrimType shardAmount (ScalarPrimType scalarType)) arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameIndex          := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ "env"              := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameKernelMemory   := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
+      memory  <- instr' $ GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
+      memory' <- instr' $ PtrCast (PtrPrimType memTp defaultAddrSpace) memory
+      instr_ $ downcast $ nameIndex                  := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ "env"                      := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameShards                 := GetElementPtr (gepStruct shardIndexesTp memory' $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
+      instr_ $ downcast $ nameShardSizes             := GetElementPtr (gepStruct shardSizesTp memory' $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameKernelMemory           := GetElementPtr (gepStruct kernelMemTp memory' $ TupleIdxRight TupleIdxSelf)
       extractEnv
-  , LocalReference (PrimType $ PtrPrimType (ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeWord64) (ScalarPrimType scalarType)) defaultAddrSpace) nameShards
-  , LocalReference (PrimType $ PtrPrimType (ArrayPrimType shardAmount (ScalarPrimType scalarType)) defaultAddrSpace) nameShardSizes
+  , LocalReference (PrimType $ PtrPrimType shardIndexesTp defaultAddrSpace) nameShards
+  , LocalReference (PrimType $ PtrPrimType shardSizesTp defaultAddrSpace) nameShardSizes
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
   , LocalReference type' nameFlag
   , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
@@ -126,4 +138,9 @@ bindHeaderEnv env =
 
     kernelMemTp :: PrimType (SizedArray Word)
     kernelMemTp = ArrayPrimType 0 primType
+
+    memTp = StructPrimType False $ TupRsingle shardIndexesTp `TupRpair` TupRsingle shardSizesTp `TupRpair` TupRsingle kernelMemTp
+
     arg = LocalReference (PrimType argTp) "arg"
+    -- kernelMemoryRaw = LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemoryRaw
+    -- kernelMemoryWithShards = LocalReference (PrimType $ PtrPrimType kernelMemWithShardsTp defaultAddrSpace) nameKernelMemoryWithShards
