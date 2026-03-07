@@ -87,22 +87,32 @@ void* accelerate_worker(void *data_packed) {
       if (attempts_remaining == 0) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
+
+      TRACY_ZONE_BEGIN(run_ctx, "Program run()", 0x00FFFF);
       struct KernelLaunch* kernel = task.program->run(&accelerate_runtime_lib, workers, thread_idx, task.program, task.location);
+      TRACY_ZONE_END(run_ctx);
+
       if (kernel == NULL) {
         accelerate_program_release(task.program);
         task.program = NULL;
         task.location = 0;
       } else {
         // Initialize kernel memory and check if the kernel should be executed in parallel.
+        TRACY_ZONE_BEGIN(init_ctx, "Kernel init", 0x00FF00);
         unsigned char parallel =
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFF);
+        TRACY_ZONE_END(init_ctx);
 
         // start_task from the Work Assisting paper
         if (parallel == 1) {
           atomic_store_explicit(&workers->scheduler.activities[thread_idx], accelerate_pack(kernel, 0), memory_order_release);
           accelerate_parker_wake_all(&workers->scheduler.parker);
         }
+
+        TRACY_ZONE_BEGIN(work_ctx, "Kernel work", 0xFF00FF);
         kernel->work_function(kernel, workers->locks, 0);
+        TRACY_ZONE_END(work_ctx);
+
         // Keep track of whether this was the last thread working on the kernel
         bool is_last;
         if (parallel == 1) {
@@ -152,7 +162,9 @@ void* accelerate_worker(void *data_packed) {
         if (is_last) {
           // The last thread executes the finish function.
           // First, execute the finish procedure of the kernel:
+          TRACY_ZONE_BEGIN(final_ctx, "Kernel finalize", 0x00FFAA);
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE);
+          TRACY_ZONE_END(final_ctx);
           // Then continue the program after this kernel, via
           // program_continuation in the KernelLaunch structure.
           task.program = kernel->program;
@@ -188,7 +200,11 @@ void* accelerate_worker(void *data_packed) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
       uint32_t i = atomic_fetch_add_explicit(&kernel->work_index, 1, memory_order_relaxed);
+
+      TRACY_ZONE_BEGIN(steal_ctx, "Kernel work stealing", 0xFF0000);
       kernel->work_function(kernel, workers->locks, i);
+      TRACY_ZONE_END(steal_ctx);
+
       // signal_task_empty from the Work Assisting paper,
       // and end_task
       // Similar to above, signal_task_empty happens here instead of in the work function.
@@ -217,7 +233,9 @@ void* accelerate_worker(void *data_packed) {
       if (is_last) {
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
+        TRACY_ZONE_BEGIN(final_ctx, "Kernel finalize", 0x00FFAA);
         kernel->work_function(kernel, workers->locks, 0xFFFFFFFE);
+        TRACY_ZONE_END(final_ctx);
         // Then continue the program after this kernel, via
         // program_continuation in the KernelLaunch structure.
         task.program = kernel->program;
@@ -243,8 +261,6 @@ void* accelerate_worker(void *data_packed) {
 }
 
 struct Workers* accelerate_start_workers(uint64_t thread_count) {
-  ___tracy_emit_message("hello world", 11, 0);
-
   struct Workers *workers = malloc(sizeof(struct Workers));
 
   workers->scheduler.queue = accelerate_queue_new();
