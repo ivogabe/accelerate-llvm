@@ -39,6 +39,11 @@ import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
+import Data.Array.Accelerate.LLVM.CodeGen.Loop
+import Data.Array.Accelerate.LLVM.CodeGen.Sugar
+import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic (liftInt)
+import qualified Data.Array.Accelerate.LLVM.CodeGen.Array as A
 import Data.Array.Accelerate.LLVM.Compile.Cache ( UID )
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -62,12 +67,14 @@ import LLVM.AST.Type.Name
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
 import Data.Bits
+import Data.Text (unpack)
 import Control.Monad
 import Data.String
 import qualified Data.List as List
 import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
+import qualified Data.Array.Accelerate.Backend as Interpeter
 
 data NativeProgram = NativeProgram
   !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Word16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
@@ -1027,6 +1034,22 @@ convert inAwhile (Effect (Aassert msg cond) next)
         _ <- llvmOfExp (convertArrayInstr structVars localVars) (Assert msg cond Nil)
         phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock 
     }
+convert inAwhile (Effect (Atrace msg t) next)
+  | Exists2 next1 <- convert inAwhile next =
+    Exists2 $ Phase1{
+      blockCount = blockCount next1,
+      importsType = importsType next1,
+      importsInit = importsInit next1,
+      importedLifetimes = importedLifetimes next1,
+      stateType = stateType next1,
+      varsFree = effectFreeVars (Atrace msg t) `IdxSet.union` varsFree next1,
+      varsInStruct = varsInStruct next1,
+      maySuspend = maySuspend next1,
+      phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
+        _ <- putString (unpack msg)
+        _ <- putArrayDescriptors t -- TODO(Mike): Array ook schrijven naar console
+        phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock 
+    }
 -- Bindings
 -- No need to construct anything if the result is not used.
 -- This is required, since pushBindingSingle leaks memory when using LeftHandSideWildcard
@@ -1859,3 +1882,29 @@ awhileBindOutput getStruct = go TupleIdxSelf
     go idx (InputOutputRpair io1 io2) (LeftHandSidePair lhs1 lhs2) env =
       go (tupleRight idx) io2 lhs2 $ go (tupleLeft idx) io1 lhs1 env
     go _ _ _ _ = internalError "Tuple mismatch"
+
+putArrayDescriptors :: ArrayDescriptors env t -> CodeGen Native ()
+putArrayDescriptors = foldMapMTupR putArrayDescriptor
+
+putArrayDescriptor :: ArrayDescriptor env t -> CodeGen Native ()
+putArrayDescriptor (ArrayDescriptor shape sh (TupRsingle (Var (GroundRbuffer scalarType) idx))) = do -- Assume that e is a scalar for now
+  imapFromStepTo [] (liftInt 0) (liftInt 1) (liftInt 10) $ \i -> do -- LoopAnnotation / start index / step size / final index / loop function
+
+    value <- A.readBuffer scalarType TypeInt (IRBuffer _ defaultAddrSpace NonVolatile IRBufferScopeArray Nothing) (op TypeInt i) Nothing 
+    return ()
+
+-- TODO(Mike): Get size of the buffer to replace the (liftInt 10)
+-- TODO(Mike): Create a (Operand (Ptr (BufferEltR e))) from the ForeignPtr e out of Buffer
+-- TODO(Mike): Print the value to the console
+
+-- bufferRetainAndGetRef :: Buffer e -> IO (Ptr e) 
+
+-- Hoe kom ik aan een (Operand (Ptr (BufferEltR e))) dan heb ik de IRBuffer compleet
+-- Checken of TypeInt hier correct is?
+
+-- Accelerate Interpeter.hs
+-- let shsize = varsGetVal sh env
+-- let j = toIndex shape shsize sh
+-- let buf = varsGetVal buffer env
+-- let buf' = veryUnsafeUnfreezeBuffers @e typer buf
+-- x <- readBuffers @e typer buf' j
