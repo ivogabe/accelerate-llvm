@@ -98,7 +98,7 @@ void* accelerate_worker(void *data_packed) {
         task.location = 0;
       } else {
         // Initialize kernel memory and check if the kernel should be executed in parallel.
-        TRACY_ZONE_BEGIN(init_ctx, "Kernel init", 0x00FF00);
+        TRACY_ZONE_BEGIN(init_ctx, kernel->name, 0x00FF00);
         unsigned char parallel =
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFF);
         TRACY_ZONE_END(init_ctx);
@@ -109,7 +109,7 @@ void* accelerate_worker(void *data_packed) {
           accelerate_parker_wake_all(&workers->scheduler.parker);
         }
 
-        TRACY_ZONE_BEGIN(work_ctx, "Kernel work", 0xFF00FF);
+        TRACY_ZONE_BEGIN(work_ctx, kernel->name, 0xFF00FF);
         kernel->work_function(kernel, workers->locks, 0);
         TRACY_ZONE_END(work_ctx);
 
@@ -162,7 +162,7 @@ void* accelerate_worker(void *data_packed) {
         if (is_last) {
           // The last thread executes the finish function.
           // First, execute the finish procedure of the kernel:
-          TRACY_ZONE_BEGIN(final_ctx, "Kernel finalize", 0x00FFAA);
+          TRACY_ZONE_BEGIN(final_ctx, kernel->name, 0x00FFAA);
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE);
           TRACY_ZONE_END(final_ctx);
           // Then continue the program after this kernel, via
@@ -201,7 +201,7 @@ void* accelerate_worker(void *data_packed) {
       }
       uint32_t i = atomic_fetch_add_explicit(&kernel->work_index, 1, memory_order_relaxed);
 
-      TRACY_ZONE_BEGIN(steal_ctx, "Kernel work stealing", 0xFF0000);
+      TRACY_ZONE_BEGIN(steal_ctx, kernel->name, 0xFF0000);
       kernel->work_function(kernel, workers->locks, i);
       TRACY_ZONE_END(steal_ctx);
 
@@ -233,7 +233,7 @@ void* accelerate_worker(void *data_packed) {
       if (is_last) {
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
-        TRACY_ZONE_BEGIN(final_ctx, "Kernel finalize", 0x00FFAA);
+        TRACY_ZONE_BEGIN(final_ctx, kernel->name, 0x00FFAA);
         kernel->work_function(kernel, workers->locks, 0xFFFFFFFE);
         TRACY_ZONE_END(final_ctx);
         // Then continue the program after this kernel, via
