@@ -8,6 +8,7 @@
 #include "tracy.h"
 #include <unistd.h>
 #include <sched.h>
+#include <string.h>
 
 struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .accelerate_buffer_alloc = accelerate_buffer_alloc,
@@ -22,6 +23,57 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .accelerate_signal_resolve = accelerate_signal_resolve,
   .hs_try_putmvar = hs_try_putmvar
 };
+
+typedef enum {
+  COLOR_DARK,
+  COLOR_NORMAL,
+  COLOR_LIGHT,
+} ColorVariant;
+
+uint32_t get_color_variant(uint32_t color, ColorVariant variant) {
+  uint32_t r = (color >> 16) & 0xFF;
+  uint32_t g = (color >> 8)  & 0xFF;
+  uint32_t b = color         & 0xFF;
+
+  r = (r * 3) / 5 + 102;
+  g = (g * 3) / 5 + 102;
+  b = (b * 3) / 5 + 102;
+
+  switch (variant) {
+    case COLOR_DARK:
+      r -= 70;
+      g -= 70;
+      b -= 70;
+      break;
+
+    case COLOR_NORMAL:
+      break;
+
+    case COLOR_LIGHT:
+      r += 70;
+      g += 70;
+      b += 70;
+      break;
+  }
+
+  return ((r & 0xFF) << 16) |
+         ((g & 0xFF) << 8)  |
+         ((b & 0xFF));
+}
+
+// A kernel_id is in the following form: <operation_name>-<uid>
+//   see: `compileKernel` in `Kernel.hs
+// We use this to get a unique color per kernel
+uint32_t get_color_from_kernel_id(char *kernel_id, ColorVariant variant) {
+  uint32_t color = 0xFF00FF;
+
+  size_t len = strlen(kernel_id);
+  if (len >= 4) {
+    memcpy(&color, kernel_id + len - 4, 4);
+  }
+
+  return get_color_variant(color, variant);
+}
 
 static void accelerate_parker_maybe_park(struct ThreadParker *parker) {
   pthread_mutex_lock(&parker->lock);
@@ -98,7 +150,7 @@ void* accelerate_worker(void *data_packed) {
         task.location = 0;
       } else {
         // Initialize kernel memory and check if the kernel should be executed in parallel.
-        TRACY_ZONE_BEGIN(init_ctx, kernel->name, 0x00FF00);
+        TRACY_ZONE_BEGIN(init_ctx, kernel->name, get_color_from_kernel_id(kernel->name, COLOR_LIGHT));
         unsigned char parallel =
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFF);
         TRACY_ZONE_END(init_ctx);
@@ -109,7 +161,7 @@ void* accelerate_worker(void *data_packed) {
           accelerate_parker_wake_all(&workers->scheduler.parker);
         }
 
-        TRACY_ZONE_BEGIN(work_ctx, kernel->name, 0xFF00FF);
+        TRACY_ZONE_BEGIN(work_ctx, kernel->name, get_color_from_kernel_id(kernel->name, COLOR_NORMAL));
         kernel->work_function(kernel, workers->locks, 0);
         TRACY_ZONE_END(work_ctx);
 
@@ -162,7 +214,7 @@ void* accelerate_worker(void *data_packed) {
         if (is_last) {
           // The last thread executes the finish function.
           // First, execute the finish procedure of the kernel:
-          TRACY_ZONE_BEGIN(final_ctx, kernel->name, 0x00FFAA);
+          TRACY_ZONE_BEGIN(final_ctx, kernel->name, get_color_from_kernel_id(kernel->name, COLOR_LIGHT));
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE);
           TRACY_ZONE_END(final_ctx);
           // Then continue the program after this kernel, via
@@ -201,7 +253,7 @@ void* accelerate_worker(void *data_packed) {
       }
       uint32_t i = atomic_fetch_add_explicit(&kernel->work_index, 1, memory_order_relaxed);
 
-      TRACY_ZONE_BEGIN(steal_ctx, kernel->name, 0xFF0000);
+      TRACY_ZONE_BEGIN(steal_ctx, kernel->name, get_color_from_kernel_id(kernel->name, COLOR_DARK));
       kernel->work_function(kernel, workers->locks, i);
       TRACY_ZONE_END(steal_ctx);
 
@@ -233,7 +285,7 @@ void* accelerate_worker(void *data_packed) {
       if (is_last) {
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
-        TRACY_ZONE_BEGIN(final_ctx, kernel->name, 0x00FFAA);
+        TRACY_ZONE_BEGIN(final_ctx, kernel->name, get_color_from_kernel_id(kernel->name, COLOR_DARK));
         kernel->work_function(kernel, workers->locks, 0xFFFFFFFE);
         TRACY_ZONE_END(final_ctx);
         // Then continue the program after this kernel, via
