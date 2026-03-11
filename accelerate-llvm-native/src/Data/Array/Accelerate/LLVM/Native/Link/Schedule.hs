@@ -1896,14 +1896,13 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
       computeSize structVars' localVars'' shr' vs (ir scalarTypeInt accum')
     computeSize _ _ _ _ _ = internalError "Pair impossible"
 
-  (_, sz') <- computeSize structVars localVars shape sh (liftInt 1)
+  (_, sz) <- computeSize structVars localVars shape sh (liftInt 1)
   case tp of
     GroundRbuffer _ ->
-      imapFromStepTo [] (liftInt 0) (liftInt 1) sz' $ \i -> do -- LoopAnnotation / start index / step size / final index / loop function
+      imapFromStepTo [] (liftInt 0) (liftInt 1) sz $ \i -> do -- LoopAnnotation / start index / step size / final index / loop function
         (_, ptr) <- getValue structVars localVars tp idx
         ptr'     <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt i
         value    <- instr' $ Load NonVolatile ptr' Nothing
+        -- TODO(Mike): Print the value to the console
         return ()
     GroundRscalar _ -> return ()  -- not a buffer
-
--- TODO(Mike): Print the value to the console
