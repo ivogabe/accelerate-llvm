@@ -1,16 +1,25 @@
 cradle:
-  stack:
-    - path: "accelerate-llvm/src"
-      component: "accelerate-llvm:lib"
-
-    - path: "accelerate-llvm-native/src"
-      component: "accelerate-llvm-native:lib"
-
-    - path: "accelerate-llvm-native/test/nofib"
-      component: "accelerate-llvm-native:test:nofib-llvm-native"
-
-    # - path: "accelerate-llvm-ptx/src"
-    #   component: "accelerate-llvm-ptx:lib"
-
-    # - path: "accelerate-llvm-ptx/test/nofib"
-    #   component: "accelerate-llvm-ptx:test:nofib-llvm-ptx"
+  multi:
+    - path: "./accelerate-llvm/src"
+      config:
+        cradle:
+          stack:
+            component: "accelerate-llvm:lib"
+    - path: "./accelerate-llvm-native/src"
+      config:
+        cradle:
+          stack:
+            component: "accelerate-llvm-native:lib"
+    - path: "./accelerate-llvm-native/test/nofib"
+      config:
+        cradle:
+          stack:
+            component: "accelerate-llvm-native:test:nofib-llvm-native"
+    - path: "./accelerate-llvm-ptx"
+      config:
+        cradle:
+          none:
+    - path: "./icebox"
+      config:
+        cradle:
+          none:

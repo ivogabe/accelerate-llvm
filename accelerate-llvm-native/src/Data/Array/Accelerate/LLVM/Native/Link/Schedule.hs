@@ -1882,27 +1882,28 @@ awhileBindOutput getStruct = go TupleIdxSelf
 putArrayDescriptors :: StructVars env -> LocalVars env -> ArrayDescriptors env t -> CodeGen Native ()
 putArrayDescriptors structVars localVars t = foldMapMTupR (\a -> putArrayDescriptor structVars localVars a) t
 
+-- This function assums that the buffer size of a scalar type and not a vector type
 putArrayDescriptor :: StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
-putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do -- Assume that e is a scalar for now
+putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
   let TupRsingle (Var tp idx) = buffer
+  let
+    computeSize :: StructVars env -> LocalVars env -> ShapeR sh -> GroundVars env sh -> Operands Int -> CodeGen Native (LocalVars env, Operands Int)
+    computeSize _ localVars' ShapeRz _ accum = return (localVars', accum)
+    computeSize structVars' localVars' (ShapeRsnoc shr') (vs `TupRpair` TupRsingle v) accum = do
+      let Var _ idx = v
+      (localVars'', value) <- getValue structVars' localVars' (GroundRscalar scalarTypeInt) idx
+      accum' <- instr' $ Mul numType (op scalarTypeInt accum) value
+      computeSize structVars' localVars'' shr' vs (ir scalarTypeInt accum')
+    computeSize _ _ _ _ _ = internalError "Pair impossible"
+
+  (_, sz') <- computeSize structVars localVars shape sh (liftInt 1)
   case tp of
     GroundRbuffer _ ->
-      imapFromStepTo [] (liftInt 0) (liftInt 1) (liftInt 10) $ \i -> do -- LoopAnnotation / start index / step size / final index / loop function
+      imapFromStepTo [] (liftInt 0) (liftInt 1) sz' $ \i -> do -- LoopAnnotation / start index / step size / final index / loop function
         (_, ptr) <- getValue structVars localVars tp idx
         ptr'     <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt i
-        val      <- instr' $ Load NonVolatile ptr' Nothing
+        value    <- instr' $ Load NonVolatile ptr' Nothing
         return ()
-    GroundRscalar _ -> return ()  -- not a buffer, nothing to do
+    GroundRscalar _ -> return ()  -- not a buffer
 
--- TODO(Mike): Get size of the buffer to replace the (liftInt 10)
 -- TODO(Mike): Print the value to the console
-
--- computeSize :: LocalVars env -> ShapeR sh -> ExpVars env sh -> Operand Word64 -> CodeGen Native (LocalVars env, Operand Word64)
--- computeSize localVars' ShapeRz _ accum = return (localVars', accum)
--- computeSize localVars' (ShapeRsnoc shr') (vs `TupRpair` TupRsingle v) accum = do
---   (localVars'', value) <- getValue structVars localVars' (GroundRscalar scalarTypeInt) (varIdx v)
---   -- Assumes that Int is 64-bit
---   value' <- instr' $ BitCast scalarType value
---   accum' <- instr' $ Mul numType accum value'
---   computeSize localVars'' shr' vs accum'
--- computeSize _ _ _ _ = internalError "Pair impossible"
