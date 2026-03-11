@@ -39,11 +39,8 @@ import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
-import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
-import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic (liftInt)
-import qualified Data.Array.Accelerate.LLVM.CodeGen.Array as A
 import Data.Array.Accelerate.LLVM.Compile.Cache ( UID )
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -74,7 +71,6 @@ import qualified Data.List as List
 import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
-import qualified Data.Array.Accelerate.Backend as Interpeter
 
 data NativeProgram = NativeProgram
   !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Word16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
@@ -1047,7 +1043,7 @@ convert inAwhile (Effect (Atrace msg t) next)
       maySuspend = maySuspend next1,
       phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
         _ <- putString (unpack msg)
-        _ <- putArrayDescriptors t -- TODO(Mike): Array ook schrijven naar console
+        _ <- putArrayDescriptors structVars localVars t -- TODO(Mike): Array ook schrijven naar console
         phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock 
     }
 -- Bindings
@@ -1883,28 +1879,30 @@ awhileBindOutput getStruct = go TupleIdxSelf
       go (tupleRight idx) io2 lhs2 $ go (tupleLeft idx) io1 lhs1 env
     go _ _ _ _ = internalError "Tuple mismatch"
 
-putArrayDescriptors :: ArrayDescriptors env t -> CodeGen Native ()
-putArrayDescriptors = foldMapMTupR putArrayDescriptor
+putArrayDescriptors :: StructVars env -> LocalVars env -> ArrayDescriptors env t -> CodeGen Native ()
+putArrayDescriptors structVars localVars t = foldMapMTupR (\a -> putArrayDescriptor structVars localVars a) t
 
-putArrayDescriptor :: ArrayDescriptor env t -> CodeGen Native ()
-putArrayDescriptor (ArrayDescriptor shape sh (TupRsingle (Var (GroundRbuffer scalarType) idx))) = do -- Assume that e is a scalar for now
-  imapFromStepTo [] (liftInt 0) (liftInt 1) (liftInt 10) $ \i -> do -- LoopAnnotation / start index / step size / final index / loop function
-
-    value <- A.readBuffer scalarType TypeInt (IRBuffer _ defaultAddrSpace NonVolatile IRBufferScopeArray Nothing) (op TypeInt i) Nothing 
-    return ()
+putArrayDescriptor :: StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
+putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do -- Assume that e is a scalar for now
+  let TupRsingle (Var tp idx) = buffer
+  case tp of
+    GroundRbuffer _ ->
+      imapFromStepTo [] (liftInt 0) (liftInt 1) (liftInt 10) $ \i -> do -- LoopAnnotation / start index / step size / final index / loop function
+        (_, ptr) <- getValue structVars localVars tp idx
+        ptr'     <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt i
+        val      <- instr' $ Load NonVolatile ptr' Nothing
+        return ()
+    GroundRscalar _ -> return ()  -- not a buffer, nothing to do
 
 -- TODO(Mike): Get size of the buffer to replace the (liftInt 10)
--- TODO(Mike): Create a (Operand (Ptr (BufferEltR e))) from the ForeignPtr e out of Buffer
 -- TODO(Mike): Print the value to the console
 
--- bufferRetainAndGetRef :: Buffer e -> IO (Ptr e) 
-
--- Hoe kom ik aan een (Operand (Ptr (BufferEltR e))) dan heb ik de IRBuffer compleet
--- Checken of TypeInt hier correct is?
-
--- Accelerate Interpeter.hs
--- let shsize = varsGetVal sh env
--- let j = toIndex shape shsize sh
--- let buf = varsGetVal buffer env
--- let buf' = veryUnsafeUnfreezeBuffers @e typer buf
--- x <- readBuffers @e typer buf' j
+-- computeSize :: LocalVars env -> ShapeR sh -> ExpVars env sh -> Operand Word64 -> CodeGen Native (LocalVars env, Operand Word64)
+-- computeSize localVars' ShapeRz _ accum = return (localVars', accum)
+-- computeSize localVars' (ShapeRsnoc shr') (vs `TupRpair` TupRsingle v) accum = do
+--   (localVars'', value) <- getValue structVars localVars' (GroundRscalar scalarTypeInt) (varIdx v)
+--   -- Assumes that Int is 64-bit
+--   value' <- instr' $ BitCast scalarType value
+--   accum' <- instr' $ Mul numType accum value'
+--   computeSize localVars'' shr' vs accum'
+-- computeSize _ _ _ _ = internalError "Pair impossible"
