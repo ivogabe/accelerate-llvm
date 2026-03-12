@@ -74,6 +74,7 @@ import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.ByteString.Short ( fromShort )
+import Numeric ( readHex )
 
 data NativeProgram = NativeProgram
   !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Word16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
@@ -862,6 +863,7 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
 
       (nm, l) <- global_string (kernelName kernel)
       let strPtr = ConstantOperand $ derefGlobalString l nm
+      let color = colorFromHash (kernelHash kernel)
 
       -- Fill arguments struct
       -- Header
@@ -898,6 +900,15 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       phase2Sub next1 imports fullState structVars PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + 1)
   }
   where
+    colorFromHash :: String -> Int
+    colorFromHash hash = case readHex (take 6 hash) of
+        [(n, "")] -> n
+        _         -> 0xFF00FF
+
+    kernelHash :: OpenKernelFun NativeKernel env' t -> String
+    kernelHash (KernelFunLam _ f) = kernelHash f
+    kernelHash (KernelFunBody kernel) = show $ kernelUID kernel
+
     kernelName :: OpenKernelFun NativeKernel env' t -> [Char]
     kernelName (KernelFunLam _ f) = kernelName f
     kernelName (KernelFunBody kernel) = Char8.unpack $ fromShort $ kernelId kernel
