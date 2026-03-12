@@ -1,7 +1,7 @@
-// NOTE: all these functions are available because they are ccall'd in accelerate
-// The signatures are copied from TracyC.h
-
+#include <flag_tracy.h> // provided by accelerate via `install-includes`
 #include <string.h>
+
+#ifdef ACCELERATE_TRACY
 
 typedef const void* TracyCZoneCtx;
 
@@ -42,3 +42,9 @@ void ___tracy_emit_message_appinfo( const char* txt, size_t size );
 
 #define TRACY_ZONE_END(ctx) ___tracy_emit_zone_end(ctx)
 
+#else
+
+#define TRACY_ZONE_BEGIN(ctx, name, color)
+#define TRACY_ZONE_END(ctx)
+
+#endif // ACCELERATE_TRACY
