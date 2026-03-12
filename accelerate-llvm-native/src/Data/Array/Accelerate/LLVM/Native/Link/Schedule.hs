@@ -1882,10 +1882,10 @@ awhileBindOutput getStruct = go TupleIdxSelf
 putArrayDescriptors :: StructVars env -> LocalVars env -> ArrayDescriptors env t -> CodeGen Native ()
 putArrayDescriptors structVars localVars t = foldMapMTupR (\a -> putArrayDescriptor structVars localVars a) t
 
--- This function assums that the buffer size of a scalar type and not a vector type
+-- This function assums that the buffer size is of a scalar type and not a vector type
 putArrayDescriptor :: StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
 putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
-  let TupRsingle (Var tp idx) = buffer
+  let TupRsingle (Var tp idx) = buffer 
   let
     computeSize :: StructVars env -> LocalVars env -> ShapeR sh -> GroundVars env sh -> Operands Int -> CodeGen Native (LocalVars env, Operands Int)
     computeSize _ localVars' ShapeRz _ accum = return (localVars', accum)
@@ -1898,11 +1898,32 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
 
   (_, sz) <- computeSize structVars localVars shape sh (liftInt 1)
   case tp of
-    GroundRbuffer _ ->
-      imapFromStepTo [] (liftInt 0) (liftInt 1) sz $ \i -> do -- LoopAnnotation / start index / step size / final index / loop function
+    GroundRbuffer t -> do
+      -- recursize gaan over de buffer
+      imapFromStepTo [] (liftInt 0) (liftInt 1) sz $ \i -> do
         (_, ptr) <- getValue structVars localVars tp idx
         ptr'     <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt i
         value    <- instr' $ Load NonVolatile ptr' Nothing
-        -- TODO(Mike): Print the value to the console
+        _ <- printValue t value
         return ()
-    GroundRscalar _ -> return ()  -- not a buffer
+    GroundRscalar _ -> return ()
+    
+-- TODO(Mike): Print the value to the console
+printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%d\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt16))) value = printf "%d\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt32))) value = printf "%d\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt64))) value = printf "%d\n" value
+
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord))) value = printf "%u\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord8))) value = printf "%u\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord16))) value = printf "%u\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord32))) value = printf "%u\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord64))) value = printf "%u\n" value
+
+printValue (SingleScalarType (NumSingleType (FloatingNumType TypeHalf))) value = printf "%f\n" value
+printValue (SingleScalarType (NumSingleType (FloatingNumType TypeFloat))) value = printf "%f\n" value
+printValue (SingleScalarType (NumSingleType (FloatingNumType TypeDouble))) value = printf "%lf\n" value
+
+printValue (VectorScalarType _) _ = return (liftInt 0) -- TODO(Mike): Kijken hoe ik dit ga oplossen
