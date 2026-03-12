@@ -1,6 +1,8 @@
 // NOTE: all these functions are available because they are ccall'd in accelerate
 // The signatures are copied from TracyC.h
 
+#include <string.h>
+
 typedef const void* TracyCZoneCtx;
 
 uint64_t ___tracy_alloc_srcloc( uint32_t line, const char* source, size_t sourceSz, const char* function, size_t functionSz, uint32_t color );
@@ -34,7 +36,7 @@ void ___tracy_emit_message_appinfo( const char* txt, size_t size );
   static uint64_t CONCAT(srcloc, __LINE__) = 0; \
   CONCAT(srcloc, __LINE__) = ___tracy_alloc_srcloc(__LINE__, \
                                                    __FILE__, sizeof(__FILE__) - 1, \
-                                                   name, sizeof(name) - 1, \
+                                                   name, strlen(name), \
                                                    color); \
   TracyCZoneCtx ctx = ___tracy_emit_zone_begin_alloc(CONCAT(srcloc, __LINE__), 1)
 
