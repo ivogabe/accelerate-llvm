@@ -1883,9 +1883,8 @@ putArrayDescriptors :: StructVars env -> LocalVars env -> ArrayDescriptors env t
 putArrayDescriptors structVars localVars t = foldMapMTupR (\a -> putArrayDescriptor structVars localVars a) t
 
 -- This function assums that the buffer size is of a scalar type and not a vector type
-putArrayDescriptor :: StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
+putArrayDescriptor :: forall env t. StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
 putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
-  let TupRsingle (Var tp idx) = buffer 
   let
     computeSize :: StructVars env -> LocalVars env -> ShapeR sh -> GroundVars env sh -> Operands Int -> CodeGen Native (LocalVars env, Operands Int)
     computeSize _ localVars' ShapeRz _ accum = return (localVars', accum)
@@ -1897,17 +1896,22 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
     computeSize _ _ _ _ _ = internalError "Pair impossible"
 
   (_, sz) <- computeSize structVars localVars shape sh (liftInt 1)
-  case tp of
-    GroundRbuffer t -> do
-      -- recursize gaan over de buffer
-      imapFromStepTo [] (liftInt 0) (liftInt 1) sz $ \i -> do
-        (_, ptr) <- getValue structVars localVars tp idx
-        ptr'     <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt i
-        value    <- instr' $ Load NonVolatile ptr' Nothing
-        _ <- printValue t value
-        return ()
-    GroundRscalar _ -> return ()
-    
+
+  let
+    loopBuffer :: forall s. Var GroundR env s -> CodeGen Native ()
+    loopBuffer (Var tp idx) = case tp of
+      GroundRbuffer t -> do
+        imapFromStepTo [] (liftInt 0) (liftInt 1) sz $ \i -> do
+          (_, ptr) <- getValue structVars localVars (GroundRbuffer t) idx
+          ptr'     <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt i
+          value    <- instr' $ Load NonVolatile ptr' Nothing
+          _ <- printValue t value
+          return ()
+      GroundRscalar _ -> return ()
+
+  foldMapMTupR loopBuffer buffer -- There can be mulitple buffers so we have to check them all
+  return ()
+
 -- TODO(Mike): Print the value to the console
 printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d\n" value
