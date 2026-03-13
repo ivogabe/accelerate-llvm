@@ -128,10 +128,15 @@ codegen name env cluster args
             envsDescending = isDescending direction
           }
 
+
+          (shardIndexes, shardSizes, kernelMem'') <- if useSharded
+            then do (shardIndexes, shardSizes, kernelMem'') <- bindShards kernelMem'
+                    return (Just shardIndexes, Just shardSizes, kernelMem'')
+            else return (Nothing, Nothing, kernelMem')
           -- Kernel memory
           let memoryTp' = parCodeGenMemory parCodes
           let memoryTp = StructPrimType False memoryTp'
-          kernelMem <- instr' $ PtrCast (PtrPrimType memoryTp defaultAddrSpace) kernelMem'
+          kernelMem <- instr' $ PtrCast (PtrPrimType memoryTp defaultAddrSpace) kernelMem''
 
           setBlock initBlock
           do
@@ -147,7 +152,9 @@ codegen name env cluster args
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs'' TupleIdxSelf parCodes
 
-            when useSharded $ initShards shardIndexes shardSizes workassistIndex (OP_Word64 tileCount)
+            case (shardIndexes, shardSizes) of
+              (Just shardIndexes, Just shardSizes) -> initShards shardIndexes shardSizes workassistIndex (OP_Word64 tileCount)
+              _ -> return ()
 
             -- Decide whether tileCount is large enough
             OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
@@ -292,19 +299,19 @@ codegen name env cluster args
                     )
                   return ()
 
-            if useSharded
-              then do 
+            case (shardIndexes, shardSizes) of
+              (Just shardIndexes, Just shardSizes) -> do
                 shardAmount' <- A.min singleType (A.liftWord64 shardAmount) (OP_Word64 tileCount)
                 shardedSelfScheduling shardIndexes shardSizes workassistIndex shardAmount'
                    (\seq tile shard -> processTile seq tile (Just shard))
-              else workassistLoop workassistIndex tileCount
+              _ -> workassistLoop workassistIndex tileCount
                    (\seq tile -> processTile seq tile Nothing)
 
             ptExit tileLoops envs'
 
             retval_ $ scalar (scalarType @Word8) 0
             -- Return the size of kernel memory
-            pure $ shardStorageSize + fst (primSizeAlignment memoryTp)
+            pure $ fst (primSizeAlignment memoryTp) + if useSharded then shardStorageSize else 0
     else do
       -- Parallelise over all independent dimensions
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -315,6 +322,8 @@ codegen name env cluster args
       -- The work per iteration is probably large enough.
       let tileSize = if parallelDepth == rank shr then chunkSize parallelShr else chunkSizeOne parallelShr
       let parSizes = parallelIterSize parallelShr loops
+
+      (shardIndexes, shardSizes, _) <- bindShards kernelMem'
 
       setBlock initBlock
       do
@@ -361,7 +370,7 @@ codegen name env cluster args
 
         pure shardStorageSize
   where
-    (argTp, extractEnv, shardIndexes, shardSizes, workassistIndex, flag, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, workassistIndex, flag, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True

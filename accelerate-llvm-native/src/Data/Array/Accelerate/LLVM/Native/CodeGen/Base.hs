@@ -97,8 +97,8 @@ bindHeaderEnv
   :: forall env. Env AccessGroundR env
   -> ( PrimType (Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)))
      , CodeGen Native ()
-     , Operand (Ptr (SizedArray Word64))  -- work indexes of shards
-     , Operand (Ptr (SizedArray Word64))  -- sizes of the shards
+    --  , Operand (Ptr (SizedArray Word64))  -- work indexes of shards
+    --  , Operand (Ptr (SizedArray Word64))  -- sizes of the shards
      , Operand (Ptr Word64)               -- In the case of workassist, the workassist index.
        -- In the case of sharded self scheduling, combined the next shard and amount of finished shards.
      , Operand Word64 -- Flag that specifies if the work needs to be initialized or finished
@@ -108,16 +108,10 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      memory  <- instr' $ GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
-      memory' <- instr' $ PtrCast (PtrPrimType memTp defaultAddrSpace) memory
       instr_ $ downcast $ nameIndex                  := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ "env"                      := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameShards                 := GetElementPtr (gepStruct shardIndexesTp memory' $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
-      instr_ $ downcast $ nameShardSizes             := GetElementPtr (gepStruct shardSizesTp memory' $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      instr_ $ downcast $ nameKernelMemory           := GetElementPtr (gepStruct kernelMemTp memory' $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameKernelMemory           := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
-  , LocalReference (PrimType $ PtrPrimType shardIndexesTp defaultAddrSpace) nameShards
-  , LocalReference (PrimType $ PtrPrimType shardSizesTp defaultAddrSpace) nameShardSizes
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
   , LocalReference type' nameFlag
   , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
@@ -130,8 +124,6 @@ bindHeaderEnv env =
     argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp `TupRpair` TupRsingle kernelMemTp)) defaultAddrSpace
     (envTp, extractEnv, gamma) = bindEnvFromStruct env
 
-    nameShards = "workassist.shards"
-    nameShardSizes = "workassist.shard_sizes"
     nameIndex = "workassist.index"
     nameFlag = "workassist.flag"
     nameKernelMemory = "kernel_memory"
@@ -139,8 +131,30 @@ bindHeaderEnv env =
     kernelMemTp :: PrimType (SizedArray Word)
     kernelMemTp = ArrayPrimType 0 primType
 
-    memTp = StructPrimType False $ TupRsingle shardIndexesTp `TupRpair` TupRsingle shardSizesTp `TupRpair` TupRsingle kernelMemTp
-
     arg = LocalReference (PrimType argTp) "arg"
-    -- kernelMemoryRaw = LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemoryRaw
-    -- kernelMemoryWithShards = LocalReference (PrimType $ PtrPrimType kernelMemWithShardsTp defaultAddrSpace) nameKernelMemoryWithShards
+
+bindShards :: Operand (Ptr (SizedArray Word))
+           -> CodeGen Native (
+                Operand (Ptr (SizedArray Word64))  -- work indexes of shards
+              , Operand (Ptr (SizedArray Word64))  -- sizes of the shards
+              , Operand (Ptr (SizedArray Word))    -- remaining kernel memory
+           )
+bindShards kernelMemory = 
+  do
+    memory <- instr' $ PtrCast (PtrPrimType memTp defaultAddrSpace) kernelMemory
+    instr_ $ downcast $ nameShards := GetElementPtr (gepStruct shardIndexesTp memory $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
+    instr_ $ downcast $ nameShardSizes := GetElementPtr (gepStruct shardSizesTp memory $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+    instr_ $ downcast $ nameKernelMemoryTail := GetElementPtr (gepStruct kernelMemTp memory $ TupleIdxRight TupleIdxSelf)
+    return ( LocalReference (PrimType $ PtrPrimType shardIndexesTp defaultAddrSpace) nameShards
+           , LocalReference (PrimType $ PtrPrimType shardSizesTp defaultAddrSpace) nameShardSizes
+           , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemoryTail
+           )
+  where
+    memTp = StructPrimType False $ TupRsingle shardIndexesTp `TupRpair` TupRsingle shardSizesTp `TupRpair` TupRsingle kernelMemTp
+    
+    nameShards = "workassist.shards"
+    nameShardSizes = "workassist.shard_sizes"
+    nameKernelMemoryTail = "kernel_memory_tail"
+
+    kernelMemTp :: PrimType (SizedArray Word)
+    kernelMemTp = ArrayPrimType 0 primType
