@@ -88,7 +88,7 @@ codegen name env cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
   codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "workassist.flag") $ do
-    extractEnv
+    (workassistIndex, flag, gamma) <- extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
     -- This first call will initialize kernel memory (SEE: Kernel Memory)
@@ -128,15 +128,11 @@ codegen name env cluster args
             envsDescending = isDescending direction
           }
 
-
-          (shardIndexes, shardSizes, kernelMem'') <- if useSharded
-            then do (shardIndexes, shardSizes, kernelMem'') <- bindShards kernelMem'
-                    return (Just shardIndexes, Just shardSizes, kernelMem'')
-            else return (Nothing, Nothing, kernelMem')
+          (shards, kernelMem') <- bindKernelMemory argTp useSharded
           -- Kernel memory
           let memoryTp' = parCodeGenMemory parCodes
           let memoryTp = StructPrimType False memoryTp'
-          kernelMem <- instr' $ PtrCast (PtrPrimType memoryTp defaultAddrSpace) kernelMem''
+          kernelMem <- instr' $ PtrCast (PtrPrimType memoryTp defaultAddrSpace) kernelMem'
 
           setBlock initBlock
           do
@@ -152,9 +148,9 @@ codegen name env cluster args
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs'' TupleIdxSelf parCodes
 
-            case (shardIndexes, shardSizes) of
-              (Just shardIndexes, Just shardSizes) -> initShards shardIndexes shardSizes workassistIndex (OP_Word64 tileCount)
-              _ -> return ()
+            case shards of
+              WithShards shardIndexes shardSizes -> initShards shardIndexes shardSizes workassistIndex (OP_Word64 tileCount)
+              NoShards -> return ()
 
             -- Decide whether tileCount is large enough
             OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
@@ -299,12 +295,12 @@ codegen name env cluster args
                     )
                   return ()
 
-            case (shardIndexes, shardSizes) of
-              (Just shardIndexes, Just shardSizes) -> do
+            case shards of
+              WithShards shardIndexes shardSizes -> do
                 shardAmount' <- A.min singleType (A.liftWord64 shardAmount) (OP_Word64 tileCount)
                 shardedSelfScheduling shardIndexes shardSizes workassistIndex shardAmount'
                    (\seq tile shard -> processTile seq tile (Just shard))
-              _ -> workassistLoop workassistIndex tileCount
+              NoShards -> workassistLoop workassistIndex tileCount
                    (\seq tile -> processTile seq tile Nothing)
 
             ptExit tileLoops envs'
@@ -323,7 +319,11 @@ codegen name env cluster args
       let tileSize = if parallelDepth == rank shr then chunkSize parallelShr else chunkSizeOne parallelShr
       let parSizes = parallelIterSize parallelShr loops
 
-      (shardIndexes, shardSizes, _) <- bindShards kernelMem'
+      (shards, _) <- bindKernelMemory argTp True
+      let (shardIndexes, shardSizes) =
+            case shards of
+              WithShards indexes sizes -> (indexes, sizes)
+              NoShards -> internalError "Missing shards in kernel memory"
 
       setBlock initBlock
       do
@@ -370,7 +370,7 @@ codegen name env cluster args
 
         pure shardStorageSize
   where
-    (argTp, extractEnv, workassistIndex, flag, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True

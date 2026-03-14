@@ -142,9 +142,6 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
-#define SHARD_AMOUNT 128
-#define CACHE_LINE_WIDTH 64
-
 // locks: an array of locks that can be used by any permutes in the kernel.
 // This array is global, i.e. all kernels use the same array of locks, and is
 // taken from Workers.locks.
