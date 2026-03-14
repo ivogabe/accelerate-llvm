@@ -57,6 +57,7 @@ import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.GetElementPtr
+import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
@@ -307,7 +308,7 @@ codegen name env cluster args
 
             retval_ $ scalar (scalarType @Word8) 0
             -- Return the size of kernel memory
-            pure $ fst (primSizeAlignment memoryTp) + if useSharded then shardStorageSize else 0
+            pure $ memSize memoryTp shards
     else do
       -- Parallelise over all independent dimensions
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -368,7 +369,7 @@ codegen name env cluster args
             }
           genSequential envs' (drop parallelDepth loops) $ opCodeGens opCodeGen flatOps
 
-        pure shardStorageSize
+        pure $ memSize kernelMemTp shards
   where
     (argTp, extractEnv) = bindHeaderEnv env
 

@@ -77,14 +77,13 @@ shardIndexesTp = ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeWord6
 shardSizesTp :: PrimType (SizedArray Word64)
 shardSizesTp = ArrayPrimType shardAmount primType
 
-shardStorageTp :: PrimType (Struct (SizedArray Word64, SizedArray Word64))
-shardStorageTp = StructPrimType False $ TupRsingle shardIndexesTp `TupRpair` TupRsingle shardSizesTp
-
-shardStorageSize :: Int
-shardStorageSize = fst $ primSizeAlignment shardStorageTp
-
 kernelMemTp :: PrimType (SizedArray Word)
 kernelMemTp = ArrayPrimType 0 primType
+
+memSize :: forall a. PrimType a -> ShardConfig -> Int
+memSize memTp NoShards = fst (primSizeAlignment memTp)
+memSize memTp (WithShards _ _) = fst (primSizeAlignment memoryTp)
+  where memoryTp = StructPrimType False $ TupRsingle shardIndexesTp `TupRpair` TupRsingle shardSizesTp `TupRpair` TupRsingle memTp
 
 type KernelType env
   -- Ptr to the kernel struct
@@ -116,7 +115,6 @@ bindHeaderEnv env =
       return (
           LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
         , LocalReference type' nameFlag
-        -- , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
         , gamma
         )
       )
