@@ -20,6 +20,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
   writeArray, writeArray', writeArrayAt',
   readBuffer,
   writeBuffer,
+  load, store,
 
   tupleAlloca, tuplePtrs, tupleStore, tupleLoad, tupleArrayGep,
 
@@ -252,17 +253,6 @@ store volatility e p v alias = do
   let (p', align) = ptrAsUnalignedVecPtr e p
   _ <- instrMD' (Store volatility p' v align) (bufferMetadata' alias)
   return ()
-
--- Converts a pointer to a BufferEltR type to a pointer to the standard type.
--- In case of a Vec, this may yield an unaligned pointer.
--- We thus also report the alignment of the pointer, if it is unaligned.
--- A Vec is only aligned to the alignment of its elements, whereas LLVM expects
--- a higher alignment.
-ptrAsUnalignedVecPtr :: ScalarType e -> Operand (Ptr (BufferEltR e)) -> (Operand (Ptr e), Maybe Int)
-ptrAsUnalignedVecPtr (SingleScalarType tp) ptr
-  | Refl <- singleTypeBufferEltR tp = (ptr, Nothing)
-ptrAsUnalignedVecPtr (VectorScalarType tp@(VectorType _ t)) ptr =
-  (ptrCast (ScalarPrimType $ VectorScalarType tp) ptr, Just $ singleTypeSize t)
 
 tupleAlloca :: forall e arch. TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR e)))
 tupleAlloca TupRunit = return TupRunit
