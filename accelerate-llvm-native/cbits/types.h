@@ -142,6 +142,8 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
+uint64_t get_cache_line_size();
+
 // locks: an array of locks that can be used by any permutes in the kernel.
 // This array is global, i.e. all kernels use the same array of locks, and is
 // taken from Workers.locks.

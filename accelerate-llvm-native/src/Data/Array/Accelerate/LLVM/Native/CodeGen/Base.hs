@@ -25,33 +25,31 @@ import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import Data.Array.Accelerate.LLVM.Native.Foreign                    ()
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
-import Data.Primitive.Vec
 
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Operand
-
-import Data.String
-import qualified Data.ByteString.Short.Char8                        as S8
+import Control.Monad.IO.Class (liftIO)
 
 shardAmount :: Word64
 shardAmount = 128
 
-cacheWidth :: Word64
-cacheWidth = 64
+cacheWidth :: CodeGen arch Word64
+cacheWidth = liftCodeGen $ liftIO $ fromIntegral <$> getCacheSize
 
 -- Calculates how many values are needed to fill a cache line
 class CalcValuesPerCacheLine t where
-  valuesPerCacheLine :: t a -> Word64
+  valuesPerCacheLine :: t a -> Word64 -> Word64
 
 instance CalcValuesPerCacheLine PrimType where
-  valuesPerCacheLine tp = (cacheWidth + byteSize - 1) `div` byteSize    
+  valuesPerCacheLine tp cacheWidth' = (cacheWidth' + byteSize - 1) `div` byteSize    
     where byteSize = fromIntegral (fst (primSizeAlignment tp))
 
 instance CalcValuesPerCacheLine ScalarType where
   valuesPerCacheLine tp = valuesPerCacheLine $ ScalarPrimType tp
 
+foreign import ccall unsafe "get_cache_line_size" getCacheSize :: IO CULLong
 
 -- The struct passed as argument to a call contains:
 --  * work_function: ptr
@@ -71,8 +69,8 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
 
-shardIndexesTp :: PrimType (SizedArray Word64)
-shardIndexesTp = ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeWord64) primType
+shardIndexesTp :: Word64 -> PrimType (SizedArray Word64)
+shardIndexesTp cacheWidth' = ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeWord64 cacheWidth') primType
 
 shardSizesTp :: PrimType (SizedArray Word64)
 shardSizesTp = ArrayPrimType shardAmount primType
@@ -80,10 +78,10 @@ shardSizesTp = ArrayPrimType shardAmount primType
 kernelMemTp :: PrimType (SizedArray Word)
 kernelMemTp = ArrayPrimType 0 primType
 
-memSize :: forall a. PrimType a -> ShardConfig -> Int
-memSize memTp NoShards = fst (primSizeAlignment memTp)
-memSize memTp (WithShards _ _) = fst (primSizeAlignment memoryTp)
-  where memoryTp = StructPrimType False $ TupRsingle shardIndexesTp `TupRpair` TupRsingle shardSizesTp `TupRpair` TupRsingle memTp
+memSize :: forall a. PrimType a -> ShardConfig -> Word64 -> Int
+memSize memTp NoShards _ = fst (primSizeAlignment memTp)
+memSize memTp (WithShards _ _) cacheWidth' = fst (primSizeAlignment memoryTp)
+  where memoryTp = StructPrimType False $ TupRsingle (shardIndexesTp cacheWidth') `TupRpair` TupRsingle shardSizesTp `TupRpair` TupRsingle memTp
 
 type KernelType env
   -- Ptr to the kernel struct
@@ -137,18 +135,19 @@ bindKernelMemory
   :: forall env. 
      PrimType (Ptr (Struct ((Header, Struct env), SizedArray Word)))
   -> Bool 
+  -> Word64
   -> CodeGen Native (ShardConfig, Operand (Ptr (SizedArray Word)))
-bindKernelMemory argTp useSharded = 
+bindKernelMemory argTp useSharded cacheWidth' = 
   do
     let kernelMemory' = GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
     if useSharded
       then do
         kernelMemory <- instr' kernelMemory'
         kernelMemoryWithShards <- instr' $ PtrCast (PtrPrimType memTp defaultAddrSpace) kernelMemory
-        instr_ $ downcast $ nameShards := GetElementPtr (gepStruct shardIndexesTp kernelMemoryWithShards $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
+        instr_ $ downcast $ nameShards := GetElementPtr (gepStruct (shardIndexesTp cacheWidth') kernelMemoryWithShards $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
         instr_ $ downcast $ nameShardSizes := GetElementPtr (gepStruct shardSizesTp kernelMemoryWithShards $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
         instr_ $ downcast $ nameKernelMemory := GetElementPtr (gepStruct kernelMemTp kernelMemoryWithShards $ TupleIdxRight TupleIdxSelf)
-        return ( WithShards (LocalReference (PrimType $ PtrPrimType shardIndexesTp defaultAddrSpace) nameShards)
+        return ( WithShards (LocalReference (PrimType $ PtrPrimType (shardIndexesTp cacheWidth') defaultAddrSpace) nameShards)
                            (LocalReference (PrimType $ PtrPrimType shardSizesTp defaultAddrSpace) nameShardSizes)
                , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
                )
@@ -157,7 +156,7 @@ bindKernelMemory argTp useSharded =
         return (NoShards, LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory)
   where
     arg = LocalReference (PrimType argTp) "arg"
-    memTp = StructPrimType False $ TupRsingle shardIndexesTp `TupRpair` TupRsingle shardSizesTp `TupRpair` TupRsingle kernelMemTp
+    memTp = StructPrimType False $ TupRsingle (shardIndexesTp cacheWidth') `TupRpair` TupRsingle shardSizesTp `TupRpair` TupRsingle kernelMemTp
 
     nameShards = "workassist.shards"
     nameShardSizes = "workassist.shard_sizes"

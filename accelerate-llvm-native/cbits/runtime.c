@@ -7,6 +7,14 @@
 #include "types.h"
 #include <unistd.h>
 #include <sched.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
+#ifdef _WIN32
+#include <stdlib.h>
+#include <windows.h>
+#endif
+
 
 struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .accelerate_buffer_alloc = accelerate_buffer_alloc,
@@ -272,4 +280,59 @@ struct Workers* accelerate_start_workers(uint64_t thread_count) {
   }
 
   return workers;
+}
+
+uint64_t get_cache_line_size() {
+  #ifdef __linux__
+    // Method 1: sysconf
+    long size = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    if (size > 0) return (uint64_t)size;
+    
+    // Method 2: Read from sysfs
+    FILE *f = fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r");
+    if (f) {
+      int val;
+      if (fscanf(f, "%d", &val) == 1) {
+        fclose(f);
+        return (uint64_t)val;
+      }
+      fclose(f);
+    }
+  #endif
+
+  #ifdef __APPLE__
+    // Method 1: sysctl
+    size_t size = 0;
+    size_t len = sizeof(size);
+    if (sysctlbyname("hw.cachelinesize", &size, &len, NULL, 0) == 0 && size > 0) {
+      return (uint64_t)size;
+    }
+  #endif
+
+  #ifdef _WIN32
+    // Method 1: GetLogicalProcessorInformation
+    size_t line_size = 0;
+    DWORD buffer_size = 0;
+    DWORD i = 0;
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION * buffer = 0;
+
+    GetLogicalProcessorInformation(0, &buffer_size);
+    buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)malloc(buffer_size);
+    GetLogicalProcessorInformation(&buffer[0], &buffer_size);
+
+    for (i = 0; i != buffer_size / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION); ++i) {
+        if (buffer[i].Relationship == RelationCache && buffer[i].Cache.Level == 1) {
+            line_size = buffer[i].Cache.LineSize;
+            if (line_size > 0) {
+              free(buffer);
+              return (uint64_t)line_size;
+            }
+        }
+    }
+
+    free(buffer);
+  #endif
+  
+  // Fallback: conservative default (works for x86-64 and most ARM)
+  return 128;
 }

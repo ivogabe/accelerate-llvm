@@ -57,7 +57,6 @@ import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.GetElementPtr
-import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
@@ -89,6 +88,7 @@ codegen name env cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
   codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "workassist.flag") $ do
+    cacheWidth' <- cacheWidth
     (workassistIndex, flag, gamma) <- extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -109,7 +109,7 @@ codegen name env cluster args
 
       -- Parallelise over first dimension using parallel folds or scans
       case parCodeGens (
-        (if useSharded then parCodeGenSharded else parCodeGen) -- Use sharded if operation has a fold
+        (if useSharded then parCodeGenSharded cacheWidth' else parCodeGen) -- Use sharded if operation has a fold
         (isDescending direction)) 0 $ opCodeGens opCodeGen flatOps of
         Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
         Just (Exists parCodes) -> do
@@ -129,7 +129,7 @@ codegen name env cluster args
             envsDescending = isDescending direction
           }
 
-          (shards, kernelMem') <- bindKernelMemory argTp useSharded
+          (shards, kernelMem') <- bindKernelMemory argTp useSharded cacheWidth'
           -- Kernel memory
           let memoryTp' = parCodeGenMemory parCodes
           let memoryTp = StructPrimType False memoryTp'
@@ -150,7 +150,7 @@ codegen name env cluster args
             parCodeGenInitMemory kernelMem envs'' TupleIdxSelf parCodes
 
             case shards of
-              WithShards shardIndexes shardSizes -> initShards shardIndexes shardSizes workassistIndex (OP_Word64 tileCount)
+              WithShards shardIndexes shardSizes -> initShards shardIndexes shardSizes workassistIndex (OP_Word64 tileCount) cacheWidth'
               NoShards -> return ()
 
             -- Decide whether tileCount is large enough
@@ -299,7 +299,7 @@ codegen name env cluster args
             case shards of
               WithShards shardIndexes shardSizes -> do
                 shardAmount' <- A.min singleType (A.liftWord64 shardAmount) (OP_Word64 tileCount)
-                shardedSelfScheduling shardIndexes shardSizes workassistIndex shardAmount'
+                shardedSelfScheduling cacheWidth' shardIndexes shardSizes workassistIndex shardAmount'
                    (\seq tile shard -> processTile seq tile (Just shard))
               NoShards -> workassistLoop workassistIndex tileCount
                    (\seq tile -> processTile seq tile Nothing)
@@ -308,7 +308,7 @@ codegen name env cluster args
 
             retval_ $ scalar (scalarType @Word8) 0
             -- Return the size of kernel memory
-            pure $ memSize memoryTp shards
+            pure $ memSize memoryTp shards cacheWidth'
     else do
       -- Parallelise over all independent dimensions
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -320,7 +320,7 @@ codegen name env cluster args
       let tileSize = if parallelDepth == rank shr then chunkSize parallelShr else chunkSizeOne parallelShr
       let parSizes = parallelIterSize parallelShr loops
 
-      (shards, _) <- bindKernelMemory argTp True
+      (shards, _) <- bindKernelMemory argTp True cacheWidth'
       let (shardIndexes, shardSizes) =
             case shards of
               WithShards indexes sizes -> (indexes, sizes)
@@ -334,7 +334,7 @@ codegen name env cluster args
         -- We are not using kernel memory, so no need to initialize it.
 
         tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
-        initShards shardIndexes shardSizes workassistIndex tileCount64
+        initShards shardIndexes shardSizes workassistIndex tileCount64 cacheWidth'
 
         OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
         value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
@@ -357,7 +357,7 @@ codegen name env cluster args
               else {- if hasPermute then -} [Loop.LoopInterleave]
               -- else [Loop.LoopVectorize]
 
-        shardedSelfSchedulingChunked ann parallelShr shardIndexes shardSizes workassistIndex shardAmount' tileSize parSizes tileCount $ \idx _ -> do
+        shardedSelfSchedulingChunked ann parallelShr cacheWidth' shardIndexes shardSizes workassistIndex shardAmount' tileSize parSizes tileCount $ \idx _ -> do
           let envs' = envs{
               envsLoopDepth = parallelDepth,
               envsIdx =
@@ -369,7 +369,7 @@ codegen name env cluster args
             }
           genSequential envs' (drop parallelDepth loops) $ opCodeGens opCodeGen flatOps
 
-        pure $ memSize kernelMemTp shards
+        pure $ memSize kernelMemTp shards cacheWidth'
   where
     (argTp, extractEnv) = bindHeaderEnv env
 
@@ -386,8 +386,9 @@ initShards
   -> Operand (Ptr (SizedArray Word64))  -- sizes of the shards
   -> Operand (Ptr Word64) -- Finished shards count
   -> Operands Word64 -- Amount of tiles to be divided over the shards. Must be greater than the number of shards
+  -> Word64
   -> CodeGen Native ()
-initShards shardIndexes shardSizes finishedShards tileCount = do
+initShards shardIndexes shardSizes finishedShards tileCount cacheWidth' = do
   _ <- instr' $ Store NonVolatile finishedShards (integral TypeWord64 0) Nothing
 
   -- Determine the size of every shard
@@ -402,7 +403,7 @@ initShards shardIndexes shardSizes finishedShards tileCount = do
     OP_Word64 shardStart <- A.quot TypeWord64 shardStartNum shardAmount'
 
     -- Multiply the index by the cache width in bytes to ensure every shard is on a separate cache line.
-    OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 $ valuesPerCacheLine scalarTypeWord64)
+    OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 i) (A.liftWord64 $ valuesPerCacheLine scalarTypeWord64 cacheWidth')
     shardIdxArr <- instr' $ GetElementPtr $ GEP shardIndexes (integral TypeWord64 0) $ GEPArray idxCacheWidth GEPEmpty
     _ <- instr' $ Store NonVolatile shardIdxArr shardStart Nothing
     return ()
@@ -494,18 +495,18 @@ parCodeGen descending (FlatOp (NScan dir)
       _ -> internalError "Shape impossible"
 parCodeGen _ _ = Nothing
 
-parCodeGenSharded :: Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (NParLoopCodeGen env idxEnv))
-parCodeGenSharded descending (FlatOp NFold
+parCodeGenSharded :: Word64 -> Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (NParLoopCodeGen env idxEnv))
+parCodeGenSharded cacheWidth' descending (FlatOp NFold
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
     (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenFoldSharded descending fun (Just seed) input inputIdx 
+  = Just $ parCodeGenFoldSharded cacheWidth' descending fun (Just seed) input inputIdx 
     (\envs result -> writeArray' envs output outputIdx result)
-parCodeGenSharded descending (FlatOp NFold1
+parCodeGenSharded cacheWidth' descending (FlatOp NFold1
     (ArgFun fun :>: input :>: output :>: _)
     (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenFoldSharded descending fun Nothing input inputIdx
+  = Just $ parCodeGenFoldSharded cacheWidth' descending fun Nothing input inputIdx
     (\envs result -> writeArray' envs output outputIdx result)
-parCodeGenSharded _ _ = Nothing
+parCodeGenSharded _ _ _ = Nothing
 
 parCodeGenFold
   :: Bool
@@ -549,7 +550,8 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
 -- the variables (sharding). Must be executed with sharded self scheduling.
 parCodeGenFoldSharded
   :: forall env idxEnv sh e.
-     Bool -- Whether the loop is descending
+     Word64 -- Cache width in bytes
+  -> Bool -- Whether the loop is descending
   -> Fun env (e -> e -> e)
   -> Maybe (Exp env e) -- Seed
   -> Arg env (In (sh, Int) e)
@@ -557,12 +559,12 @@ parCodeGenFoldSharded
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen Native ())
   -> Exists (NParLoopCodeGen env idxEnv)
-parCodeGenFoldSharded descending fun Nothing input index codeEnd
+parCodeGenFoldSharded cacheWidth' descending fun Nothing input index codeEnd
   | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
-  = parCodeGenFoldSharded descending fun (Just $ mkConstant tp identity) input index codeEnd
+  = parCodeGenFoldSharded cacheWidth' descending fun (Just $ mkConstant tp identity) input index codeEnd
   where
     ArgArray _ (ArrayR _ tp) _ _ = input
-parCodeGenFoldSharded descending fun seed input index codeEnd 
+parCodeGenFoldSharded cacheWidth' descending fun seed input index codeEnd 
   | isCommutative fun
   , Just s <- seed
   , Just i <- identity
@@ -590,7 +592,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
           shardStart <- A.quot TypeInt shardStartNum shardAmount'
 
           -- Multiply the index by the cache width in bytes to ensure every shard is on a separate cache line.
-          OP_Int idxCacheWidth <- A.mul numType (OP_Int idx) (A.liftInt $ fromIntegral $ valuesPerCacheLine shardType)
+          OP_Int idxCacheWidth <- A.mul numType (OP_Int idx) (A.liftInt $ fromIntegral $ valuesPerCacheLine shardType cacheWidth')
           _ <- tupleStoreArray (TupRsingle scalarTypeInt) Volatile shardArray idxCacheWidth shardIdxIdx shardStart
           _ <- tupleStoreArray (TupRsingle scalarTypeInt) NonVolatile shardArray idxCacheWidth shardStartIdxIdx shardStart
           return ()
@@ -608,7 +610,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
               (A.liftInt 1)
               shardAmount'
               (\(OP_Int idx) -> do
-                OP_Int idxCacheWidth <- A.mul numType (OP_Int idx) (A.liftInt $ fromIntegral $ valuesPerCacheLine shardType)
+                OP_Int idxCacheWidth <- A.mul numType (OP_Int idx) (A.liftInt $ fromIntegral $ valuesPerCacheLine shardType cacheWidth')
                 _ <- tupleStoreArray tp NonVolatile shardArray idxCacheWidth shardValueIdx value
                 return ()
               )
@@ -653,7 +655,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
     case ptrs of
       TupRsingle shardArray -> do
         let shardIdx = fromMaybe (internalError "Missing shard index") $ envsShardIdx envs
-        OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 (valuesPerCacheLine shardType))
+        OP_Word64 idxCacheWidth <- A.mul numType (OP_Word64 shardIdx) (A.liftWord64 (valuesPerCacheLine shardType cacheWidth'))
         
         _ <- Loop.while [] TupRunit
           (\_ -> do
@@ -712,7 +714,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
         loopAmount <- A.min singleType (OP_Int tileCount) (A.liftInt $ fromIntegral shardAmount)
 
         let loop idx accum = do 
-              OP_Int shardIdxCacheWidth <- A.mul numType idx (A.liftInt $ fromIntegral (valuesPerCacheLine shardType))
+              OP_Int shardIdxCacheWidth <- A.mul numType idx (A.liftInt $ fromIntegral (valuesPerCacheLine shardType cacheWidth'))
               x <- tupleLoadArray tp NonVolatile shardArray shardIdxCacheWidth shardValueIdx
               if envsDescending envs then
                 app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
@@ -747,7 +749,7 @@ parCodeGenFoldSharded descending fun seed input index codeEnd
     -- The array size is multiplied by the cache width so that each shard 
     -- is on a seperate cache line to avoid false sharing
     shardArray :: PrimType (SizedArray (Struct ((e, Int), Int)))
-    shardArray = ArrayPrimType (shardAmount * valuesPerCacheLine shardType) shardType
+    shardArray = ArrayPrimType (shardAmount * valuesPerCacheLine shardType cacheWidth') shardType
     -- Indexes for accessing the fields from the struct stored in the array
     shardValueIdx :: TupleIdx ((e, Int), Int) e
     shardValueIdx = tupleLeft $ tupleLeft TupleIdxSelf
