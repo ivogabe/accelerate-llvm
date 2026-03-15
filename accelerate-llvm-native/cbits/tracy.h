@@ -31,13 +31,13 @@ void ___tracy_emit_message_appinfo( const char* txt, size_t size );
 #define _CONCAT(a, b) a##b
 #define CONCAT(a, b) _CONCAT(a, b)
 
-// TODO: maybe make srcloc static, so we dont need to allocate it every time?
 #define TRACY_ZONE_BEGIN(ctx, name, color)  \
-  static uint64_t CONCAT(srcloc, __LINE__) = 0; \
-  CONCAT(srcloc, __LINE__) = ___tracy_alloc_srcloc(__LINE__, \
-                                                   __FILE__, sizeof(__FILE__) - 1, \
-                                                   name, strlen(name), \
-                                                   color); \
+  uint64_t CONCAT(srcloc, __LINE__) = ___tracy_alloc_srcloc( \
+    __LINE__, \
+    __FILE__, sizeof(__FILE__) - 1, \
+    name, strlen(name), \
+    color \
+  ); \
   TracyCZoneCtx ctx = ___tracy_emit_zone_begin_alloc(CONCAT(srcloc, __LINE__), 1)
 
 #define TRACY_ZONE_END(ctx) ___tracy_emit_zone_end(ctx)
