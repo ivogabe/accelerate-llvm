@@ -299,11 +299,11 @@ tupleArrayGep
   -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR e)))
 tupleArrayGep TupRunit _ _ = return TupRunit
 tupleArrayGep (TupRpair t1 t2) (TupRpair p1 p2) idx = TupRpair <$> tupleArrayGep t1 p1 idx <*> tupleArrayGep t2 p2 idx
-tupleArrayGep (TupRsingle tp) (TupRsingle ptr) idx
+tupleArrayGep (TupRsingle tp) (TupRsingle ptr) (OP_Int32 idx)
   | tp' <- bufferEltR tp
   , Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr tp'
   , Refl <- reprIsSingle @PrimType @(BufferEltR e) @SizedArray tp' = do
-    ptr' <- instr' $ GetElementPtr $ GEP ptr (A.num numType 0 :: Operand Int32) $ GEPArray ptr GEPEmpty
+    ptr' <- instr' $ GetElementPtr $ GEP ptr (A.num numType 0 :: Operand Int32) $ GEPArray idx GEPEmpty
     return $ TupRsingle ptr'
 tupleArrayGep _ _ _ = internalError "Tuple mismatch"
 

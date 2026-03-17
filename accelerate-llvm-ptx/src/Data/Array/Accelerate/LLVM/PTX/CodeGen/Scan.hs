@@ -1238,43 +1238,69 @@ scanBlock dir dev tp combine nelem = warpScan >=> warpPrefix
 -}
 
 scanWarp
-    :: forall aenv e.
+    :: forall e.
        Direction
     -> ScanInclusiveness
     -> DeviceProperties                        -- ^ properties of the target device
     -> TypeR e
-    -> Maybe (IRExp PTX e)
+    -> Maybe (IRExp PTX e)                     -- ^ Seed value
+    -> Maybe (IRExp PTX e)                     -- ^ Identity value
     -> IRFun2 PTX (e -> e -> e)                -- ^ combination function
     -> Maybe (Operands Int32)                  -- ^ number of items that will be reduced by this warp, otherwise all lanes are valid
     -> Operands e                              -- ^ calling thread's input element
     -> CodeGen PTX (Operands e, Operands e)    -- ^ the scanned values and the reduced value. The latter is the same on all lanes of the warp.
--- In an inclusive scan without an identity value the first value is undefined.
--- Furthermore, the entire function is undefined for an inclusive scan without
--- identity if 'size' is zero.
-scanWarp dir inclusiveness dev tp (Just identity) combine (Just size) = \value -> do
+-- In an inclusive scan without an identity or seed value the first value is undefined.
+scanWarp dir inclusiveness dev tp seed (Just identity) combine (Just size) = \value -> do
   -- If not all lanes are active, and we know an identity value,
   -- then make all lanes active and use the identity value in the previously inactive lanes.
   lane  <- laneId
   valid <- A.lt singleType lane size
   identity' <- identity
   value' <- select tp valid value identity'
-  scanWarp dir inclusiveness dev tp (Just identity) combine Nothing value
-scanWarp dir ScanExclusive dev tp identity combine size = \value -> do
-  (inclusive, reduced) <- scanWarp dir ScanInclusive dev tp identity combine size value
+  scanWarp dir inclusiveness dev tp seed (Just identity) combine Nothing value'
+scanWarp dir ScanExclusive dev tp seed identity combine size = \value -> do
+  lane <- laneId
+  isFirst <- A.eq singleType lane (liftInt32 0)
+  (value', seed') <- case seed of
+    Nothing -> return (value, Nothing)
+    Just s -> do
+      OP_Pair value' seed' <- A.ifThenElse (TupRpair tp tp, return isFirst)
+        ( do
+          seed' <- s
+          value' <- case dir of
+            LeftToRight -> app2 combine seed' value
+            RightToLeft -> app2 combine value seed'
+          return $ OP_Pair value' seed'
+        )
+        ( return $ OP_Pair value $ undefs tp
+        )
+      return (value', Just $ return seed')
+  (inclusive, reduced) <- scanWarp dir ScanInclusive dev tp Nothing identity combine size value'
   exclusive <- __shfl_up tp inclusive (liftWord32 1)
-  case identity of
+  case seed' <|> identity of
     Nothing ->
-      -- If there is no identity, then the first value is undefined.
+      -- If there is no identity or seed, then the first value is undefined.
       -- Hence we don't need to 'fix' anything there.
       return (exclusive, reduced)
-    Just identity' -> do
-      identity'' <- identity'
-      lane <- laneId
-      -- Change value of lane zero to identity
-      isFirst <- A.eq singleType lane (liftInt32 0)
-      result <- select tp isFirst identity'' exclusive
+    Just seed'' -> do -- seed or identity
+      seed''' <- seed''
+      -- Change value of lane zero to the seed or identity
+      result <- select tp isFirst seed''' exclusive
       return (result, reduced)
-scanWarp dir ScanInclusive dev tp identity combine size = scan 0
+scanWarp dir ScanInclusive dev tp (Just seed) identity combine size = \value -> do
+  lane <- laneId
+  value' <- A.ifThenElse (tp, A.eq singleType lane (liftInt32 0))
+    ( do
+      seed' <- seed
+      value' <- case dir of
+        LeftToRight -> app2 combine seed' value
+        RightToLeft -> app2 combine value seed'
+      return value'
+    )
+    ( return value
+    )
+  scanWarp dir ScanInclusive dev tp Nothing identity combine size value'
+scanWarp dir ScanInclusive dev tp Nothing _ combine size = scan 0
   where
     log2 :: Double -> Double
     log2 = P.logBase 2
@@ -1331,7 +1357,7 @@ scanFromSMem
     :: forall e.
        DeviceProperties
     -> TypeR e
-    -> Maybe (IRExp PTX e)
+    -> Maybe (IRExp PTX e) -- Identity
     -> IRFun2 PTX (e -> e -> e)
     -> Int
     -> Operand Int32 -- Number of warps = number of used entries in shared memory
@@ -1343,7 +1369,7 @@ scanFromSMem dev tp identity fun maxSize size smem
     lane <- laneId
     ptr <- tupleArrayGep tp smem lane
     value <- tupleLoad tp ptr
-    (scanned, reduced) <- scanWarp LeftToRight ScanExclusive dev tp identity fun (Just $ OP_Int32 size) value
+    (scanned, reduced) <- scanWarp LeftToRight ScanExclusive dev tp Nothing identity fun (Just $ OP_Int32 size) value
     tupleStore tp ptr scanned
     return reduced
 
@@ -1351,13 +1377,3 @@ scanFromSMem dev tp identity fun maxSize size smem
 -- tupUndef TupRunit       = OP_Unit
 -- tupUndef (TupRpair a b) = OP_Pair (tupUndef a) (tupUndef b)
 -- tupUndef (TupRsingle t) = ir t (undef t)
-
--- Utilities
--- ---------
-
-i32 :: Operands Int -> CodeGen PTX (Operands Int32)
-i32 = A.fromIntegral integralType numType
-
-int :: Operands Int32 -> CodeGen PTX (Operands Int)
-int = A.fromIntegral integralType numType
-

@@ -62,6 +62,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
+
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function                                   as LLVM
 import LLVM.AST.Type.Global
@@ -108,8 +109,13 @@ data Envs env idxEnv = Envs
   -- See IRBufferScopeTile
   , envsTileStorageIndex :: Operands Int
   -- Whether the iteration at the current loop depth is the first iteration of
-  -- the loop. If this is in a tile loop, this says if this is the first
+  -- the loop "in the current scope". The latter means the following,
+  -- depending on the backend:
+  -- If this is in a tile loop, this says if this is the first
   -- iteration of that tile loop.
+  -- If the backend is a GPU or uses a similar thread hierarchy, this says
+  -- whether this is the first value for the current thread (as a tile may be
+  -- handled by all threads in a warp or threadgroup).
   , envsIsFirst :: Operands Bool
   -- Whether the loop at the current loop depth is descending
   -- (iterating from high indices to low indices)
@@ -117,10 +123,13 @@ data Envs env idxEnv = Envs
 
   -- Some additional properties for GPU code generation. Should only be used by GPU backends;
   -- they get dummy values for CPU code generation.
-  , envsGpuFullWarp :: Bool -- Whether the current warp is guaranteed to be full
-  , envsGpuWarpActiveThreads :: Operand Int32 -- The number of threads active in this warp.
+  -- The number of active threads in this warp.
+  -- When Nothing, all threads are active.
+  -- When Just, the operand gives the number N of threads in the warp that are
+  -- active. The first N threads are active, and the threads with higher lane
+  -- indices are inactive.
+  , envsGpuWarpActiveThreads :: Maybe (Operand Int32) -- The number of threads active in this warp.
   , envsGpuActiveWarps :: Operand Int32 -- The number of warps active in this thread group
-  , envsGpuFirstForThread :: Operand Bool -- Whether this is the first value for this thread
   }
 
 initEnv
@@ -155,10 +164,8 @@ initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
       , envsIsFirst = OP_Bool $ boolean True
       , envsDescending = False
 
-      , envsGpuFullWarp = False
-      , envsGpuWarpActiveThreads = scalar scalarType 0
+      , envsGpuWarpActiveThreads = Nothing
       , envsGpuActiveWarps = scalar scalarType 0
-      , envsGpuFirstForThread = boolean False
       }
     , reverse $ loops shr idxVars iterSize iterDir
     )
@@ -191,7 +198,7 @@ bindLocalsInTile
   :: forall target env idxEnv.
      (forall t. Idx env (Buffer t) -> Bool)
   -> LoopDepth -> Int -> Envs env idxEnv -> CodeGen target (Envs env idxEnv)
-bindLocalsInTile needsTileArray depth tileSize = \envs -> foldlM go envs $ envsLocal envs
+bindLocalsInTile needsTileArray depth storageSize = \envs -> foldlM go envs $ envsLocal envs
   where
     go :: Envs env idxEnv -> EnvBinding LocalBufferR env -> CodeGen target (Envs env idxEnv)
     go envs (EnvBinding idx (LocalBufferR tp depth'))
@@ -200,7 +207,7 @@ bindLocalsInTile needsTileArray depth tileSize = \envs -> foldlM go envs $ envsL
       | not (needsTileArray idx) = return envs
       | otherwise = do
         -- Introduce a new mutable variable on the stack
-        ptr <- hoistAlloca $ ArrayPrimType (fromIntegral tileSize) (bufferEltR tp)
+        ptr <- hoistAlloca $ ArrayPrimType (fromIntegral storageSize) (bufferEltR tp)
         ptr' <- instr' $ PtrCast (PtrPrimType (bufferEltR tp) defaultAddrSpace) ptr
         let value = IRBuffer ptr' defaultAddrSpace NonVolatile IRBufferScopeTile Nothing
         return envs{ envsGround = partialUpdate (GroundOperandBuffer value) idx $ envsGround envs }

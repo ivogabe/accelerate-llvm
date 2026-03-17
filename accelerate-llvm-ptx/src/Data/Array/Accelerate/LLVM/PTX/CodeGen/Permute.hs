@@ -265,7 +265,7 @@ atomically
   -> CodeGen PTX ()
   -> CodeGen PTX ()
 atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
-  | irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
+  | (IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
   = do
     dev <- liftCodeGen $ asks ptxDeviceProperties
     if computeCapability dev >= Compute 7 0

@@ -38,5 +38,5 @@ instance Persistent PTX where
          </> "llvmpr-" ++ intercalate "." (map show (toList hostLLVMVersion))
          </> S8.unpack ptxTargetTriple
          </> printf "sm%d%d" m n
-         </> "morp.sass"
+         </> ".sass"
 
