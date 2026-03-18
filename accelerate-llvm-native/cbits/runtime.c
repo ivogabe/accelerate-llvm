@@ -24,41 +24,6 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .hs_try_putmvar = hs_try_putmvar
 };
 
-typedef enum {
-  COLOR_DARK,
-  COLOR_NORMAL,
-  COLOR_LIGHT,
-} ColorVariant;
-
-uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
-
-uint32_t get_color_variant(uint32_t color, ColorVariant variant) {
-  uint32_t r = (color >> 16) & 0xFF;
-  uint32_t g = (color >> 8)  & 0xFF;
-  uint32_t b = color         & 0xFF;
-
-  switch (variant) {
-    case COLOR_DARK:
-      r = (r * 2) / 5;
-      g = (g * 2) / 5;
-      b = (b * 2) / 5;
-      break;
-
-    case COLOR_NORMAL:
-      break;
-
-    case COLOR_LIGHT:
-      r = min((r * 7) / 5, 0xFF);
-      g = min((g * 7) / 5, 0xFF);
-      b = min((b * 7) / 5, 0xFF);
-      break;
-  }
-
-  return ((r & 0xFF) << 16) |
-         ((g & 0xFF) << 8)  |
-         ((b & 0xFF));
-}
-
 static void accelerate_parker_maybe_park(struct ThreadParker *parker) {
   pthread_mutex_lock(&parker->lock);
   atomic_store_explicit(&parker->any_sleeping, 1, memory_order_release);
@@ -123,18 +88,14 @@ void* accelerate_worker(void *data_packed) {
       if (attempts_remaining == 0) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
-
-      TRACY_ZONE_BEGIN(run_ctx, "Program run()", 0x00FFFF);
       struct KernelLaunch* kernel = task.program->run(&accelerate_runtime_lib, workers, thread_idx, task.program, task.location);
-      TRACY_ZONE_END(run_ctx);
-
       if (kernel == NULL) {
         accelerate_program_release(task.program);
         task.program = NULL;
         task.location = 0;
       } else {
         // Initialize kernel memory and check if the kernel should be executed in parallel.
-        TRACY_ZONE_BEGIN(init_ctx, kernel->name, get_color_variant(kernel->base_color, COLOR_LIGHT));
+        TRACY_ZONE_BEGIN(init_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
         unsigned char parallel =
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFF);
         TRACY_ZONE_END(init_ctx);
@@ -145,7 +106,7 @@ void* accelerate_worker(void *data_packed) {
           accelerate_parker_wake_all(&workers->scheduler.parker);
         }
 
-        TRACY_ZONE_BEGIN(work_ctx, kernel->name, get_color_variant(kernel->base_color, COLOR_NORMAL));
+        TRACY_ZONE_BEGIN(work_ctx, kernel->tracy_srcloc, COLOR_NORMAL);
         kernel->work_function(kernel, workers->locks, 0);
         TRACY_ZONE_END(work_ctx);
 
@@ -198,7 +159,7 @@ void* accelerate_worker(void *data_packed) {
         if (is_last) {
           // The last thread executes the finish function.
           // First, execute the finish procedure of the kernel:
-          TRACY_ZONE_BEGIN(final_ctx, kernel->name, get_color_variant(kernel->base_color, COLOR_LIGHT));
+          TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE);
           TRACY_ZONE_END(final_ctx);
           // Then continue the program after this kernel, via
@@ -237,7 +198,7 @@ void* accelerate_worker(void *data_packed) {
       }
       uint32_t i = atomic_fetch_add_explicit(&kernel->work_index, 1, memory_order_relaxed);
 
-      TRACY_ZONE_BEGIN(steal_ctx, kernel->name, get_color_variant(kernel->base_color, COLOR_DARK));
+      TRACY_ZONE_BEGIN(steal_ctx, kernel->tracy_srcloc, COLOR_DARK);
       kernel->work_function(kernel, workers->locks, i);
       TRACY_ZONE_END(steal_ctx);
 
@@ -269,7 +230,7 @@ void* accelerate_worker(void *data_packed) {
       if (is_last) {
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
-        TRACY_ZONE_BEGIN(final_ctx, kernel->name, get_color_variant(kernel->base_color, COLOR_DARK));
+        TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_DARK);
         kernel->work_function(kernel, workers->locks, 0xFFFFFFFE);
         TRACY_ZONE_END(final_ctx);
         // Then continue the program after this kernel, via

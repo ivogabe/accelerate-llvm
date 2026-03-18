@@ -32,6 +32,7 @@ import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Array.Buffer
+import qualified Data.Array.Accelerate.Debug.Internal as Debug
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Analysis.Match ((:~:)(..))
 import Data.Array.Accelerate.LLVM.CodeGen.Base
@@ -75,6 +76,7 @@ import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.ByteString.Short ( fromShort )
 import Numeric ( readHex )
+import Control.Monad.IO.Class (liftIO)
 
 data NativeProgram = NativeProgram
   !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Word16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
@@ -842,12 +844,14 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
 convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
   | Exists2 next1 <- convert inAwhile next
   , (kFunPtr, kMemorySize) <- kernelFun kernel
+  -- TODO: dont use unsafePerformIO, maybe liftIO?
+  , srcPtrLifetime <- unsafePerformIO $ newLifetime ()
   , (argsTp, argsTp') <- kernelArgsTp kargs kMemorySize =
   Exists2 $ Phase1{
     blockCount = blockCount next1 + 1,
     importsType = TupRsingle kernelTp `TupRpair` importsType next1,
     importsInit = TupRsingle (unsafeGetFunPtr kernel) `TupRpair` importsInit next1,
-    importedLifetimes = kFunPtr : importedLifetimes next1,
+    importedLifetimes = Exists srcPtrLifetime : kFunPtr : importedLifetimes next1,
     stateType = TupRsingle argsTp `TupRpair` stateType next1,
     varsFree = varsFree next1 `IdxSet.union` effectFreeVars effect,
     -- Place all free variables of the kernel in the struct.
@@ -865,25 +869,34 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       let strPtr = ConstantOperand $ derefGlobalString l nm
       let color = colorFromHash (kernelHash kernel)
 
+      tracySrcloc <- liftIO $
+          if Debug.tracyIsEnabled
+            then do
+              allocated <- tracySrclocAlloc
+              addFinalizer srcPtrLifetime (tracySrclocFree allocated)
+              return allocated
+            else return 0
+
+      when Debug.tracyIsEnabled $
+        tracySrclocFill (integral TypeWord64 tracySrcloc) strPtr (integral TypeWord32 (fromIntegral color))
+
       -- Fill arguments struct
       -- Header
       workFnPtr' <- instr' $ GetElementPtr $ gepStruct kernelTp imports (tupleLeft importsIdx)
       workFn <- instr' $ Load NonVolatile workFnPtr' Nothing
-      workFnPtr <- instr' $ GetElementPtr $ gepStruct kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
+      workFnPtr <- instr' $ GetElementPtr $ gepStruct kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
       _ <- instr' $ Store NonVolatile workFnPtr workFn Nothing
-      programPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      programPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile programPtr operandProgram Nothing
       location <- computeLocation inAwhile $ fromIntegral nextBlock
-      locationPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      locationPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile locationPtr location Nothing
-      threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) Nothing -- active_threads
-      workIdxPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      workIdxPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 1) Nothing -- work_index
-      namePtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile namePtr strPtr Nothing
-      baseColorPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile baseColorPtr (integral TypeWord32 (fromIntegral color)) Nothing
+      tracySrclocPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      _ <- instr' $ Store NonVolatile tracySrclocPtr (integral TypeWord64 tracySrcloc) Nothing
 
       -- Arguments
       args' <- instr' $ GetElementPtr $ gepStruct argsTp' args $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
@@ -900,6 +913,14 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       phase2Sub next1 imports fullState structVars PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + 1)
   }
   where
+    tracySrclocFill :: IsPrim a => Operand Word64 -> Operand (Ptr Word8) -> Operand a -> CodeGen Native ()
+    tracySrclocFill ptr strPtr val = void $ call (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.Body VoidType Nothing (Label "accelerate_tracy_srcloc_fill"))
+           (LLVM.ArgumentsCons ptr []
+             $ LLVM.ArgumentsCons strPtr []
+             $ LLVM.ArgumentsCons val []
+               LLVM.ArgumentsNil)
+           []
+
     colorFromHash :: String -> Int
     colorFromHash hash = case readHex (take 6 hash) of
         [(n, "")] -> n
@@ -1301,6 +1322,9 @@ convert inAwhile (Alet lhs (Compute expr) next)
       (structVars', localVars') <- bPhase2 bnd structVars localVars fullState (tupleLeft stateIdx) value
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }
+
+foreign import ccall unsafe "accelerate_tracy_srcloc_alloc" tracySrclocAlloc :: IO Word64
+foreign import ccall unsafe "accelerate_tracy_srcloc_free" tracySrclocFree :: Word64 -> IO ()
 
 -- Variant of 'phase' that performs the sub-environment rule (subEnv),
 -- to release variables that are no longer used.

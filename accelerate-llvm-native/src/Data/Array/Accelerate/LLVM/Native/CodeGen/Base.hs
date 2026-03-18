@@ -39,17 +39,15 @@ import qualified Data.ByteString.Short.Char8                        as S8
 --  * continuation: ptr, u32 (program, location)
 --  * active_threads: u32,
 --  * work_index: u64,
---  * name: ptr,
---  * base_color: u32,
+--  * tracy_srcloc: u64,
 --  * In the future, perhaps also store a work_size: u32
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = (((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), Word64), Ptr Word8), Word32)
+type Header = ((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), Word64), Word64)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
-  `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
@@ -78,7 +76,7 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameIndex := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameIndex := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ "env" := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ nameKernelMemory := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
