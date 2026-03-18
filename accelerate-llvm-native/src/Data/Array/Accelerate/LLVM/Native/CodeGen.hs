@@ -180,7 +180,7 @@ codegen name env cluster args
             -- here.
             bindLocals 0 envs' >>=
             bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize
-          workassistLoop workassistIndex workassistFirstIndex tileCount $ \seqMode tileIdx' -> do
+          workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
             (_, lower, upper, _) <- tileRange (isDescending direction) (op TypeInt size) (integral TypeInt tileSize) tileCount' tileIdx
 
