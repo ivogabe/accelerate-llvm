@@ -1880,7 +1880,7 @@ awhileBindOutput getStruct = go TupleIdxSelf
     go _ _ _ _ = internalError "Tuple mismatch"
 
 putArrayDescriptors :: StructVars env -> LocalVars env -> ArrayDescriptors env t -> CodeGen Native ()
-putArrayDescriptors structVars localVars t = foldMapMTupR (\a -> putArrayDescriptor structVars localVars a) t
+putArrayDescriptors structVars localVars = foldMapMTupR (putArrayDescriptor structVars localVars)
 
 -- This function assums that the buffer size is of a scalar type and not a vector type
 putArrayDescriptor :: forall env t. StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
