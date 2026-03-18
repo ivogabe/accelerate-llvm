@@ -38,7 +38,7 @@ shardAmount = 128
 cacheWidth :: CodeGen arch Word64
 cacheWidth = liftCodeGen $ liftIO $ fromIntegral <$> getCacheSize
 
--- Calculates how many values are needed to fill a cache line
+-- Calculates how many values are needed to fill a cache line, given the type and the cache line width.
 class CalcValuesPerCacheLine t where
   valuesPerCacheLine :: t a -> Word64 -> Word64
 
@@ -49,6 +49,7 @@ instance CalcValuesPerCacheLine PrimType where
 instance CalcValuesPerCacheLine ScalarType where
   valuesPerCacheLine tp = valuesPerCacheLine $ ScalarPrimType tp
 
+-- Call the C function in runtime.c
 foreign import ccall unsafe "get_cache_line_size" getCacheSize :: IO CULLong
 
 -- The struct passed as argument to a call contains:
@@ -69,15 +70,24 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
 
+-- Type of the array of shard indexes, that keep track of the next tile to process for each shard. 
+-- Depends on the cache width, as each shard needs to be on a separate cache line to avoid false sharing.
 shardIndexesTp :: Word64 -> PrimType (SizedArray Word64)
 shardIndexesTp cacheWidth' = ArrayPrimType (shardAmount * valuesPerCacheLine scalarTypeWord64 cacheWidth') primType
 
+-- Type of the array of shard sizes, that keep track of the last tile for each shard.
+-- Does not depend on the cache width, as it is only read, so false sharing is not an issue.
 shardSizesTp :: PrimType (SizedArray Word64)
 shardSizesTp = ArrayPrimType shardAmount primType
 
+-- Type of the kernel memory, that is used to store the shard indexes and sizes if sharding is used, 
+-- and any other data needed by the kernel. Size may be larger than 0.
 kernelMemTp :: PrimType (SizedArray Word)
 kernelMemTp = ArrayPrimType 0 primType
 
+-- Calculates the size of kernel memory needed for a given type of memory and sharding configuration. 
+-- If sharding is not used, this is just the size of the memory type. 
+-- If sharding is used, this is the size of the memory type plus the size of the shard indexes and sizes.
 memSize :: forall a. PrimType a -> ShardConfig -> Word64 -> Int
 memSize memTp NoShards _ = fst (primSizeAlignment memTp)
 memSize memTp (WithShards _ _) cacheWidth' = fst (primSizeAlignment memoryTp)
@@ -93,12 +103,12 @@ type KernelType env
   -- Only in initialization, this function returns whether the kernel should run sequentially or in parallel
   -> Word8
 
+-- Binds the header and environment from the kernel argument struct, and returns the work index, flag, and environment gamma.
+-- Does not bind the kernel memory, as that may depend on the sharding configuration. That is done separately in bindKernelMemory.
 bindHeaderEnv
   :: forall env. Env AccessGroundR env
   -> ( PrimType (Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)))
      , CodeGen Native (
-    --  , Operand (Ptr (SizedArray Word64))  -- work indexes of shards
-    --  , Operand (Ptr (SizedArray Word64))  -- sizes of the shards
        Operand (Ptr Word64)               -- In the case of workassist, the workassist index.
        -- In the case of sharded self scheduling, combined the next shard and amount of finished shards.
      , Operand Word64 -- Flag that specifies if the work needs to be initialized or finished
@@ -131,6 +141,8 @@ bindHeaderEnv env =
 data ShardConfig = WithShards (Operand (Ptr (SizedArray Word64))) (Operand (Ptr (SizedArray Word64)))
                  | NoShards
 
+-- Binds the kernel memory from the kernel argument struct, and returns the pointer to the kernel memory, 
+-- and if sharding is used, the pointers to the shard indexes and sizes.
 bindKernelMemory 
   :: forall env. 
      PrimType (Ptr (Struct ((Header, Struct env), SizedArray Word)))

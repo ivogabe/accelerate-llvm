@@ -186,11 +186,11 @@ iterFromTo tp start end seed body =
 -- Can only be used for independent operations, as tiles are not guaranteed to be executed in order.
 -- Shards must be initialised before calling this function.
 shardedSelfScheduling
-    :: Word64
+    :: Word64                               -- Cache width in bytes
     -> Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- combined: high 32 bits = next shard index, low 32 bits = finished shard count
-    -> Operands Word64                       -- amount of shards
+    -> Operands Word64                      -- amount of shards
     -> (Operand Bool -> Operand Word64 -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
 shardedSelfScheduling cacheWidth' shardIndexes shardSizes nextShardFinishedShards shardAmount' doWork = do
@@ -285,7 +285,7 @@ shardedSelfScheduling cacheWidth' shardIndexes shardSizes nextShardFinishedShard
 shardedSelfSchedulingChunked 
     :: [Loop.LoopAnnotation] 
     -> ShapeR sh 
-    -> Word64
+    -> Word64                               -- Cache width in bytes
     -> Operand (Ptr (SizedArray Word64))    -- work indexes of shards
     -> Operand (Ptr (SizedArray Word64))    -- sizes of shards
     -> Operand (Ptr Word64)                 -- combined: high 32 bits = next shard index, low 32 bits = finished shard count

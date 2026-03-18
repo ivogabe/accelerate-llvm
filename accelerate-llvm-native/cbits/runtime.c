@@ -282,6 +282,7 @@ struct Workers* accelerate_start_workers(uint64_t thread_count) {
   return workers;
 }
 
+// Get the cache line size of the current machine, in bytes.
 uint64_t get_cache_line_size() {
   #ifdef __linux__
     // Method 1: sysconf
@@ -333,6 +334,6 @@ uint64_t get_cache_line_size() {
     free(buffer);
   #endif
   
-  // Fallback: conservative default (works for x86-64 and most ARM)
+  // Fallback, fine for most CPUs
   return 128;
 }

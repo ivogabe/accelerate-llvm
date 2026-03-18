@@ -88,6 +88,7 @@ codegen name env cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
   codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "workassist.flag") $ do
+    -- Get the cache width, which is needed for sharded self scheduling.
     cacheWidth' <- cacheWidth
     (workassistIndex, flag, gamma) <- extractEnv
 
@@ -129,6 +130,7 @@ codegen name env cluster args
             envsDescending = isDescending direction
           }
 
+          -- Bind the kernel memory, and get the sharding configuration if sharding is used.
           (shards, kernelMem') <- bindKernelMemory argTp useSharded cacheWidth'
           -- Kernel memory
           let memoryTp' = parCodeGenMemory parCodes
@@ -320,6 +322,7 @@ codegen name env cluster args
       let tileSize = if parallelDepth == rank shr then chunkSize parallelShr else chunkSizeOne parallelShr
       let parSizes = parallelIterSize parallelShr loops
 
+      -- We always use sharded self scheduling for independent parallel operations
       (shards, _) <- bindKernelMemory argTp True cacheWidth'
       let (shardIndexes, shardSizes) =
             case shards of
@@ -331,7 +334,7 @@ codegen name env cluster args
         tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
         tileCount' <- shapeSize parallelShr tileCount
 
-        -- We are not using kernel memory, so no need to initialize it.
+        -- We are not using kernel memory, so only need to initialize the shard indexes and sizes.
 
         tileCount64 <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) tileCount'
         initShards shardIndexes shardSizes workassistIndex tileCount64 cacheWidth'
@@ -369,6 +372,7 @@ codegen name env cluster args
             }
           genSequential envs' (drop parallelDepth loops) $ opCodeGens opCodeGen flatOps
 
+        -- kernelMemTp has size 0, as it is not used here.
         pure $ memSize kernelMemTp shards cacheWidth'
   where
     (argTp, extractEnv) = bindHeaderEnv env
@@ -495,6 +499,9 @@ parCodeGen descending (FlatOp (NScan dir)
       _ -> internalError "Shape impossible"
 parCodeGen _ _ = Nothing
 
+-- Version of parCodeGen for folds that uses sharded self scheduling. 
+-- This version uses multiple indexes and values to reduce contention on the variables. 
+-- Must be executed with sharded self scheduling.
 parCodeGenSharded :: Word64 -> Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (NParLoopCodeGen env idxEnv))
 parCodeGenSharded cacheWidth' descending (FlatOp NFold
     (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
@@ -546,8 +553,9 @@ parCodeGenFold descending fun seed input output inputIdx outputIdx
       | otherwise
       = Nothing
 
--- Version of fold that uses multiple indexes and values to reduce contention on
--- the variables (sharding). Must be executed with sharded self scheduling.
+-- Version of parCodeGenFold that uses sharded self scheduling. 
+-- This version uses multiple indexes and values to reduce contention on the variables. 
+-- Must be executed with sharded self scheduling.
 parCodeGenFoldSharded
   :: forall env idxEnv sh e.
      Word64 -- Cache width in bytes
