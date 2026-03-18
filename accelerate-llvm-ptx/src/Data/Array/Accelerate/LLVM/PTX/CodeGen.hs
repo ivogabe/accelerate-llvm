@@ -1,7 +1,9 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen
@@ -39,6 +41,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
 import Data.Array.Accelerate.LLVM.CodeGen.Default
+import Data.Array.Accelerate.LLVM.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.PTX.Operation
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Fold
@@ -50,6 +53,7 @@ import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Maybe
 
 import LLVM.AST.Type.Module
+import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
@@ -72,7 +76,8 @@ import Data.Array.Accelerate.LLVM.CodeGen.Constant as Const
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
 data PTXCode env = PTXCode
-  { ptxCodeSize :: [Idx env Int] -- The product of these variables is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
+  { ptxCodeElements :: [Idx env Int] -- The product of these variables divided by ptxCodeElementsPerThread is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
+  , ptxCodeElementsPerThread :: Int
   , ptxCodeKernelMemory :: Int  -- The size of the kernel data, shared by all threads working on this kernel.
   , ptxCodeInit :: Maybe (Module (KernelType env))
   , ptxCodeWork :: Module (KernelType env)
@@ -86,31 +91,43 @@ codegen :: forall env args.
         -> Args env args
         -> LLVM PTX (PTXCode env)
 codegen name env cluster args
- | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
- , parallelDepth <- flatClusterIndependentLoopDepth flat
- , Exists parallelShr <- shapeRFromRank parallelDepth
- , Refl <- marshalFunResultUnit env =
-  if parallelDepth == 0 && rank shr /= 0 then do
-    -- Parallelise over the first dimension using parallel folds or scans
-    let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
-    let ((idxVar, direction, size), loops') = case loops of
-          [] -> internalError "Expected at least one loop since rank shr /= 0"
-          (l:ls) -> (l, ls)
+  | Refl <- marshalFunResultUnit env = if
+    | independentLoopDepth == 0 && loopDepth /= 0 ->
+      -- Parallelise over the first dimension using parallel folds or scans
+      codegenDim1 name env flat
+    -- | independentLoopDepth /= loopDepth ->
+      -- Multi-dimensional fold or scan. Optionally parallelise within or between
+      -- threadblocks.
+    -- No folds or scans
+    | otherwise ->
+      codegenIndependent name env flat independentLoopDepth
+  where
+    flat = toFlatClustered cluster args
+    independentLoopDepth = flatClusterIndependentLoopDepth flat
+    loopDepth = flatClusterLoopDepth flat
 
-    case parCodeGens (parCodeGen $ undefined {- isDescending -} direction) 0 $ opCodeGens opCodeGen flatOps of
-      Nothing -> internalError "Could not generate code for a cluster. Does parCodeGen lack a case for a collective parallel operation?"
-      Just (Exists parCodes) -> do
-
-        -- index <- atomicAdd Monotonic undefined (integral TypeWord64 1)
-
-        undefined
-
-  else do
-    -- Parallelise over all independent dimensions
-    let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
-    let parSizes = parallelIterSize parallelShr loops
-
-    kernelWork <- codeGenKernel' "" $ do
+-- Variant of 'codegen' that parallelises over the first 'parallelDepth'
+-- dimensions, which are assumed to be independent (e.g. contain no folds and
+-- scans on those dimensions).
+--
+-- 'parallelDepth <= flatClusterIndependentLoopDepth flat' should hold (but is
+-- not checked in this function)
+--
+codegenIndependent
+  :: forall env args.
+     LLVM.Result (MarshalFun env) ~ ()
+  => String
+  -> Env AccessGroundR env
+  -> FlatCluster PTXOp env
+  -> Int
+  -> LLVM PTX (PTXCode env)
+codegenIndependent name env flatCluster parallelDepth
+  | FlatCluster shr idxLHS sizes dirs localR localLHS flatOps <- flatCluster
+  , Exists parallelShr <- shapeRFromRank parallelDepth
+  , (gamma, makeKernel') <- makeKernel name env = do
+    kernelWork <- makeKernel' "" $ do
+      let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
+      let parSizes = parallelIterSize parallelShr loops
       parSize <- shapeSize parallelShr parSizes
 
       imapFromTo (A.liftInt 0) parSize $ \linearIdx -> do
@@ -129,32 +146,169 @@ codegen name env cluster args
       return_
 
     return $ PTXCode
-      (map sizeVar $ flattenTupR sizes)
+      (take parallelDepth $ map sizeVar $ flattenTupR sizes)
+      1 -- Each thread handles one element
       0 -- We don't need kernel memory here
       Nothing -- No need to initialize kernel memory
       kernelWork
       Nothing -- No need to finalize kernel memory
-  where
-    codeGenKernel'
-      :: LLVM.Result (MarshalFun env) ~ ()
-      => String -> CodeGen PTX () -> LLVM PTX (Module (KernelType env))
-    codeGenKernel' postfix body =
-      snd <$> codeGenKernel (name ++ postfix) (LLVM.Lam kernelDataRawType "kernel_data" . bindArgs) (extractEnv >> body)
 
+codegenDim1
+  :: forall env args.
+     LLVM.Result (MarshalFun env) ~ ()
+  => String
+  -> Env AccessGroundR env
+  -> FlatCluster PTXOp env
+  -> LLVM PTX (PTXCode env)
+codegenDim1 name env flatCluster
+  | FlatCluster shr idxLHS sizes dirs localR localLHS flatOps <- flatCluster
+  -- Prepare environment
+  , (gamma, makeKernel') <- makeKernel name env
+  , (envs, loops) <- initEnv gamma shr idxLHS sizes dirs localR localLHS
+  -- Get a list of loops
+  , ((idxVar, direction, size), loops') <- case loops of
+    [] -> internalError "Expected at least one loop since rank shr /= 0"
+    (l:ls) -> (l, ls)
+  -- Get the code of the individual operations in this kernel
+  , Just (Exists parCodes) <- parCodeGens (parCodeGen $ isDescending direction) 0 $ opCodeGens opCodeGen flatOps
+  , hasScan <- parCodeGenHasMultipleTileLoops parCodes
+  -- TODO: Better heuristic, possibly using hasScan and/or other information on register usage of the operations in this kernel
+  , elementsPerThread <- if rank shr > 1 then 1 else 4
+  , envs1 <- envs{
+      envsLoopDepth = 0,
+      envsDescending = isDescending direction
+    }
+  -- Kernel memory
+  , memoryTp' <- TupRsingle (ScalarPrimType scalarTypeWord64) `TupRpair` parCodeGenMemory parCodes
+  , memoryTp <- StructPrimType False memoryTp'
+  , kernelMem <- LocalReference (PrimType $ PtrPrimType memoryTp defaultAddrSpace) "kernel_data"
+  = do
+    kernelInit <- makeKernel' "_init" $ do
+      perThreadBlock $ do
+        counter <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType scalarTypeWord64) kernelMem $ TupleIdxLeft TupleIdxSelf
+        _ <- instr' $ Store NonVolatile counter (integral TypeWord64 0) Nothing
+        
+        parCodeGenInitMemory kernelMem envs1 (TupleIdxRight TupleIdxSelf) parCodes
+      return_
+
+    kernelFinish <- makeKernel' "_finish" $ do
+      perThreadBlock $ do
+        -- Declare fused-away and dead arrays at level zero.
+        -- This is for instance needed for `map (+1) $ fold ...`,
+        -- or a scanl' or scanr' whose reduced value is not used (like in prescanl).
+        envs2 <- bindLocals 0 envs1
+        -- Execute code for after the parallel work of this kernel, for
+        -- instance to write the result of a fold to the output array.
+        parCodeGenFinish kernelMem envs2 (TupleIdxRight TupleIdxSelf) parCodes
+      return_
+    
+    kernelWork <- makeKernel' "" $ do
+      -- Atomic counter used for self scheduling
+      counter <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType scalarTypeWord64) kernelMem $ TupleIdxLeft TupleIdxSelf
+
+      -- Compute the tile size
+      blockDim' <- blockDim >>= A.fromIntegral TypeInt32 numType
+      OP_Int tileSize <- A.mul numType blockDim' $ A.liftInt elementsPerThread
+
+      -- Compute the number of tiles
+      tileSizeSub <- A.sub numType (OP_Int tileSize) (A.liftInt 1)
+      sizeAdd <- A.add numType size tileSizeSub
+      OP_Int tileCount <- A.quot TypeInt sizeAdd (OP_Int tileSize)
+
+      -- Emit code to initialize a thread, and get the codes for the tile loops
+      tileLoops <- genParallel kernelMem envs1 (TupleIdxRight TupleIdxSelf) parCodes
+
+      -- Declare fused away arrays
+      envs2 <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 (fromIntegral elementsPerThread) envs1
+
+      -- Loop to claim tile
+      OP_Word64 tileCount' <- A.fromIntegral TypeInt numType (OP_Int tileCount)
+      loopSelfScheduled counter tileCount' $ \tileIdx' -> do
+        tileIdx <- instr' $ BitCast scalarType tileIdx'
+        (_, lower, upper, full) <- tileRange (isDescending direction) (op TypeInt size) tileSize tileCount tileIdx
+
+        -- Compute the number of warps that are active
+        OP_Int32 activeWarps <- do
+          size <- A.sub numType (OP_Int upper) (OP_Int lower)
+          -- ceil(size/warpSize) = (size + warpSize - 1) / warpSize
+          a <- A.sub numType size (OP_Int $ integral TypeInt 1) >>= A.fromIntegral TypeInt numType
+          warpSz <- warpSize
+          b <- A.add numType a warpSz
+          count1 <- A.quot TypeInt32 b warpSz
+          -- Since each thread can handle multiple ('elementsPerThread')
+          -- elements, 'count' may be more than the number of warps within a
+          -- threadblock. Now compute the actual number of warps within the
+          -- threadblock. Threadblock size should be a multiple of the warp
+          -- size, so we don't have to worry about rounding here.
+          threadblockSize <- blockDim
+          count2 <- A.quot TypeInt32 threadblockSize warpSz
+          A.min singleType count1 count2
+
+        let envs3 = envs2{
+            envsTileIndex = OP_Int tileIdx,
+            envsGpuActiveWarps = activeWarps
+          }
+
+        -- Handle one tile, with index tileIndex
+        -- For each tile loop
+        forM_ ((True, ptFirstLoop tileLoops) : map (False, ) (ptOtherLoops tileLoops)) $ \(isFirstTileLoop, tileLoop) -> do
+          let loops'' = if isFirstTileLoop then loops' else []
+
+          unless isFirstTileLoop $ __syncthreads
+
+          ptBefore tileLoop envs3
+          let peel = gpuLoopPeel (ptAnalysis tileLoop) && null loops''
+          loopInThreadblock (isDescending direction) peel elementsPerThread lower upper full $ \active isFirst activeInWarp idxForThread localIdx globalIdx -> do
+            let envs4 = envs3{
+                envsLoopDepth = 1,
+                envsIdx = Env.partialUpdate globalIdx idxVar $ envsIdx envs3,
+                envsIsFirst = OP_Bool isFirst,
+                envsTileLocalIndex = OP_Int localIdx,
+                envsTileStorageIndex = OP_Int idxForThread,
+                envsGpuWarpActiveThreads = activeInWarp
+              }
+            genSequential envs4 loops' $ ptIn tileLoop
+          ptAfter tileLoop envs3
+      return_
+
+    return $ PTXCode
+      (take 1 $ map sizeVar $ flattenTupR sizes)
+      elementsPerThread
+      (fst $ primSizeAlignment memoryTp)
+      (Just kernelInit)
+      kernelWork
+      (Just kernelFinish)
+
+  | otherwise
+  = internalError "Could not generate code for a cluster as parCodeGens returned Nothing. Does parCodeGen lack a case for a collective parallel operation?"
+
+sizeVar :: Exists (Var GroundR env) -> Idx env Int
+sizeVar (Exists (Var (GroundRscalar (SingleScalarType (NumSingleType (IntegralNumType TypeInt)))) idx))
+  = idx
+sizeVar _ = internalError "Expected Int variable"
+
+-- Generates code for a PTX module.
+makeKernel
+  :: LLVM.Result (MarshalFun env) ~ ()
+  => String
+  -> Env AccessGroundR env
+  -> (Gamma env, String -> CodeGen PTX () -> LLVM PTX (Module (KernelType env)))
+makeKernel name env =
+  ( gamma
+  , \postfix body ->
+    snd <$> codeGenKernel (name ++ postfix) (LLVM.Lam kernelDataRawType "kernel_data" . bindArgs) (extractEnv >> body)
+  )
+  where
     (bindArgs, extractEnv, gamma) = bindEnvArgs @PTX env
     kernelDataRawType :: PrimType (Ptr (SizedArray Word))
     kernelDataRawType = PtrPrimType (ArrayPrimType 0 primType) defaultAddrSpace
-
-    sizeVar :: Exists (Var GroundR env) -> Idx env Int
-    sizeVar (Exists (Var (GroundRscalar (SingleScalarType (NumSingleType (IntegralNumType TypeInt)))) idx))
-      = idx
-    sizeVar _ = internalError "Expected Int variable"
 
 opCodeGen :: FlatOp PTXOp env idxEnv -> (LoopDepth, OpCodeGen PTX PTXOp env idxEnv)
 opCodeGen flatOp@(FlatOp op args idxArgs) = case op of
   PTXGenerate -> defaultCodeGenGenerate args idxArgs
   PTXMap -> defaultCodeGenMap args idxArgs
   PTXBackpermute -> defaultCodeGenBackpermute args idxArgs
+  -- TODO: Similar to Native, we should use one global array of locks, instead of an array per permute
   PTXPermute
     | combineFun :>: output :>: locks :>: source :>: _ <- args
     , i1 :>: i2 :>: _ :>: i3 :>: _ <- idxArgs ->
@@ -285,7 +439,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     x <- readArray' envs input index
     warpValue <- reduceWarp
       dev tp identity' fun'
-      (if envsGpuFullWarp envs then Nothing else Just $ OP_Int32 $ envsGpuWarpActiveThreads envs)
+      (OP_Int32 <$> envsGpuWarpActiveThreads envs)
       x
     perWarp $ do
       new <-
@@ -296,7 +450,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           else
             app2 fun' accum warpValue
         else
-          A.ifThenElse' (tp, OP_Bool $ envsGpuFirstForThread envs)
+          A.ifThenElse' (tp, envsIsFirst envs)
             ( do
               return x
             )
@@ -318,12 +472,12 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     aggregate <-
       if foldOrScan == IsFold then
         -- Reduce all per-warp values in smem to a single value.
-        reduceFromSMem dev tp identity' fun' (fromIntegral maxWarps) (envsGpuWarpActiveThreads envs) smem
+        reduceFromSMem dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
       else
         -- Perform an exclusive over the per-warp values in smem,
         -- and compute the total aggregate (reduced value).
         -- This is executed on a single warp.
-        scanFromSMem dev tp identity' fun' (fromIntegral maxWarps) (envsGpuWarpActiveThreads envs) smem
+        scanFromSMem dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
 
     -- Share aggregate
     prefix <- perWarp' tp $ do
@@ -343,7 +497,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           
           OP_Pair exclusive inclusive <-
             if isNothing seed then
-              -- If there is no seed, then write the output directly in the first tiles.
+              -- If there is no seed, then write the output directly in the first tile.
               -- The other tiles must combine their result with the given operator.
               A.ifThenElse (TupRpair tp tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
                 (do
@@ -386,7 +540,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
               value <- tupleLoad tp ptr
               new <- if envsDescending envs then app2 fun' value prefix else app2 fun' prefix value
               tupleStore tp ptr new
-      
+
           action' =
             -- If there is no identity, do not do anything with the first (undefined) value
             if isNothing identity then
@@ -419,36 +573,41 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
 
-    -- Combine the first value of this warp with the prefix of this warp.
-    -- When we then scan over the values in this warp, the prefix is part
-    -- of each value in the warp
-    lane <- laneId
-    y <- A.ifThenElse (tp, A.eq singleType lane (A.liftInt32 0))
-      ( if isNothing seed then do
-          -- The first item does not have a prefix
-          isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
-          A.ifThenElse (tp, A.land isFirstTile $ OP_Bool $ envsGpuFirstForThread envs)
-            (return x)
+    (scanned, reduced) <- case seed of
+      Just _ -> do
+        -- If there is a seed, then each block and each warp will have a
+        -- prefix.
+        accum <- tupleLoad tp smemWarp
+        scanWarp dir inclusiveness dev tp (Just $ return accum) identity' fun'
+          (OP_Int32 <$> envsGpuWarpActiveThreads envs) x
+      Nothing
+        | ScanExclusive <- inclusiveness -> internalError "Exclusive scans (scanl, scanl', scanr') should have a seed"
+        | otherwise -> do
+          -- Not all blocks and warps have a prefix: the first block does not
+          -- have one.
+          --
+          -- Combine the first value of this warp with the prefix of this warp.
+          -- When we then scan over the values in this warp, the prefix is part
+          -- of each value in the warp
+          lane <- laneId
+          y <- A.ifThenElse (tp, A.eq singleType lane (A.liftInt32 0))
             ( do
-              accum <- tupleLoad tp smemWarp
-              if envsDescending envs then
-                app2 fun' x accum
-              else
-                app2 fun' accum x
+              -- The first item does not have a prefix
+              isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
+              A.ifThenElse (tp, A.land isFirstTile $ envsIsFirst envs)
+                (return x)
+                ( do
+                  accum <- tupleLoad tp smemWarp
+                  if envsDescending envs then
+                    app2 fun' x accum
+                  else
+                    app2 fun' accum x
+                )
             )
-        else do
-          accum <- tupleLoad tp smemWarp
-          if envsDescending envs then
-            app2 fun' x accum
-          else
-            app2 fun' accum x
-      )
-      (return x)
-    
-    (scanned, reduced) <- scanWarp
-      dir inclusiveness dev tp identity' fun'
-      (if envsGpuFullWarp envs then Nothing else Just $ OP_Int32 $ envsGpuWarpActiveThreads envs)
-      y
+            (return x)
+          
+          scanWarp dir inclusiveness dev tp Nothing identity' fun'
+            (OP_Int32 <$> envsGpuWarpActiveThreads envs) y
 
     codeElement envs scanned
 

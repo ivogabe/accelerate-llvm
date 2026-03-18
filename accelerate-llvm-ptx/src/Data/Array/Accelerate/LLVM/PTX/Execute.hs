@@ -166,21 +166,51 @@ executeEffect env = \case
   Exec _ kernelFun args
     | Exists kernel <- kernelFunKernel kernelFun -> do
       stream <- asks ptxStream
+
+      -- Allocate kernel memory
+      -- TODO: Pre-allocate these like we do in Native, instead of allocating them per kernel launch?
+      (kernelMemoryLifetime, kernelMemoryPtr) <-
+        if kernelMemorySize kernel == 0 then
+          return (Nothing, CUDA.nullDevPtr)
+        else do
+          PTXBuffer _ lifetime <- mallocDevice (scalarTypeWord8) (kernelMemorySize kernel)
+          return (Just lifetime, unsafeGetValue lifetime)
+
       let (lifetimes, intArgs, args') = kernelArgs env args
       let intArgs' = reverse intArgs
       let n = product
             $ fmap (\idx -> fromMaybe (internalError "Expected Int argument for kernel grid size") $ intArgs' Prelude.!! idxToInt idx)
-            $ kernelMaxGridSize kernel
+            $ kernelElements kernel
+      let maxGridSize = (n + kernelElementsPerThread kernel - 1) `div` kernelElementsPerThread kernel
+
+      case kernelInit kernel of
+        Just p -> do
+          liftIO $ launch p stream 1 kernelMemoryPtr args'
+          -- Ensure 'touchLifetime' is called when we next synchronise.
+          cleanUpTouchLifetime $ kernelPhaseLinked p
+        Nothing -> return ()
+
       -- We start a kernel with the grid size being the minimum of the
-      -- iteration size ('n') and the maximum number of threads the GPU can
+      -- iteration size ('maxGridSize') and the maximum number of threads the GPU can
       -- concurrently run for this kernel (computed in 'launchConfig').
       -- To simplify things, we could also always launch the latter number of
       -- threads and ignore the input size (the code in the kernel works with
       -- any grid size).
-      when (n /= 0) $ liftIO $ launch kernel stream n args'
+      when (maxGridSize /= 0) $ liftIO $ launch (kernelMain kernel) stream maxGridSize kernelMemoryPtr args'
+
       -- Ensure 'touchLifetime' is called when we next synchronise.
-      cleanUpTouchLifetime $ kernelLinked kernel
+      cleanUpTouchLifetime $ kernelPhaseLinked $ kernelMain kernel
+
+      case kernelFinish kernel of
+        Just p -> do
+          liftIO $ launch p stream 1 kernelMemoryPtr args'
+          -- Ensure 'touchLifetime' is called when we next synchronise.
+          cleanUpTouchLifetime $ kernelPhaseLinked p
+        Nothing -> return ()
       mapM_ (\(Exists l) -> cleanUpTouchLifetime l) lifetimes
+      case kernelMemoryLifetime of
+        Just l -> cleanUpTouchLifetime l
+        Nothing -> return ()
   SignalAwait signals -> do
     stream <- asks ptxStream
     forM_ signals $ \signal -> case prj' signal env of
@@ -210,14 +240,13 @@ size' (ShapeRsnoc shr) (sh, ValueScalar _ sz)
 -- Execute a device function with the given thread configuration and function
 -- parameters.
 --
-launch :: HasCallStack => PTXKernel f -> Stream -> Int -> [CUDA.FunParam] -> IO ()
-launch kernel stream n args = do
-  let obj = unsafeGetValue $ kernelLinked kernel
+launch :: HasCallStack => PTXKernelPhase f -> Stream -> Int -> CUDA.DevicePtr Word8 -> [CUDA.FunParam] -> IO ()
+launch kernel stream n kernelMemory args = do
+  let obj = unsafeGetValue $ kernelPhaseLinked kernel
   let cta = (kernelObjThreadBlockSize obj, 1, 1)
   let grid = (kernelObjThreadBlocks obj n, 1, 1)
   let smem = kernelObjSharedMemBytes obj
-  let kernelData = CUDA.nullDevPtr :: CUDA.DevicePtr Word8
-  CUDA.launchKernel (kernelObjFun obj) grid cta smem (Just stream) (CUDA.VArg kernelData : reverse args)
+  CUDA.launchKernel (kernelObjFun obj) grid cta smem (Just stream) (CUDA.VArg kernelMemory : reverse args)
 
 kernelArgs :: Gamma env -> SArgs env f -> ([Exists Lifetime], [Maybe Int], [CUDA.FunParam])
 kernelArgs _ ArgsNil = ([], [], [])

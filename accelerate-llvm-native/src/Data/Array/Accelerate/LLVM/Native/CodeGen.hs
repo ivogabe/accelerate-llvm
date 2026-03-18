@@ -47,6 +47,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
 import Data.Array.Accelerate.LLVM.CodeGen.Default
+import Data.Array.Accelerate.LLVM.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -169,23 +170,19 @@ codegen name env cluster args
           -- TODO: We can make this more precise by tracking whether arrays are
           -- only used in one tile loop. These arrays can also be stored as a
           -- single value.
-          envs'' <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize envs'
-          workassistLoop workassistIndex tileCount $ \seqMode tileIdx' -> do
+          envs'' <-
+            -- Binding locals on dimension 0. This is not needed for fused away
+            -- arrays, but we use the same mechanism to handle unused outputs.
+            -- This is particularly important for scanl, as we cannot fuse over
+            -- the output of a scanl (opposed to scanl1 and scanl'). In
+            -- SetOpIndices we do not set the index of the output, and that
+            -- causes it to be placed on dimension 0. Hence we need to bind it
+            -- here.
+            bindLocals 0 envs' >>=
+            bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize
+          workassistLoop workassistIndex workassistFirstIndex tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
-
-            tileIdxAbsolute <-
-              -- For a scanr, convert low-to-high indices to high-to-low indices:
-              -- The first block (with tileIdx 0) should now correspond with the last
-              -- values of the array. We implement that by reversing the tile indices here.
-              if isDescending direction then do
-                i <- A.sub numType (OP_Int tileCount') (OP_Int tileIdx)
-                OP_Int j <- A.sub numType i (A.liftInt 1)
-                return j
-              else
-                return tileIdx
-            lower <- A.mul numType (OP_Int tileIdxAbsolute) (A.liftInt tileSize)
-            upper' <- A.add numType lower (A.liftInt tileSize)
-            upper <- A.min singleType upper' size
+            (_, lower, upper, _) <- tileRange (isDescending direction) (op TypeInt size) (integral TypeInt tileSize) tileCount' tileIdx
 
             -- If there is only a single tile loop (i.e. no parallel scans),
             -- then we don't generate code for a single-threaded mode:
@@ -217,8 +214,8 @@ codegen name env cluster args
                       ++ [ Loop.LoopNonEmpty, Loop.LoopInterleave ]
 
                 ptBefore tileLoop envs'''
-                Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
-                  localIdx <- A.sub numType idx lower
+                Loop.loopWith ann (isDescending direction) (OP_Int lower) (OP_Int upper) $ \isFirst idx -> do
+                  localIdx <- A.sub numType idx (OP_Int lower)
                   let envs'''' = envs'''{
                       envsLoopDepth = 1,
                       envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',
@@ -255,8 +252,8 @@ codegen name env cluster args
                         ++ [ Loop.LoopNonEmpty ]
 
                   ptBefore tileLoop envs'''
-                  Loop.loopWith ann (isDescending direction) lower upper $ \isFirst idx -> do
-                    localIdx <- A.sub numType idx lower
+                  Loop.loopWith ann (isDescending direction) (OP_Int lower) (OP_Int upper) $ \isFirst idx -> do
+                    localIdx <- A.sub numType idx (OP_Int lower)
                     let envs'''' = envs'''{
                         envsLoopDepth = 1,
                         envsIdx = Env.partialUpdate (op TypeInt idx) idxVar $ envsIdx envs'',

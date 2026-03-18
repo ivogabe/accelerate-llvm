@@ -39,6 +39,9 @@ import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
+import Data.Array.Accelerate.LLVM.CodeGen.Sugar
+import Data.Array.Accelerate.LLVM.CodeGen.Array
+import Data.Array.Accelerate.LLVM.CodeGen.Environment (declareAliasScopes)
 import Data.Array.Accelerate.LLVM.Compile.Cache ( UID )
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -168,6 +171,8 @@ codegenSchedule schedule
         _ <- prepareImports (importsType schedule1) (importsInit schedule1) ptr (3 * sizeOf (1 :: Int))
         return ()
     , do
+        -- This is needed to use the 'load' and 'store' functions
+        declareAliasScopes 0
         loadRuntime
 
         -- Add 2 for the initial block and the destructor block
@@ -296,6 +301,13 @@ kernelTp = PtrPrimType (NamedPrimType "kernel_t" $ StructPrimType False $ TupRsi
 typeSignalWaiter :: PrimType (Struct (Ptr Int8, (Int32, Ptr Int8)))
 typeSignalWaiter = StructPrimType False $ TupRpair (TupRsingle primType) $ TupRpair (TupRsingle primType) (TupRsingle primType)
 
+-- Representation of values when in registers.
+-- Note that some Base types are never stored in registers but always in memory
+-- (signals and references), but these are still handled here to make simplify
+-- the definition of values in memory, StorageBaseR. The latter is simply
+-- the BufferEltR of ReprBaseR. The only difference between the two is that
+-- a 'Vec n t' is converted to 'SizedArray t', for the reasoning behind that
+-- see the definition of BufferEltR.
 type family ReprBaseR t where
   ReprBaseR Signal = Word
   ReprBaseR SignalResolver = Word
@@ -311,13 +323,18 @@ type family ReprBaseR t where
   -- This only applies to Refs containing Buffers, not to Refs containing scalars
   ReprBaseR (Ref t) = ReprBaseR t
   ReprBaseR (OutputRef t) = ReprBaseR t
-  ReprBaseR (Buffer t) = Ptr t
+  ReprBaseR (Buffer t) = Ptr (BufferEltR t)
   ReprBaseR t = t
 
 type family ReprBasesR t where
   ReprBasesR () = ()
   ReprBasesR (a, b) = (ReprBasesR a, ReprBasesR b)
   ReprBasesR t = ReprBaseR t
+
+-- Representation of values when in memory. See the definitions of ReprBaseR
+-- and BufferEltR for more information
+type StorageBaseR t = BufferEltR (ReprBaseR t)
+type StorageBasesR t = BufferEltR (ReprBasesR t)
 
 -- Note: we store the code to get access to a value here (in the CodeGen monad)
 -- instead of only the operand.
@@ -329,8 +346,9 @@ data StructVar t = StructVar
   -- i.e., whether this is bound by an Slam of the toplevel program.
   !Bool
   !(BaseR t)
-  !(CodeGen Native (Operand (Ptr (ReprBaseR t))))
+  !(CodeGen Native (Operand (Ptr (StorageBaseR t))))
 type StructVars = PartialEnv StructVar
+
 newtype LocalVar t = LocalVar (Operand (ReprBaseR t))
 type LocalVars = PartialEnv LocalVar
 
@@ -389,7 +407,7 @@ convertFun (Slam (LeftHandSideSingle tp) fun)
       in phase2 fun1 imports fullState (structVars `PPush` StructVar True tp getPtr') (PNone localVars) importsIdx (tupleRight stateIdx) nextBlock
   }
   where
-    tp' = toPrimType tp
+    tp' = toStoragePrimType tp
 convertFun (Sbody body) = convert False body
 
 convert :: forall env. Bool -> UniformSchedule NativeKernel env -> Exists2 (Phase1 env)
@@ -990,7 +1008,9 @@ convert inAwhile (Effect (RefWrite ref value) next)
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
       ref' <- getPtr structVars $ varIdx ref
       (localVars', value') <- getValue structVars localVars tp (varIdx value)
-      case tp of
+      -- '() <-' is needed as the type checker is confused by the use of GADTs,
+      -- especially the Refl constructor.
+      () <- case tp of
         GroundRbuffer _ -> do
           ref'' <- instr' $ PtrCast (PtrPrimType primType defaultAddrSpace) ref'
           value'' <- instr' $ PtrCast primType value'
@@ -1004,9 +1024,10 @@ convert inAwhile (Effect (RefWrite ref value) next)
               LLVM.ArgumentsNil)
             []
           return ()
-        GroundRscalar _ -> do
-          _ <- instr' $ Store NonVolatile ref' value' Nothing
-          return ()
+        GroundRscalar t
+          | Refl <- scalarReprBase t -> do
+            store NonVolatile t ref' value' Nothing
+            return ()
       phase2Sub next1 imports fullState structVars localVars' importsIdx stateIdx nextBlock
   }
   where
@@ -1063,12 +1084,12 @@ convert inAwhile (Alet lhs (NewRef (GroundRscalar tp)) next)
     importsType = importsType next1,
     importsInit = importsInit next1,
     importedLifetimes = importedLifetimes next1,
-    stateType = TupRsingle (ScalarPrimType tp) `TupRpair` stateType next1,
+    stateType = TupRsingle (bufferEltR tp) `TupRpair` stateType next1,
     varsFree = IdxSet.drop' lhs $ varsFree next1,
     varsInStruct = IdxSet.drop' lhs $ varsInStruct next1,
     maySuspend = maySuspend next1,
     phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-      let getPtr' = stateField fullState (ScalarPrimType tp) $ tupleLeft stateIdx
+      let getPtr' = stateField fullState (bufferEltR tp) $ tupleLeft stateIdx
       let (structVars', localVars') = pushTwoSame lhs structVars localVars getPtr'
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }
@@ -1099,7 +1120,7 @@ convert inAwhile (Alet lhs (NewRef (GroundRbuffer tp)) next)
       phase2Sub next1 imports fullState structVars' localVars' importsIdx (tupleRight stateIdx) nextBlock
   }
   where
-    t = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+    t = PtrPrimType (bufferEltR tp) defaultAddrSpace
     initialRefCount = case lhs of
       LeftHandSidePair _ LeftHandSideSingle{} -> 1
       _ -> 0
@@ -1107,7 +1128,7 @@ convert inAwhile (Alet lhs (NewRef (GroundRbuffer tp)) next)
 convert inAwhile (Alet lhs (Alloc shr tp sz) next)
   | Refl <- scalarReprBase tp
   , Exists2 next1 <- convert inAwhile next
-  , Exists bnd <- pushBindingSingle lhs $ varsInStruct next1 =
+  , Exists bnd <- pushBindingSingle (GroundRbuffer tp) lhs $ varsInStruct next1 =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
     importsType = importsType next1,
@@ -1140,12 +1161,12 @@ convert inAwhile (Alet lhs (Alloc shr tp sz) next)
       phase2Sub next1 imports fullState structVars' localVars2 importsIdx (tupleRight stateIdx) nextBlock
   }
   where
-    ptrTp = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+    ptrTp = PtrPrimType (bufferEltR tp) defaultAddrSpace
 convert inAwhile (Alet lhs (Use tp _ buffer) next)
   | Refl <- scalarReprBase tp
   , Exists2 next1 <- convert inAwhile next
-  , Exists bnd <- pushBindingSingle lhs $ varsInStruct next1
-  , ptrTp <- PtrPrimType (ScalarPrimType tp) defaultAddrSpace =
+  , Exists bnd <- pushBindingSingle (GroundRbuffer tp) lhs $ varsInStruct next1
+  , ptrTp <- PtrPrimType (bufferEltR tp) defaultAddrSpace =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
     importsType = TupRsingle ptrTp `TupRpair` importsType next1,
@@ -1165,7 +1186,7 @@ convert inAwhile (Alet lhs (Use tp _ buffer) next)
 convert inAwhile (Alet lhs (Unit (Var tp idx)) next)
   | Refl <- scalarReprBase tp
   , Exists2 next1 <- convert inAwhile next
-  , Exists bnd <- pushBindingSingle lhs $ varsInStruct next1 =
+  , Exists bnd <- pushBindingSingle (GroundRbuffer tp) lhs $ varsInStruct next1 =
   Exists2 $ Phase1{
     blockCount = blockCount next1,
     importsType = importsType next1,
@@ -1183,12 +1204,12 @@ convert inAwhile (Alet lhs (Unit (Var tp idx)) next)
           LLVM.ArgumentsNil)
         []
       (localVars', value) <- getValue structVars localVars (GroundRscalar tp) idx
-      _ <- instr' $ Store NonVolatile ptr value Nothing
+      store NonVolatile tp ptr value Nothing
       (structVars', localVars'') <- bPhase2 bnd structVars localVars' fullState (tupleLeft stateIdx) ptr
       phase2Sub next1 imports fullState structVars' localVars'' importsIdx (tupleRight stateIdx) nextBlock
   }
   where
-    ptrTp = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+    ptrTp = PtrPrimType (bufferEltR tp) defaultAddrSpace
 convert inAwhile (Alet lhs (RefRead ref) next)
   | Exists2 next1 <- convert inAwhile next
   , LeftHandSideSingle _ <- lhs =
@@ -1300,17 +1321,19 @@ convertArrayInstr structVars localVars arr arg = case arr of
     | Refl <- scalarReprBase tp -> do
       (_, value) <- getValue structVars localVars (GroundRscalar tp) idx
       return $ ir tp value
-  Index (Var tp idx) -> do
-    (_, ptr) <- getValue structVars localVars tp idx
-    ptr' <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt arg
-    instr $ Load NonVolatile ptr' Nothing
+  Index (Var tp idx)
+    | GroundRbuffer t <- tp -> do
+      (_, ptr) <- getValue structVars localVars tp idx
+      ptr' <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt arg
+      ir t <$> load NonVolatile t ptr' Nothing
+    | otherwise -> internalError "Buffer impossible"
 
 blockName :: Int -> String
 blockName 0 = "block.start"
 blockName 1 = "block.destructor"
 blockName idx = "block." ++ show idx
 
-getPtr :: StructVars env -> Idx env t -> CodeGen Native (Operand (Ptr (ReprBaseR t)))
+getPtr :: StructVars env -> Idx env t -> CodeGen Native (Operand (Ptr (StorageBaseR t)))
 getPtr env idx = case prjPartial idx env of
   Just (StructVar _ _ m) -> m
   Nothing -> internalError "Idx missing in StructVars."
@@ -1322,12 +1345,12 @@ getValue structVars localVars groundR idx
     ptr <- m
     value <- case groundR of
       GroundRscalar tp
-        | Refl <- scalarReprBase tp -> instr' $ Load NonVolatile ptr Nothing
+        | Refl <- scalarReprBase tp -> load NonVolatile tp ptr Nothing
       GroundRbuffer _ -> instr' $ Load NonVolatile ptr Nothing
     return (partialUpdate (LocalVar value) idx localVars, value)
   | otherwise = internalError "Idx missing in StructVars."
 
-scalarReprBase :: ScalarType tp -> tp :~: ReprBaseR tp
+scalarReprBase :: ScalarType tp -> (tp, BufferEltR tp) :~: (ReprBaseR tp, StorageBaseR tp)
 scalarReprBase (VectorScalarType _) = Refl
 scalarReprBase (SingleScalarType (NumSingleType (IntegralNumType tp))) = case tp of
   TypeInt    -> Refl
@@ -1361,22 +1384,30 @@ type Push2 op env env' t state
   -> CodeGen Native (StructVars env', LocalVars env')
 
 -- Should not be called with LeftHandSideWildcard of a Buffer, as this will leak memory.
-pushBindingSingle :: BLeftHandSide t env env' -> IdxSet env' -> Exists (Push1 Operand env env' (ReprBaseR t))
-pushBindingSingle (LeftHandSideWildcard _) _ = Exists $ Push1 TupRunit $
+pushBindingSingle :: GroundR t -> BLeftHandSide t env env' -> IdxSet env' -> Exists (Push1 Operand env env' (ReprBaseR t))
+pushBindingSingle _ (LeftHandSideWildcard _) _ = Exists $ Push1 TupRunit $
   \structVars localVars _ _ _ -> return (structVars, localVars)
-pushBindingSingle (LeftHandSideSingle tp) inStruct
+pushBindingSingle tp (LeftHandSideSingle _) inStruct
   | ZeroIdx `IdxSet.member` inStruct = Exists $ Push1 (TupRsingle tp') $
     \structVars localVars fullState tupleIdx value -> do
       let getPtr' = stateField fullState tp' tupleIdx
       ptr <- getPtr'
-      _ <- instr' $ Store NonVolatile ptr value Nothing
-      return (structVars `PPush` StructVar False tp getPtr', localVars `PPush` LocalVar value)
+      -- '() <-' is needed as the type checker is confused by the use of GADTs,
+      -- especially matching on Refl.
+      () <- case tp of
+        GroundRscalar t
+          | Refl <- scalarReprBase t ->
+            store NonVolatile t ptr value Nothing
+        GroundRbuffer _ -> do
+          _ <- instr' $ Store NonVolatile ptr value Nothing
+          return ()
+      return (structVars `PPush` StructVar False (BaseRground tp) getPtr', localVars `PPush` LocalVar value)
   | otherwise = Exists $ Push1 TupRunit $
     \structVars localVars _ _ value -> do
       return (PNone structVars, localVars `PPush` LocalVar value)
   where
-    tp' = toPrimType tp
-pushBindingSingle (LeftHandSidePair _ _) _ = internalError "Expected single or no value"
+    tp' = toStoragePrimType $ BaseRground tp
+pushBindingSingle _ (LeftHandSidePair _ _) _ = internalError "Expected single or no value"
 
 pushBindings :: TypeR t -> BLeftHandSide t env env' -> IdxSet env' -> Exists (Push1 Operands env env' t)
 pushBindings _ (LeftHandSideWildcard _) _ = Exists $ Push1 TupRunit $
@@ -1394,7 +1425,7 @@ pushBindings (TupRpair t1 t2) (LeftHandSidePair lhs1 lhs2) inStruct
     unpair (OP_Pair a b) = (a, b)
 pushBindings (TupRsingle t) lhs@(LeftHandSideSingle _) inStruct
   | Refl <- scalarReprBase t
-  , Exists push1 <- pushBindingSingle lhs inStruct
+  , Exists push1 <- pushBindingSingle (GroundRscalar t) lhs inStruct
   = Exists $ Push1 (bStateType push1) $
     \structVars localVars fullState tupleIdx value ->
       bPhase2 push1 structVars localVars fullState tupleIdx $ op t value
@@ -1408,7 +1439,7 @@ pushTwoSame
   => BLeftHandSide (t1, t2) env env'
   -> StructVars env
   -> LocalVars env
-  -> CodeGen Native (Operand (Ptr (ReprBaseR t1)))
+  -> CodeGen Native (Operand (Ptr (StorageBaseR t1)))
   -> (StructVars env', LocalVars env')
 pushTwoSame (LeftHandSideWildcard _) structVars localVars _ = (structVars, localVars)
 pushTwoSame (LeftHandSideWildcard _ `LeftHandSidePair` LeftHandSideWildcard _) structVars localVars _ = (structVars, localVars)
@@ -1427,32 +1458,40 @@ pushTwoSame (LeftHandSideSingle t1 `LeftHandSidePair` LeftHandSideWildcard _) st
   )
 pushTwoSame _ _ _ _ = internalError "Nested pair not allowed"
 
+-- Representation of a BaseR when stored in registers
 toPrimType :: BaseR t -> PrimType (ReprBaseR t)
 toPrimType (BaseRground (GroundRscalar tp))
   | Refl <- scalarReprBase tp = ScalarPrimType tp
-toPrimType (BaseRground (GroundRbuffer tp)) = PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+toPrimType (BaseRground (GroundRbuffer tp)) = PtrPrimType (bufferEltR tp) defaultAddrSpace
 toPrimType BaseRsignal = primType
 toPrimType BaseRsignalResolver = primType
 toPrimType (BaseRref tp) = toPrimType $ BaseRground tp
 toPrimType (BaseRrefWrite tp) = toPrimType $ BaseRground tp
 
--- work_function: ptr
--- continuation: ptr, u32 (program, location)
--- active_threads: u32,
--- work_index: u32,
--- In the future, perhaps also store a work_size: u32
+-- Representation of a BaseR when stored in a struct
+toStoragePrimType :: BaseR t -> PrimType (StorageBaseR t)
+toStoragePrimType (BaseRground (GroundRscalar tp))
+  | Refl <- scalarReprBase tp = bufferEltR tp
+toStoragePrimType (BaseRground (GroundRbuffer tp)) = PtrPrimType (bufferEltR tp) defaultAddrSpace
+toStoragePrimType BaseRsignal = primType
+toStoragePrimType BaseRsignalResolver = primType
+toStoragePrimType (BaseRref tp) = toStoragePrimType $ BaseRground tp
+toStoragePrimType (BaseRrefWrite tp) = toStoragePrimType $ BaseRground tp
+
+-- Representation of a kernel argument. Should align with
+-- MarshalStorageArg in Data.Array.Accelerate.LLVM.CodeGen.Environment
 type family KernelArg a where
-  KernelArg (m DIM1 e) = Ptr e
-  KernelArg (Var' e) = e
+  KernelArg (m DIM1 e) = Ptr (BufferEltR e)
+  KernelArg (Var' e) = (BufferEltR e)
 
 type family KernelArgs f where
   KernelArgs () = ()
   KernelArgs (t -> f) = (KernelArg t, KernelArgs f)
 
 kernelArgsTp' :: SArgs env f -> TupR PrimType (KernelArgs f)
-kernelArgsTp' (SArgScalar (Var tp _) :>: args) = TupRsingle (ScalarPrimType tp) `TupRpair` kernelArgsTp' args
+kernelArgsTp' (SArgScalar (Var tp _) :>: args) = TupRsingle (bufferEltR tp) `TupRpair` kernelArgsTp' args
 kernelArgsTp' (SArgBuffer _ (Var tp _) :>: args) = case tp of
-  GroundRbuffer t -> TupRsingle (PtrPrimType (ScalarPrimType t) defaultAddrSpace) `TupRpair` kernelArgsTp' args
+  GroundRbuffer t -> TupRsingle (PtrPrimType (bufferEltR t) defaultAddrSpace) `TupRpair` kernelArgsTp' args
   _ -> internalError "Buffer impossible"
 kernelArgsTp' ArgsNil = TupRunit
 
@@ -1470,12 +1509,12 @@ storeKernelArgs :: StructVars env -> LocalVars env -> SArgs env f -> Operand (Pt
 storeKernelArgs structVars localVars (SArgScalar (Var tp idx) :>: sargs) struct structIdx
   | Refl <- scalarReprBase tp = do
     (localVars', value) <- getValue structVars localVars (GroundRscalar tp) idx
-    ptr <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType tp) struct (tupleLeft structIdx)
-    _ <- instr' $ Store NonVolatile ptr value Nothing
+    ptr <- instr' $ GetElementPtr $ gepStruct (bufferEltR tp) struct (tupleLeft structIdx)
+    store NonVolatile tp ptr value Nothing
     storeKernelArgs structVars localVars' sargs struct (tupleRight structIdx)
 storeKernelArgs structVars localVars (SArgBuffer _ (Var tp idx) :>: sargs) struct structIdx = do
   (localVars', value) <- getValue structVars localVars tp idx
-  ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct (tupleLeft structIdx)
+  ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (bufferEltR tp') defaultAddrSpace) struct (tupleLeft structIdx)
   _ <- instr' $ Store NonVolatile ptr value Nothing
   storeKernelArgs structVars localVars' sargs struct (tupleRight structIdx)
   where
@@ -1633,12 +1672,12 @@ returnNull :: CodeGen arch ()
 returnNull = retval_ $ ConstantOperand $ NullPtrConstant $ type' @(Ptr Int8)
 
 -- Utilities for awhile loops
-awhileIOType :: InputOutputR input output -> TupR PrimType (ReprBasesR input)
+awhileIOType :: InputOutputR input output -> TupR PrimType (StorageBasesR input)
 awhileIOType (InputOutputRpair io1 io2) = awhileIOType io1 `TupRpair` awhileIOType io2
 awhileIOType InputOutputRunit = TupRunit
 awhileIOType (InputOutputRref (GroundRscalar tp))
-  | Refl <- scalarReprBase tp = TupRsingle $ ScalarPrimType tp
-awhileIOType (InputOutputRref (GroundRbuffer tp)) = TupRsingle $ PtrPrimType (ScalarPrimType tp) defaultAddrSpace
+  | Refl <- scalarReprBase tp = TupRsingle $ bufferEltR tp
+awhileIOType (InputOutputRref (GroundRbuffer tp)) = TupRsingle $ PtrPrimType (bufferEltR tp) defaultAddrSpace
 awhileIOType InputOutputRsignal = TupRsingle primType
 
 awhileIOMatch :: InputOutputR input output -> ReprBasesR input :~: ReprBasesR output
@@ -1650,7 +1689,7 @@ awhileIOMatch InputOutputRsignal = Refl
 awhileIOMatch InputOutputRunit = Refl
 
 -- Copies the result of the current iteration to the input of the next iteration
-awhileSeqPrepareNext :: InputOutputR input output -> Operand (Ptr (Struct (ReprBasesR output))) -> Operand (Ptr (Struct (ReprBasesR input))) -> CodeGen Native ()
+awhileSeqPrepareNext :: InputOutputR input output -> Operand (Ptr (Struct (StorageBasesR output))) -> Operand (Ptr (Struct (StorageBasesR input))) -> CodeGen Native ()
 awhileSeqPrepareNext io current next
   | Refl <- awhileIOMatch io = do
     value <- instr' $ Load NonVolatile current Nothing
@@ -1667,23 +1706,23 @@ awhileSeqSetInitial
   -> LocalVars env
   -> InputOutputR input output
   -> BaseVars env input
-  -> Operand (Ptr (Struct (ReprBasesR input)))
+  -> Operand (Ptr (Struct (StorageBasesR input)))
   -> CodeGen Native ()
 awhileSeqSetInitial structVars localVars inputOutput inputVars struct = go inputOutput inputVars TupleIdxSelf
   where
-    go :: InputOutputR i o -> BaseVars env i -> TupleIdx (ReprBasesR input) (ReprBasesR i) -> CodeGen Native ()
+    go :: InputOutputR i o -> BaseVars env i -> TupleIdx (StorageBasesR input) (StorageBasesR i) -> CodeGen Native ()
     go InputOutputRsignal _ _ =
       internalError "Signals not supported in awhile-sequential"
     go (InputOutputRref t@(GroundRbuffer t')) (TupRsingle (Var _ idx)) tupleIdx = do
       (_, value) <- getValue structVars localVars t idx
-      ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType t') defaultAddrSpace) struct tupleIdx
+      ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (bufferEltR t') defaultAddrSpace) struct tupleIdx
       _ <- instr' $ Store NonVolatile ptr value Nothing
       return ()
     go (InputOutputRref t@(GroundRscalar t')) (TupRsingle (Var _ idx)) tupleIdx
       | Refl <- scalarReprBase t' = do
       (_, value) <- getValue structVars localVars t idx
-      ptr <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType t') struct tupleIdx
-      _ <- instr' $ Store NonVolatile ptr value Nothing
+      ptr <- instr' $ GetElementPtr $ gepStruct (bufferEltR t') struct tupleIdx
+      store NonVolatile t' ptr value Nothing
       return ()
     go (InputOutputRpair io1 io2) (TupRpair v1 v2) tupleIdx = do
       go io1 v1 (tupleLeft tupleIdx)
@@ -1698,12 +1737,12 @@ awhileSeqSetInitial structVars localVars inputOutput inputVars struct = go input
 -- We use the left hand side of the input of the next iteration
 -- to determine that reference count (1 or 0, depending on whether the lhs is
 -- single or wildcard).
-awhilePrepareOutput :: forall input output env env'. InputOutputR input output -> BLeftHandSide input env env' -> Operand (Ptr (Struct (ReprBasesR output))) -> CodeGen Native ()
+awhilePrepareOutput :: forall input output env env'. InputOutputR input output -> BLeftHandSide input env env' -> Operand (Ptr (Struct (StorageBasesR output))) -> CodeGen Native ()
 awhilePrepareOutput inputOutput lhs output = go inputOutput lhs TupleIdxSelf
   where
-    go :: InputOutputR i o -> BLeftHandSide i env1 env2 -> TupleIdx (ReprBasesR output) (ReprBasesR o) -> CodeGen Native ()
+    go :: InputOutputR i o -> BLeftHandSide i env1 env2 -> TupleIdx (StorageBasesR output) (StorageBasesR o) -> CodeGen Native ()
     go (InputOutputRref (GroundRbuffer tp)) lhs idx = do
-      ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType tp) defaultAddrSpace) output idx
+      ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (bufferEltR tp) defaultAddrSpace) output idx
       ptr' <- instr' $ PtrCast primType ptr
       -- Set the reference count of the Ref
       _ <- instr' $ Store NonVolatile ptr' (integral TypeWord $ fromIntegral $ lhsSize lhs * 2 + 1) Nothing
@@ -1724,24 +1763,24 @@ awhilePrepareOutput inputOutput lhs output = go inputOutput lhs TupleIdxSelf
 
 awhileSeqBindInput
   :: forall input output env env'.
-     CodeGen Native (Operand (Ptr (Struct (ReprBasesR input))))
+     CodeGen Native (Operand (Ptr (Struct (StorageBasesR input))))
   -> InputOutputR input output
   -> BLeftHandSide input env env'
   -> StructVars env
   -> StructVars env'
 awhileSeqBindInput getStruct = go TupleIdxSelf
   where
-    go :: TupleIdx (ReprBasesR input) (ReprBasesR i) -> InputOutputR i o -> BLeftHandSide i env1 env2 -> StructVars env1 -> StructVars env2
+    go :: TupleIdx (StorageBasesR input) (StorageBasesR i) -> InputOutputR i o -> BLeftHandSide i env1 env2 -> StructVars env1 -> StructVars env2
     go _ _ (LeftHandSideWildcard _) env = env
     go idx (InputOutputRref tp@(GroundRbuffer tp')) (LeftHandSideSingle _) env = PPush env $
       StructVar False (BaseRref tp) $ do
         struct <- getStruct
-        instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct idx
+        instr' $ GetElementPtr $ gepStruct (PtrPrimType (bufferEltR tp') defaultAddrSpace) struct idx
     go idx (InputOutputRref tp@(GroundRscalar tp')) (LeftHandSideSingle _) env
       | Refl <- scalarReprBase tp' = PPush env $
       StructVar False (BaseRref tp) $ do
         struct <- getStruct
-        instr' $ GetElementPtr $ gepStruct (ScalarPrimType tp') struct idx
+        instr' $ GetElementPtr $ gepStruct (bufferEltR tp') struct idx
     go idx (InputOutputRpair io1 io2) (LeftHandSidePair lhs1 lhs2) env =
       go (tupleRight idx) io2 lhs2 $ go (tupleLeft idx) io1 lhs1 env
     go _ _ _ _ = internalError "Tuple mismatch"
@@ -1790,7 +1829,7 @@ awhileParRetainInput structVars input remainder = do
 
 awhileParBindInput
   :: forall input output env0 env env'.
-     CodeGen Native (Operand (Ptr (Struct (ReprBasesR input))))
+     CodeGen Native (Operand (Ptr (Struct (StorageBasesR input))))
   -> StructVars env0
   -> InputOutputR input output
   -> BaseVars env0 input
@@ -1800,7 +1839,7 @@ awhileParBindInput
 awhileParBindInput getStruct env0 = go TupleIdxSelf
   where
     go
-      :: TupleIdx (ReprBasesR input) (ReprBasesR i)
+      :: TupleIdx (StorageBasesR input) (StorageBasesR i)
       -> InputOutputR i o
       -> BaseVars env0 i
       -> BLeftHandSide i env1 env2
@@ -1812,7 +1851,7 @@ awhileParBindInput getStruct env0 = go TupleIdxSelf
         initialPtr <- getPtr env0 $ varIdx initial
         first <- instr' $ Load NonVolatile operandAwhileIsFirst Nothing
         struct <- getStruct
-        ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct idx
+        ptr <- instr' $ GetElementPtr $ gepStruct (PtrPrimType (bufferEltR tp') defaultAddrSpace) struct idx
         instr' $ Select first initialPtr ptr
     go idx (InputOutputRref tp@(GroundRscalar tp')) (TupRsingle initial) (LeftHandSideSingle _) env
       | Refl <- scalarReprBase tp' = PPush env $
@@ -1820,7 +1859,7 @@ awhileParBindInput getStruct env0 = go TupleIdxSelf
         initialPtr <- getPtr env0 $ varIdx initial
         first <- instr' $ Load NonVolatile operandAwhileIsFirst Nothing
         struct <- getStruct
-        ptr <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType tp') struct idx
+        ptr <- instr' $ GetElementPtr $ gepStruct (bufferEltR tp') struct idx
         instr' $ Select first initialPtr ptr
     go idx InputOutputRsignal (TupRsingle initial) (LeftHandSideSingle _) env = PPush env $
       StructVar False BaseRsignal $ do
@@ -1835,24 +1874,24 @@ awhileParBindInput getStruct env0 = go TupleIdxSelf
 
 awhileBindOutput
   :: forall input output env env'.
-     CodeGen Native (Operand (Ptr (Struct (ReprBasesR output))))
+     CodeGen Native (Operand (Ptr (Struct (StorageBasesR output))))
   -> InputOutputR input output
   -> BLeftHandSide output env env'
   -> StructVars env
   -> StructVars env'
 awhileBindOutput getStruct = go TupleIdxSelf
   where
-    go :: TupleIdx (ReprBasesR output) (ReprBasesR o) -> InputOutputR i o -> BLeftHandSide o env1 env2 -> StructVars env1 -> StructVars env2
+    go :: TupleIdx (StorageBasesR output) (StorageBasesR o) -> InputOutputR i o -> BLeftHandSide o env1 env2 -> StructVars env1 -> StructVars env2
     go _ _ (LeftHandSideWildcard _) env = env
     go idx (InputOutputRref tp@(GroundRbuffer tp')) (LeftHandSideSingle _) env = PPush env $
       StructVar False (BaseRrefWrite tp) $ do
         struct <- getStruct
-        instr' $ GetElementPtr $ gepStruct (PtrPrimType (ScalarPrimType tp') defaultAddrSpace) struct idx
+        instr' $ GetElementPtr $ gepStruct (PtrPrimType (bufferEltR tp') defaultAddrSpace) struct idx
     go idx (InputOutputRref tp@(GroundRscalar tp')) (LeftHandSideSingle _) env
       | Refl <- scalarReprBase tp' = PPush env $
       StructVar False (BaseRrefWrite tp) $ do
         struct <- getStruct
-        instr' $ GetElementPtr $ gepStruct (ScalarPrimType tp') struct idx
+        instr' $ GetElementPtr $ gepStruct (bufferEltR tp') struct idx
     go idx InputOutputRsignal (LeftHandSideSingle _) env = PPush env $
       StructVar False BaseRsignalResolver $ do
         struct <- getStruct
