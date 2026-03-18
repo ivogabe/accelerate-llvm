@@ -74,6 +74,7 @@ import qualified Data.List as List
 import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
+import Data.ByteString.Builder.Extra (flush)
 
 data NativeProgram = NativeProgram
   !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Word16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
@@ -102,7 +103,7 @@ linkSchedule' uid schedule
 
     obj <- compile uid (fromString name) m
     fun <- link obj
-    return $ NativeProgram fun sz lifetimes prepInput offset 
+    return $ NativeProgram fun sz lifetimes prepInput offset
 
 -- Safety: to prevent the garbage collector to destruct the Lifetime,
 -- and the function it refers to, you should call touchLifetime
@@ -447,7 +448,7 @@ convert inAwhile (Spawn a b)
 
       location <- computeLocation inAwhile $ fromIntegral $ nextBlock + blockCount b1
 
-      _ <- callLocal (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.Body VoidType Nothing (Label "accelerate_schedule")) 
+      _ <- callLocal (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.Body VoidType Nothing (Label "accelerate_schedule"))
         (LLVM.ArgumentsCons operandWorkers []
           $ LLVM.ArgumentsCons operandProgram []
           $ LLVM.ArgumentsCons location []
@@ -660,7 +661,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
             (ArrayPrimType awhileConcurrentStates iterStateType)
             $ tupleLeft stateIdx
           instr' $ GetElementPtr $ GEP
-            awhileState 
+            awhileState
             (scalar scalarTypeInt32 0)
             (GEPArray idx GEPEmpty)
 
@@ -749,7 +750,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
       -- 0 is exit, 1 is continue, and 2 means that a prior iteration has stopped the loop.
       condPtr <- getInputCondition
       condValue <- instr' $ Load NonVolatile condPtr Nothing
-      _ <- switch 
+      _ <- switch
         (ir scalarType condValue)
         blockCleanUp
         [(0, blockExit), (1, blockBody), (2, blockFinal)]
@@ -762,7 +763,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
         signal <- getOutputSignalResolver
         _ <- callLocal
           (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
-            LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve")) 
+            LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve"))
           (LLVM.ArgumentsCons operandWorkers []
             $ LLVM.ArgumentsCons signal []
             LLVM.ArgumentsNil)
@@ -826,7 +827,7 @@ convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody ste
       signal <- getOutputSignalResolver
       _ <- callLocal
         (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
-          LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve")) 
+          LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve"))
         (LLVM.ArgumentsCons operandWorkers []
           $ LLVM.ArgumentsCons signal []
           LLVM.ArgumentsNil)
@@ -976,7 +977,7 @@ convert inAwhile (Effect (SignalResolve signals) next)
             mvar <- instr' $ Load NonVolatile mvarPtr' Nothing
             _ <- callLocal
               (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
-                LLVM.Body VoidType Nothing (Label "hs_try_putmvar")) 
+                LLVM.Body VoidType Nothing (Label "hs_try_putmvar"))
               (LLVM.ArgumentsCons (integral TypeInt32 $ -1) []
                 $ LLVM.ArgumentsCons mvar []
                 LLVM.ArgumentsNil)
@@ -986,7 +987,7 @@ convert inAwhile (Effect (SignalResolve signals) next)
             signal <- m
             _ <- callLocal
               (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
-                LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve")) 
+                LLVM.Body VoidType Nothing (Label "accelerate_signal_resolve"))
               (LLVM.ArgumentsCons operandWorkers []
                 $ LLVM.ArgumentsCons signal []
                 LLVM.ArgumentsNil)
@@ -1049,7 +1050,7 @@ convert inAwhile (Effect (Aassert msg cond) next)
       maySuspend = maySuspend next1,
       phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
         _ <- llvmOfExp (convertArrayInstr structVars localVars) (Assert msg cond Nil)
-        phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock 
+        phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock
     }
 convert inAwhile (Effect (Atrace msg t) next)
   | Exists2 next1 <- convert inAwhile next =
@@ -1063,9 +1064,10 @@ convert inAwhile (Effect (Atrace msg t) next)
       varsInStruct = varsInStruct next1,
       maySuspend = maySuspend next1,
       phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-        _ <- putString (unpack msg)
+        _ <- printString (unpack msg ++ ": [")
         _ <- putArrayDescriptors structVars localVars t -- TODO(Mike): Array ook schrijven naar console
-        phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock 
+        _ <- printString "]\n"
+        phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock
     }
 -- Bindings
 -- No need to construct anything if the result is not used.
@@ -1649,7 +1651,7 @@ forkEnv = \structVars localVars usedLeft usedRight -> do
       ptrPtr <- m
       ptr <- instr' $ Load NonVolatile ptrPtr Nothing
       callBufferRetain ptr
-    retain _ _ = return () 
+    retain _ _ = return ()
 
 callBufferRelease :: Operand (Ptr t) -> CodeGen Native ()
 callBufferRelease ptr = do
@@ -1833,7 +1835,7 @@ awhileParRetainInput structVars input remainder = do
         retainCount
           | idx `IdxSet.member` remainder = length vars
           | otherwise = length vars - 1
-      
+
       if retainCount == 0 then
         return ()
       else do
@@ -1936,37 +1938,44 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
 
   (_, sz) <- computeSize structVars localVars shape sh (liftInt 1)
 
-  foldMapMTupR (loopBuffer structVars localVars sz) buffer -- There can be mulitple buffers so we have to check them all
-  return ()
+  let
+    loopBuffer :: forall s. Var GroundR env s -> CodeGen Native ()
+    loopBuffer (Var tp idx)
+      | GroundRbuffer t <- tp = do
+          let getBufferValue index = do
+                ptr   <- getPtr structVars idx
+                ptr'  <- instr' $ Load NonVolatile ptr Nothing
+                ptr'' <- instr' $ GetElementPtr $ GEP1 ptr' $ op scalarTypeInt index
+                load NonVolatile t ptr'' Nothing
 
-loopBuffer :: StructVars env -> LocalVars env -> Operands Int -> Var GroundR env s -> CodeGen Native ()
-loopBuffer structVars localVars sz (Var tp idx)
-  | GroundRbuffer t <- tp = do
-    imapFromStepTo [] (liftInt 0) (liftInt 1) sz $ \i -> do
-        ptr    <- getPtr structVars idx
-        ptr'   <- instr' $ Load NonVolatile ptr Nothing
-        ptr''   <- instr' $ GetElementPtr $ GEP1 ptr' $ op scalarTypeInt i
-        value  <- load NonVolatile t ptr'' Nothing
-        _      <- printValue t value
-        return ()
-  | otherwise = return () 
+          value <- getBufferValue (liftInt 0)
+          _      <- printValue t value
+          imapFromStepTo [] (liftInt 1) (liftInt 1) sz $ \i -> do
+              value  <- getBufferValue i
+              _      <- printString ", "
+              _      <- printValue t value
+              return ()
+      | otherwise = return ()
+
+  foldMapMTupR loopBuffer buffer -- There can be mulitple buffers so we have to check them all
+  return ()
 
 -- TODO(Mike): Print the value to the console
 printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d\n" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%d\n" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt16))) value = printf "%d\n" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt32))) value = printf "%d\n" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt64))) value = printf "%d\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%d" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt16))) value = printf "%d" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt32))) value = printf "%d" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt64))) value = printf "%d" value
 
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord))) value = printf "%u\n" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord8))) value = printf "%u\n" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord16))) value = printf "%u\n" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord32))) value = printf "%u\n" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord64))) value = printf "%u\n" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord))) value = printf "%u" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord8))) value = printf "%u" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord16))) value = printf "%u" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord32))) value = printf "%u" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord64))) value = printf "%u" value
 
-printValue (SingleScalarType (NumSingleType (FloatingNumType TypeHalf))) value = printf "%f\n" value
-printValue (SingleScalarType (NumSingleType (FloatingNumType TypeFloat))) value = printf "%f\n" value
-printValue (SingleScalarType (NumSingleType (FloatingNumType TypeDouble))) value = printf "%lf\n" value
+printValue (SingleScalarType (NumSingleType (FloatingNumType TypeHalf))) value = printf "%f" value
+printValue (SingleScalarType (NumSingleType (FloatingNumType TypeFloat))) value = printf "%f" value
+printValue (SingleScalarType (NumSingleType (FloatingNumType TypeDouble))) value = printf "%lf" value
 
 printValue (VectorScalarType _) _ = return (liftInt 0) -- TODO(Mike): Kijken hoe ik dit ga oplossen

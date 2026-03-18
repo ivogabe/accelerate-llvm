@@ -95,6 +95,16 @@ putString msg = do
        (ArgumentsCons strPtr [] ArgumentsNil)
        []
 
+printString :: String -> CodeGen Native (Operands Int)
+printString msg = do
+  mapM_ (putchar . liftInt . fromEnum) msg
+  return (liftInt 0)
+-- TODO(Mike): vragen aan Ivo waarom dit niet werkt?
+-- printString msg = do 
+--   (nm, l) <- global_string msg
+--   let strPtr = ConstantOperand $ derefGlobalString l nm
+--   printf "%s" strPtr
+
 fflush :: CodeGen Native (Operands Int)
 fflush = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "fflush"))
               (ArgumentsCons (op TypeWord64 (liftWord64 0)) [] ArgumentsNil)
