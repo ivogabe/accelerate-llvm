@@ -1936,20 +1936,20 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
 
   (_, sz) <- computeSize structVars localVars shape sh (liftInt 1)
 
-  let
-    loopBuffer :: forall s. Var GroundR env s -> CodeGen Native ()
-    loopBuffer (Var tp idx) = case tp of
-      GroundRbuffer t -> do
-        imapFromStepTo [] (liftInt 0) (liftInt 1) sz $ \i -> do
-          (_, ptr) <- getValue structVars localVars (GroundRbuffer t) idx
-          ptr'     <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt i
-          value    <- instr' $ Load NonVolatile ptr' Nothing
-          _ <- printValue t value
-          return ()
-      GroundRscalar _ -> return ()
-
-  foldMapMTupR loopBuffer buffer -- There can be mulitple buffers so we have to check them all
+  foldMapMTupR (loopBuffer structVars localVars sz) buffer -- There can be mulitple buffers so we have to check them all
   return ()
+
+loopBuffer :: StructVars env -> LocalVars env -> Operands Int -> Var GroundR env s -> CodeGen Native ()
+loopBuffer structVars localVars sz (Var tp idx)
+  | GroundRbuffer t <- tp = do
+    imapFromStepTo [] (liftInt 0) (liftInt 1) sz $ \i -> do
+        ptr    <- getPtr structVars idx
+        ptr'   <- instr' $ Load NonVolatile ptr Nothing
+        ptr'   <- instr' $ GetElementPtr $ GEP1 ptr' $ op scalarTypeInt i
+        value  <- load NonVolatile t ptr' Nothing
+        _      <- printValue t value
+        return ()
+  | otherwise = return () 
 
 -- TODO(Mike): Print the value to the console
 printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
