@@ -1946,7 +1946,7 @@ loopBuffer structVars localVars sz (Var tp idx)
         ptr    <- getPtr structVars idx
         ptr'   <- instr' $ Load NonVolatile ptr Nothing
         ptr''   <- instr' $ GetElementPtr $ GEP1 ptr' $ op scalarTypeInt i
-        value  <- load NonVolatile t ptr' Nothing
+        value  <- load NonVolatile t ptr'' Nothing
         _      <- printValue t value
         return ()
   | otherwise = return () 
