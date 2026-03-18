@@ -213,21 +213,21 @@ shardedSelfScheduling cacheWidth' shardIndexes shardSizes nextShardFinishedShard
   exit     <- newBlock "workassist.exit"
 
   -- Increment next shard by 1.
-  initNextFinish <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000000)
+  initNextFinish <- Loop.atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000000)
 
   _ <- br start
 
   setBlock next
 
   -- Increment next shard by 1.
-  nextInc <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000000)
+  nextInc <- Loop.atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000000)
 
   _ <- br start
 
   setBlock finish
 
   -- Increment next shard and finished shards by 1.
-  finishInc <- atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000001)
+  finishInc <- Loop.atomicAdd Monotonic nextShardFinishedShards (integral TypeWord64 0x100000001)
 
   _ <- br start
 
@@ -259,7 +259,7 @@ shardedSelfScheduling cacheWidth' shardIndexes shardSizes nextShardFinishedShard
   setBlock inner
   
   -- Continue working on shard until finished.
-  workIdx <- atomicAdd Monotonic shard (integral TypeWord64 1)
+  workIdx <- Loop.atomicAdd Monotonic shard (integral TypeWord64 1)
   shardFinished <- A.lt singleType (OP_Word64 workIdx) (OP_Word64 shardSize)
 
   _ <- cbr shardFinished work done
