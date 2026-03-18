@@ -40,7 +40,6 @@ import Data.Array.Accelerate.LLVM.Internal.LLVMPretty               ( AddrSpace(
 import Data.List
 import Data.Bits
 import Data.Text.Lazy.Builder
-import Data.Type.Equality
 import Foreign.Ptr
 import Foreign.Storable
 import Formatting
