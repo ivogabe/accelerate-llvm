@@ -314,7 +314,7 @@ workassistLoop counter workSize doWork = do
   work     <- newBlock "workassist.loop.work"
   exit     <- newBlock "workassist.exit"
 
-  firstIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
+  firstIndex <- Loop.atomicAdd Monotonic counter (integral TypeWord64 1)
 
   initialCondition <- lt singleType (OP_Word64 firstIndex) (OP_Word64 workSize)
   initialSeq <- eq singleType (OP_Word64 firstIndex) (liftWord64 0)
@@ -330,7 +330,7 @@ workassistLoop counter workSize doWork = do
 
   doWork seqMode index
 
-  nextIndex <- atomicAdd Monotonic counter (integral TypeWord64 1)
+  nextIndex <- Loop.atomicAdd Monotonic counter (integral TypeWord64 1)
   condition <- lt singleType (OP_Word64 nextIndex) (OP_Word64 workSize)
   indexPlusOne <- add numType (OP_Word64 index) (liftWord64 1)
   nextSeq' <- eq singleType indexPlusOne (OP_Word64 nextIndex)
@@ -412,7 +412,3 @@ chunkEnd (ShapeRsnoc shr) (OP_Pair sh0 sz0) (OP_Pair sh1 sz1) (OP_Pair sh2 sz2) 
   sz3 <- add numType sz2 sz1
   sz3' <- A.min singleType sz3 sz0
   return $ OP_Pair sh3 sz3'
-
-atomicAdd :: MemoryOrdering -> Operand (Ptr Word64) -> Operand Word64 -> CodeGen Native (Operand Word64)
-atomicAdd ordering ptr increment = do
-  instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)

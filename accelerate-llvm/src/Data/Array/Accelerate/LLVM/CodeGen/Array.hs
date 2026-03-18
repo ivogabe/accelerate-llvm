@@ -20,6 +20,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
   writeArray, writeArray', writeArrayAt',
   readBuffer,
   writeBuffer,
+  load, store,
 
   tupleAlloca, tuplePtrs, tuplePtrs', tupleStore, tupleLoad, tupleStoreArray, tupleLoadArray, tupleArrayGep,
 
@@ -253,17 +254,6 @@ store volatility e p v alias = do
   _ <- instrMD' (Store volatility p' v align) (bufferMetadata' alias)
   return ()
 
--- Converts a pointer to a BufferEltR type to a pointer to the standard type.
--- In case of a Vec, this may yield an unaligned pointer.
--- We thus also report the alignment of the pointer, if it is unaligned.
--- A Vec is only aligned to the alignment of its elements, whereas LLVM expects
--- a higher alignment.
-ptrAsUnalignedVecPtr :: ScalarType e -> Operand (Ptr (BufferEltR e)) -> (Operand (Ptr e), Maybe Int)
-ptrAsUnalignedVecPtr (SingleScalarType tp) ptr
-  | Refl <- singleTypeBufferEltR tp = (ptr, Nothing)
-ptrAsUnalignedVecPtr (VectorScalarType tp@(VectorType _ t)) ptr =
-  (ptrCast (ScalarPrimType $ VectorScalarType tp) ptr, Just $ singleTypeSize t)
-
 tupleAlloca :: forall e arch. TypeR e -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR e)))
 tupleAlloca TupRunit = return TupRunit
 tupleAlloca (TupRpair t1 t2) = TupRpair <$> tupleAlloca t1 <*> tupleAlloca t2
@@ -369,11 +359,11 @@ tupleArrayGep
   -> CodeGen arch (TupR Operand (Distribute Ptr (BufferEltR e)))
 tupleArrayGep TupRunit _ _ = return TupRunit
 tupleArrayGep (TupRpair t1 t2) (TupRpair p1 p2) idx = TupRpair <$> tupleArrayGep t1 p1 idx <*> tupleArrayGep t2 p2 idx
-tupleArrayGep (TupRsingle tp) (TupRsingle ptr) idx
+tupleArrayGep (TupRsingle tp) (TupRsingle ptr) (OP_Int32 idx)
   | tp' <- bufferEltR tp
   , Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr tp'
   , Refl <- reprIsSingle @PrimType @(BufferEltR e) @SizedArray tp' = do
-    ptr' <- instr' $ GetElementPtr $ GEP ptr (A.num numType 0 :: Operand Int32) $ GEPArray ptr GEPEmpty
+    ptr' <- instr' $ GetElementPtr $ GEP ptr (A.num numType 0 :: Operand Int32) $ GEPArray idx GEPEmpty
     return $ TupRsingle ptr'
 tupleArrayGep _ _ _ = internalError "Tuple mismatch"
 
