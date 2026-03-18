@@ -17,6 +17,7 @@
 
 module Data.Array.Accelerate.LLVM.PTX.Kernel (
   PTXKernel(..),
+  PTXKernelPhase(..),
   PTXKernelMetadata(..),
   KernelType
 ) where
@@ -50,6 +51,7 @@ import Data.Array.Accelerate.LLVM.PTX.State
 import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Array.Accelerate.LLVM.PTX.Link
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
+import Crypto.Hash.XKCP
 import LLVM.AST.Type.Function
 import Data.ByteString.Short                                        ( ShortByteString, fromShort )
 import qualified Data.ByteString.Char8 as Char8
@@ -63,21 +65,25 @@ import Prettyprinter
 import Data.String
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Representation
+import LLVM.AST.Type.Module
 
 data PTXKernel env where
   PTXKernel
-    :: { kernelObject     :: ObjectR (KernelType env)
-       , kernelLinked     :: Lifetime KernelObject
-       , kernelId         :: {-# UNPACK #-} !ShortByteString
+    :: { kernelInit       :: !(Maybe (PTXKernelPhase env))
+       , kernelMain       :: !(PTXKernelPhase env)
+       , kernelFinish     :: !(Maybe (PTXKernelPhase env))
        , kernelUID        :: {-# UNPACK #-} !UID
        -- Note: [PTX Kernel Grid Size]
        -- We always assign a one-dimensional grid size, for simplicity.
-       -- The product of the variables in kernelMaxGridSize denotes the maximum
-       -- grid size for the kernel. The actual grid size is the minimum of this
+       -- The product of the variables in kernelElements denotes the number
+       -- of elements handled by the kernel for the kernel. The maximum grid
+       -- size can be computed by dividing this by kernelElementsPerThread.
+       -- The actual grid size is the minimum of this
        -- number, and the number of threads that the GPU can execute
        -- concurrently (which depends on things like the register pressure),
        -- and is computed in 'launchConfig'.
-       , kernelMaxGridSize :: [Idx env Int]
+       , kernelElements :: [Idx env Int]
+       , kernelElementsPerThread :: Int
        -- Note: [Kernel Memory]
        -- Each kernel call gets a memory that is shared between all the threads
        -- working on this kernel.
@@ -91,8 +97,27 @@ data PTXKernel env where
        }
     -> PTXKernel env
 
+-- There are two notions of 'kernels' in this file. From the Accelerate side, a
+-- kernel the compiled variant of a cluster of array operations. Since an array
+-- operation may require initialization and finalization code, this may be
+-- compiled to three 'CUDA kernels', kernels from the CUDA perspective. The
+-- first and last kernel are then executed with a single warp or single thread,
+-- and the middle kernel performs the parallel work.
+data PTXKernelPhase env where
+  PTXKernelPhase
+    :: { kernelPhaseObject :: ObjectR (KernelType env)
+       , kernelPhaseLinked :: Lifetime KernelObject
+       , kernelPhaseId     :: {-# UNPACK #-} !ShortByteString
+       }
+    -> PTXKernelPhase env
+
 instance NFData' PTXKernel where
-  rnf' (PTXKernel obj !_ !_ !_ sz !_ s l) = rnf' obj `seq` rnf sz `seq` rnf s `seq` rnf l
+  rnf' (PTXKernel p1 p2 p3 !_ sz !_ !_ s l) =
+    maybe () rnf' p1 `seq` rnf' p2 `seq` maybe () rnf' p3
+      `seq` rnf sz `seq` rnf s `seq` rnf l
+
+instance NFData' PTXKernelPhase where
+  rnf' (PTXKernelPhase obj !_ !_) = rnf' obj
 
 newtype PTXKernelMetadata f =
   PTXKernelMetadata { kernelArgsSize :: Int }
@@ -107,13 +132,21 @@ instance IsKernel PTXKernel where
 
   compileKernel env cluster args = unsafePerformIO $ evalPTX defaultTarget $ do
     ptxCode <- codegen fullName env cluster args
-    dev <- asks ptxDeviceProperties
-    -- TODO: Change simpleLaunchConfig to launchConfig when we use shared memory
-    -- TODO: Also compile initialization and finalization kernels
-    obj <- compile uid (fromString $ fullName) (simpleLaunchConfig dev) (ptxCodeWork ptxCode)
-    obj `seq` return ()
-    linked <- link obj
-    return $ PTXKernel obj linked (fromString $ fullName) uid (ptxCodeSize ptxCode) (ptxCodeKernelMemory ptxCode) detail brief
+
+    phaseInit   <- compilePhase uid 1 `mapM` ptxCodeInit   ptxCode
+    phaseWork   <- compilePhase uid 0  $     ptxCodeWork   ptxCode
+    phaseFinish <- compilePhase uid 2 `mapM` ptxCodeFinish ptxCode
+    
+    return $ PTXKernel
+      phaseInit
+      phaseWork
+      phaseFinish
+      uid
+      (ptxCodeElements ptxCode)
+      (ptxCodeElementsPerThread ptxCode)
+      (ptxCodeKernelMemory ptxCode)
+      detail
+      brief
     where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "_" ++ show uid
@@ -123,15 +156,25 @@ instance IsKernel PTXKernel where
 
   encodeKernel = Left . kernelUID
 
+compilePhase :: UID -> Int -> Module (KernelType env) -> LLVM PTX (PTXKernelPhase env)
+compilePhase uid variant m = do
+  let uid' = hashIncrement (fromIntegral variant) uid
+  dev <- asks ptxDeviceProperties
+  let name = fromString $ moduleName m
+  obj <- compile uid' name (simpleLaunchConfig dev) m
+  obj `seq` return ()
+  linked <- link obj
+  return $ PTXKernelPhase obj linked name
+
 instance PrettyKernel PTXKernel where
   prettyKernel = PrettyKernelFun go
     where
       go :: OpenKernelFun PTXKernel env t -> Adoc
       go (KernelFunLam _ f) = go f
-      go (KernelFunBody (PTXKernel _ _ name _ _ _ "" _))
-        = fromString $ take 32 $ toString name
-      go (KernelFunBody (PTXKernel _ _ name _ _ _ detail brief))
-        = fromString (take 32 $ toString name)
+      go (KernelFunBody (PTXKernel _ phase _ _ _ _ _ "" _))
+        = fromString $ take 32 $ toString $ kernelPhaseId phase
+      go (KernelFunBody (PTXKernel _ phase _ _ _ _ _ detail brief))
+        = fromString (take 32 $ toString $ kernelPhaseId phase)
         <+> flatAlt (group $ line' <> "-- " <> desc)
           ("{- " <> desc <> "-}")
         where desc = group $ flatAlt (fromString brief) (fromString detail)

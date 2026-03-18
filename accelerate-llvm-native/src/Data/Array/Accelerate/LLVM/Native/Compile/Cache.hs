@@ -38,5 +38,5 @@ instance Persistent Native where
          </> "llvmpr-" ++ intercalate "." (map show (toList hostLLVMVersion))
          </> S8.unpack nativeTargetTriple
          </> B8.unpack nativeCPUName
-         </> "meep"
+         </> ""
 

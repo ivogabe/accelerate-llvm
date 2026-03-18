@@ -21,12 +21,18 @@ module Data.Array.Accelerate.LLVM.CodeGen.Loop
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
 
-import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic
+import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Metadata
+import LLVM.AST.Type.Operand
+import LLVM.AST.Type.Representation
+import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction.Atomic
+import LLVM.AST.Type.Instruction.Volatile
+import qualified LLVM.AST.Type.Instruction.RMW as RMW
 
 import Prelude                                                  hiding ( fst, snd, uncurry )
 import Control.Monad
@@ -288,3 +294,59 @@ loopPeelingToAnnotation = \case
   PeelNot         -> []
   PeelConditional -> [LoopPeel]
   PeelGuaranteed  -> [LoopPeel, LoopNonEmpty]
+
+atomicAdd :: MemoryOrdering -> Operand (Ptr Word64) -> Operand Word64 -> CodeGen arch (Operand Word64)
+atomicAdd ordering ptr increment = do
+  instr' $ AtomicRMW numType NonVolatile RMW.Add ptr increment (CrossThread, ordering)
+
+tileRange
+  :: Bool -- ^ Descending
+  -> Operand Int -- ^ Iteration size
+  -> Operand Int -- ^ Tile size
+  -> Operand Int -- ^ Tile count
+  -> Operand Int -- ^ Tile index
+  -> CodeGen arch
+    ( Operand Int -- ^ Absolute tile index. If the loop is descending, this will go from high to low instead of low to high
+    , Operand Int -- ^ Lower item index of this tile
+    , Operand Int -- ^ Upper item index (exclusive) of this tile
+    , Operand Bool -- ^ Whether this tile is full (i.e. its size is equal to the global tile size)
+    )
+tileRange descending size tileSize tileCount tileIdx = do
+  tileIdxAbsolute <-
+    -- For a scanr, convert low-to-high indices to high-to-low indices:
+    -- The first block (with tileIdx 0) should now correspond with the last
+    -- values of the array. We implement that by reversing the tile indices here.
+    if descending then do
+      i <- sub numType (OP_Int tileCount) (OP_Int tileIdx)
+      OP_Int j <- sub numType i (liftInt 1)
+      return j
+    else
+      return tileIdx
+  OP_Int lower <- mul numType (OP_Int tileIdxAbsolute) (OP_Int tileSize)
+  upper' <- add numType (OP_Int lower) (OP_Int tileSize)
+  OP_Int upper <- A.min singleType upper' (OP_Int size)
+  OP_Bool full <- lte singleType upper' (OP_Int size)
+  return (tileIdxAbsolute, lower, upper, full)
+
+mask
+  :: forall arch a.
+     TypeR a
+  -> Operand Bool
+  -> CodeGen arch (Operands a)
+  -> CodeGen arch (Operands a)
+-- If the mask is already known at compile time:
+mask tp (ConstantOperand (BooleanConstant bool)) whenTrue
+  | bool = whenTrue
+  | otherwise = return $ undefs tp
+mask tp condition whenTrue = do
+  blockEntry <- getBlock
+  blockTrue  <- newBlock "mask.true"
+  blockExit  <- newBlock "mask.exit"
+
+  _ <- cbr (OP_Bool condition) blockTrue blockExit
+  
+  setBlock blockTrue
+  result <- whenTrue
+
+  _ <- br blockExit
+  phi tp [(result, blockTrue), (undefs tp, blockEntry)] 
