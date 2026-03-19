@@ -1939,33 +1939,47 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
   (_, sz) <- computeSize structVars localVars shape sh (liftInt 1)
 
   let
-    loopBuffer :: forall s. Var GroundR env s -> CodeGen Native ()
-    loopBuffer (Var tp idx)
-      | GroundRbuffer t <- tp = do
-          let getBufferValue index = do
-                ptr   <- getPtr structVars idx
-                ptr'  <- instr' $ Load NonVolatile ptr Nothing
-                ptr'' <- instr' $ GetElementPtr $ GEP1 ptr' $ op scalarTypeInt index
-                load NonVolatile t ptr'' Nothing
+    printTupleContents :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
+    printTupleContents b index = case b of
+      TupRunit -> return ()
+      TupRsingle _ -> printAtIndex b index
+      TupRpair TupRunit b2 -> printAtIndex b2 index
+      TupRpair b1 b2 -> do
+        printTupleContents b1 index
+        _ <- putchar (liftInt $ fromEnum ',')
+        printAtIndex b2 index
+        return ()
 
-          value <- getBufferValue (liftInt 0)
-          _      <- printValue t value
-          imapFromStepTo [] (liftInt 1) (liftInt 1) sz $ \i -> do
-              value  <- getBufferValue i
-              _      <- putchar (liftInt $ fromEnum ',')
-              _      <- printValue t value
-              return ()
-      | otherwise = return ()
+    printAtIndex :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
+    printAtIndex b index = case b of
+      TupRunit -> return ()
+      TupRsingle (Var tp idx)
+        | GroundRbuffer t <- tp -> do
+            ptr   <- getPtr structVars idx
+            ptr'  <- instr' $ Load NonVolatile ptr Nothing
+            ptr'' <- instr' $ GetElementPtr $ GEP1 ptr' $ op scalarTypeInt index
+            value <- load NonVolatile t ptr'' Nothing
+            _ <- printValue t value
+            return ()
+        | otherwise -> return ()
+      TupRpair b1 b2 -> do
+        _ <- putchar (liftInt $ fromEnum '(')
+        printTupleContents b1 index
+        _ <- putchar (liftInt $ fromEnum ',')
+        printAtIndex b2 index
+        _ <- putchar (liftInt $ fromEnum ')')
+        return ()
 
   printShape shape
   printString "(Z :. "
   putInt sz
   printString ") ["
 
-  foldMapMTupR loopBuffer buffer -- There can be mulitple buffers so we have to check them all
-  return ()
+  printAtIndex buffer (liftInt 0)
+  imapFromStepTo [] (liftInt 1) (liftInt 1) sz $ \i -> do
+      _ <- putchar (liftInt $ fromEnum ',') 
+      printAtIndex buffer i
 
--- TODO(Mike): Print the value to the console
 printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%d" value
