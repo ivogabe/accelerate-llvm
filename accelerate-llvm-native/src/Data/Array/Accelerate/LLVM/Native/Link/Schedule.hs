@@ -32,6 +32,7 @@ import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Array.Buffer
+import qualified Data.Array.Accelerate.Debug.Internal as Debug
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Analysis.Match ((:~:)(..))
 import Data.Array.Accelerate.LLVM.CodeGen.Base
@@ -861,13 +862,6 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       let blockNext = newBlockNamed $ blockName nextBlock
       args <- stateField fullState argsTp $ tupleLeft stateIdx
 
-      let name = kernelName kernel
-      let color = colorFromHash (kernelHash kernel)
-
-      tracySrclocName <- source_location_data name "-" "-" 0 (fromIntegral color)
-      let tracySrclocType = PtrPrimType (NamedPrimType "___tracy_source_location_data" locationDataType) defaultAddrSpace
-      let tracySrclocStructPtr = ConstantOperand $ GlobalReference (PrimType tracySrclocType) tracySrclocName
-
       -- Fill arguments struct
       -- Header
       workFnPtr' <- instr' $ GetElementPtr $ gepStruct kernelTp imports (tupleLeft importsIdx)
@@ -883,8 +877,18 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) Nothing -- active_threads
       workIdxPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 1) Nothing -- work_index
-      tracySrclocPtr <- instr' $ GetElementPtr $ gepStruct tracySrclocType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile tracySrclocPtr tracySrclocStructPtr Nothing
+
+      when Debug.tracyIsEnabled $ do
+        let name = kernelName kernel
+        let color = colorFromHash (kernelHash kernel)
+
+        tracySrclocName <- source_location_data name "-" "-" 0 (fromIntegral color)
+        let tracySrclocType = PtrPrimType (NamedPrimType "___tracy_source_location_data" locationDataType) defaultAddrSpace
+        let tracySrclocStructPtr = ConstantOperand $ GlobalReference (PrimType tracySrclocType) tracySrclocName
+
+        tracySrclocPtr <- instr' $ GetElementPtr $ gepStruct tracySrclocType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+        _ <- instr' $ Store NonVolatile tracySrclocPtr tracySrclocStructPtr Nothing
+        return ()
 
       -- Arguments
       args' <- instr' $ GetElementPtr $ gepStruct argsTp' args $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
