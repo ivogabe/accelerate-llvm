@@ -8,7 +8,6 @@
 #include "tracy.h"
 #include <unistd.h>
 #include <sched.h>
-#include <string.h>
 
 struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .accelerate_buffer_alloc = accelerate_buffer_alloc,

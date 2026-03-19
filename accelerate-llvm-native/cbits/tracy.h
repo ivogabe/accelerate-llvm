@@ -1,6 +1,4 @@
 #include <flag_tracy.h> // provided by accelerate via `install-includes`
-#include <string.h>
-#include <stdlib.h>
 
 #ifdef ACCELERATE_TRACY
 
@@ -24,17 +22,6 @@ typedef enum {
   COLOR_NORMAL,
   COLOR_LIGHT,
 } ColorVariant;
-
-uint32_t get_color_variant(uint32_t color, ColorVariant variant);
-
-#define _CONCAT(a, b) a##b
-#define CONCAT(a, b) _CONCAT(a, b)
-
-#define TRACY_ZONE_BEGIN(ctx, tracy_srcloc, color_variant)  \
-  TracyCZoneCtx ctx = ___tracy_emit_zone_begin(tracy_srcloc, 1); \
-  ___tracy_emit_zone_color(ctx, get_color_variant(tracy_srcloc->color, color_variant))
-
-#define TRACY_ZONE_END(ctx) ___tracy_emit_zone_end(ctx)
 
 uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
 
@@ -64,6 +51,15 @@ uint32_t get_color_variant(uint32_t color, ColorVariant variant) {
          ((g & 0xFF) << 8)  |
          ((b & 0xFF));
 }
+
+#define _CONCAT(a, b) a##b
+#define CONCAT(a, b) _CONCAT(a, b)
+
+#define TRACY_ZONE_BEGIN(ctx, tracy_srcloc, color_variant)  \
+  TracyCZoneCtx ctx = ___tracy_emit_zone_begin(tracy_srcloc, 1); \
+  ___tracy_emit_zone_color(ctx, get_color_variant(tracy_srcloc->color, color_variant))
+
+#define TRACY_ZONE_END(ctx) ___tracy_emit_zone_end(ctx)
 
 #else
 
