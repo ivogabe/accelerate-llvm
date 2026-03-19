@@ -95,10 +95,10 @@ putString msg = do
        (ArgumentsCons strPtr [] ArgumentsNil)
        []
 
-printString :: String -> CodeGen Native (Operands Int)
+printString :: String -> CodeGen Native ()
 printString msg = do
   mapM_ (putchar . liftInt . fromEnum) msg
-  return (liftInt 0)
+  
 -- TODO(Mike): vragen aan Ivo waarom dit niet werkt?
 -- printString msg = do 
 --   (nm, l) <- global_string msg

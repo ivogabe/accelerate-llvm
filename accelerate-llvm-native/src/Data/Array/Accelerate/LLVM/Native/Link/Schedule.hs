@@ -1064,9 +1064,9 @@ convert inAwhile (Effect (Atrace msg t) next)
       varsInStruct = varsInStruct next1,
       maySuspend = maySuspend next1,
       phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-        _ <- printString (unpack msg ++ ": [")
-        _ <- putArrayDescriptors structVars localVars t -- TODO(Mike): Array ook schrijven naar console
-        _ <- printString "]\n"
+        printString (unpack msg ++ ": ")
+        putArrayDescriptors structVars localVars t -- TODO(Mike): Array ook schrijven naar console
+        printString "]\n"
         phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock
     }
 -- Bindings
@@ -1952,10 +1952,15 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
           _      <- printValue t value
           imapFromStepTo [] (liftInt 1) (liftInt 1) sz $ \i -> do
               value  <- getBufferValue i
-              _      <- printString ", "
+              _      <- putchar (liftInt $ fromEnum ',')
               _      <- printValue t value
               return ()
       | otherwise = return ()
+
+  printShape shape
+  printString "(Z :. "
+  putInt sz
+  printString ") ["
 
   foldMapMTupR loopBuffer buffer -- There can be mulitple buffers so we have to check them all
   return ()
@@ -1966,16 +1971,22 @@ printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = 
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%d" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt16))) value = printf "%d" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt32))) value = printf "%d" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt64))) value = printf "%d" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt64))) value = printf "%ld" value
 
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord))) value = printf "%u" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord8))) value = printf "%u" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord16))) value = printf "%u" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord32))) value = printf "%u" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord64))) value = printf "%u" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord64))) value = printf "%lu" value
 
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeHalf))) value = printf "%f" value
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeFloat))) value = printf "%f" value
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeDouble))) value = printf "%lf" value
 
 printValue (VectorScalarType _) _ = return (liftInt 0) -- TODO(Mike): Kijken hoe ik dit ga oplossen
+
+printShape :: ShapeR sh -> CodeGen Native()
+printShape ShapeRz = printString "Scalar "
+printShape (ShapeRsnoc ShapeRz) = printString "Vector "
+printShape (ShapeRsnoc (ShapeRsnoc ShapeRz)) = printString "Matrix "
+printShape _ = printString "Array "
