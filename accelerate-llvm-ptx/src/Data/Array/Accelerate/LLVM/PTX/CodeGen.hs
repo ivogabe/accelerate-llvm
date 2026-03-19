@@ -434,11 +434,10 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   -- Code within the tile loop: perform reduction
   (\_ (_, smemWarp) _ envs -> do
     dev <- liftCodeGen $ asks ptxDeviceProperties
-    let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
     warpValue <- reduceWarp
-      dev tp identity' fun'
+      dev tp fun'
       (OP_Int32 <$> envsGpuWarpActiveThreads envs)
       x
     perWarp $ do
@@ -472,7 +471,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     aggregate <-
       if foldOrScan == IsFold then
         -- Reduce all per-warp values in smem to a single value.
-        reduceFromSMem dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
+        reduceFromSMem dev tp fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
       else
         -- Perform an exclusive over the per-warp values in smem,
         -- and compute the total aggregate (reduced value).
@@ -569,7 +568,6 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   -- Code in next tile loop
   (if foldOrScan == IsFold then Nothing else Just (analysis, \(_, smemWarp) _ envs -> do
     dev <- liftCodeGen $ asks ptxDeviceProperties
-    let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
 
@@ -578,7 +576,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
         -- If there is a seed, then each block and each warp will have a
         -- prefix.
         accum <- tupleLoad tp smemWarp
-        scanWarp dir inclusiveness dev tp (Just $ return accum) identity' fun'
+        scanWarp dir inclusiveness dev tp (Just (False, return accum)) fun'
           (OP_Int32 <$> envsGpuWarpActiveThreads envs) x
       Nothing
         | ScanExclusive <- inclusiveness -> internalError "Exclusive scans (scanl, scanl', scanr') should have a seed"
@@ -606,7 +604,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
             )
             (return x)
           
-          scanWarp dir inclusiveness dev tp Nothing identity' fun'
+          scanWarp dir inclusiveness dev tp Nothing fun'
             (OP_Int32 <$> envsGpuWarpActiveThreads envs) y
 
     codeElement envs scanned
