@@ -130,7 +130,7 @@ data CodeGenContext = CodeGenContext
 
 newtype CodeGen target a = CodeGen
   { runCodeGen :: ReaderT CodeGenContext (StateT CodeGenState (LLVM target)) a }
-  deriving (Functor, Applicative, Monad, MonadReader CodeGenContext, MonadState CodeGenState, MonadIO)
+  deriving (Functor, Applicative, Monad, MonadReader CodeGenContext, MonadState CodeGenState)
 
 liftCodeGen :: LLVM arch a -> CodeGen arch a
 liftCodeGen = CodeGen . lift . lift

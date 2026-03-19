@@ -12,7 +12,6 @@ struct ___tracy_source_location_data
     uint32_t line;
     uint32_t color;
 };
-typedef struct ___tracy_source_location_data TracySrcLocData;
 
 typedef const void* TracyCZoneCtx;
 
@@ -28,31 +27,12 @@ typedef enum {
 
 uint32_t get_color_variant(uint32_t color, ColorVariant variant);
 
-// TODO: dont cast to uint64_t use void * instead
-uint64_t accelerate_tracy_srcloc_alloc() {
-  TracySrcLocData *ptr = malloc(sizeof(TracySrcLocData));
-  return (uint64_t)ptr;
-}
-
-void accelerate_tracy_srcloc_free(uint64_t ptr) {
-  free((void *)ptr);
-}
-
-void accelerate_tracy_srcloc_fill(uint64_t srcloc, char *name, uint32_t color) {
-  struct ___tracy_source_location_data *ptr = (void *)srcloc;
-  ptr->name = name;
-  ptr->function = "-";
-  ptr->file = "-";
-  ptr->line = 1;
-  ptr->color = color;
-}
-
 #define _CONCAT(a, b) a##b
 #define CONCAT(a, b) _CONCAT(a, b)
 
 #define TRACY_ZONE_BEGIN(ctx, tracy_srcloc, color_variant)  \
-  TracyCZoneCtx ctx = ___tracy_emit_zone_begin((void *)tracy_srcloc, 1); \
-  ___tracy_emit_zone_color(ctx, get_color_variant(((TracySrcLocData *)tracy_srcloc)->color, color_variant))
+  TracyCZoneCtx ctx = ___tracy_emit_zone_begin(tracy_srcloc, 1); \
+  ___tracy_emit_zone_color(ctx, get_color_variant(tracy_srcloc->color, color_variant))
 
 #define TRACY_ZONE_END(ctx) ___tracy_emit_zone_end(ctx)
 
@@ -86,11 +66,6 @@ uint32_t get_color_variant(uint32_t color, ColorVariant variant) {
 }
 
 #else
-
-// TODO: maybe remove the ccall in haskell when tracy flag disabled?
-uint64_t accelerate_tracy_srcloc_alloc() { return 0; }
-void accelerate_tracy_srcloc_free(uint64_t ptr) { }
-void accelerate_tracy_srcloc_fill(uint64_t srcloc, char *name, uint32_t color) { }
 
 #define TRACY_ZONE_BEGIN(ctx, name, color)
 #define TRACY_ZONE_END(ctx)
