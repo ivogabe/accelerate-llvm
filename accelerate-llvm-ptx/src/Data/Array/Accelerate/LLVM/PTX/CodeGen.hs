@@ -228,7 +228,7 @@ codegenDim1 name env flatCluster
         (_, lower, upper, full) <- tileRange (isDescending direction) (op TypeInt size) tileSize tileCount tileIdx
 
         -- Compute the number of warps that are active
-        OP_Int32 activeWarps <- do
+        (OP_Int32 groupCount, OP_Int32 activeWarps) <- do
           size <- A.sub numType (OP_Int upper) (OP_Int lower)
           -- ceil(size/warpSize) = (size + warpSize - 1) / warpSize
           a <- A.sub numType size (OP_Int $ integral TypeInt 1) >>= A.fromIntegral TypeInt numType
@@ -242,7 +242,8 @@ codegenDim1 name env flatCluster
           -- size, so we don't have to worry about rounding here.
           threadblockSize <- blockDim
           count2 <- A.quot TypeInt32 threadblockSize warpSz
-          A.min singleType count1 count2
+          count <- A.min singleType count1 count2
+          return (count1, count)
 
         let envs3 = envs2{
             envsTileIndex = OP_Int tileIdx,
@@ -258,12 +259,13 @@ codegenDim1 name env flatCluster
 
           ptBefore tileLoop envs3
           let peel = gpuLoopPeel (ptAnalysis tileLoop) && null loops''
-          loopInThreadblock (isDescending direction) peel elementsPerThread lower upper full $ \active isFirst activeInWarp idxForThread localIdx globalIdx -> do
+          loopInThreadblock (isDescending direction) peel elementsPerThread lower upper full groupCount activeWarps $ \isFirst activeInWarp idxForThread globalIdx -> do
+            localIdx <- A.sub numType (OP_Int globalIdx) (OP_Int lower)
             let envs4 = envs3{
                 envsLoopDepth = 1,
                 envsIdx = Env.partialUpdate globalIdx idxVar $ envsIdx envs3,
                 envsIsFirst = OP_Bool isFirst,
-                envsTileLocalIndex = OP_Int localIdx,
+                envsTileLocalIndex = localIdx,
                 envsTileStorageIndex = OP_Int idxForThread,
                 envsGpuWarpActiveThreads = activeInWarp
               }
