@@ -43,6 +43,7 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
   __threadfence_block, __threadfence_grid,
 
   -- Warp shuffle instructions
+  __shfl, ShuffleOp(..),
   __shfl_up, __shfl_down, __shfl_idx, __broadcast,
 
   -- Shared memory
@@ -278,16 +279,10 @@ __syncwarp = __syncwarp_mask (liftWord32 0xffffffff)
 --
 __syncwarp_mask :: HasCallStack => Operands Word32 -> CodeGen PTX ()
 __syncwarp_mask mask = do
-  llvmver <- getLLVMversion
-  dev <- liftCodeGen $ asks ptxDeviceProperties
-  case (computeCapability dev >= Compute 7 0, llvmver >= 6) of
-    (True, True) ->
-      void $ call
-        (lamUnnamed primType $ Body VoidType (Just Tail) "llvm.nvvm.bar.warp.sync")
-        (ArgumentsCons (op primType mask) [] ArgumentsNil)
-        [NoUnwind, NoDuplicate, Convergent]
-    (True, False) -> internalError "LLVM-6.0 or above is required for Volta devices and later"
-    (False, _) -> return ()
+  void $ call
+    (lamUnnamed primType $ Body VoidType (Just Tail) "llvm.nvvm.bar.warp.sync")
+    (ArgumentsCons (op primType mask) [] ArgumentsNil)
+    [NoUnwind, NoDuplicate, Convergent]
 
 
 -- | Ensure that all writes to shared and global memory before the call to
@@ -360,17 +355,17 @@ data ShuffleOp
 -- | Each thread gets the value provided by lower threads
 --
 __shfl_up :: TypeR a -> Maybe (Operand Word32) -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
-__shfl_up = shfl Up
+__shfl_up = __shfl Up
 
 -- | Each thread gets the value provided by higher threads
 --
 __shfl_down :: TypeR a -> Maybe (Operand Word32) -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
-__shfl_down  = shfl Down
+__shfl_down  = __shfl Down
 
 -- | shfl_idx takes an argument representing the source lane index.
 --
 __shfl_idx :: TypeR a -> Maybe (Operand Word32) -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
-__shfl_idx = shfl Idx
+__shfl_idx = __shfl Idx
 
 -- | Distribute the value from lane 0 across the warp
 --
@@ -378,13 +373,13 @@ __broadcast :: TypeR a -> Maybe (Operand Word32) -> Operands a -> CodeGen PTX (O
 __broadcast aR mask a = __shfl_idx aR mask a (liftWord32 0)
 
 
-shfl :: ShuffleOp
+__shfl :: ShuffleOp
      -> TypeR a
      -> Maybe (Operand Word32)
      -> Operands a
      -> Operands Word32
      -> CodeGen PTX (Operands a)
-shfl sop tR mask val delta = go tR val
+__shfl sop tR mask val delta = go tR val
   where
     delta' :: Operand Word32
     delta' = op integralType delta

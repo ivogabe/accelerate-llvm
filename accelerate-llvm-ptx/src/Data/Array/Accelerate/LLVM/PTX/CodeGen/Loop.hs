@@ -138,6 +138,7 @@ loopInThreadblock descending peel perThread lower upper isFull groupCount active
     let ann = [Loop.LoopNonEmpty] ++ [Loop.LoopPeel | peel]
 
     Loop.loopWith ann descending (OP_Int $ integral TypeInt 0) (OP_Int $ integral TypeInt perThread) $ \(OP_Bool isFirstForThread) idxForThread -> do
+      __syncwarp
       -- TODO: Decide whether the indices within the warp should be reversed as well, for descending loops
       OP_Int globalIdx <- A.mul numType idxForThread warpSz >>= A.add numType laneIdx >>= A.add numType startIdx
       body isFirstForThread Nothing (op TypeInt idxForThread) globalIdx
@@ -173,6 +174,7 @@ loopInThreadblock descending peel perThread lower upper isFull groupCount active
       let ann = [Loop.LoopPeel | peel]
 
       Loop.loopWith ann descending (OP_Int $ integral TypeInt 0) warpGroupCount $ \(OP_Bool isFirstForThread) idxForThread -> do
+        __syncwarp
         -- TODO: What do we do for descending loops?
         warpFirst <- A.mul numType idxForThread warpSz >>= A.add numType startIdx
         OP_Int globalIdx <- A.add numType warpFirst laneIdx

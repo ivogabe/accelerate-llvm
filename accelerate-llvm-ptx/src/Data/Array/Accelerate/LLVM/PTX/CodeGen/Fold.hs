@@ -517,7 +517,7 @@ reduceWarp
     :: forall e. DeviceProperties
     -> TypeR e
     -> IRFun2 PTX (e -> e -> e)                  -- ^ combination function
-    -> Maybe (Operands Int32)                   -- ^ number of items that will be reduced by this warp, otherwise all lanes are active
+    -> Maybe (Operands Int32)                    -- ^ number of items that will be reduced by this warp, otherwise all lanes are active
     -> Operands e                                -- ^ this thread's input value
     -> CodeGen PTX (Operands e)                  -- ^ final result
 reduceWarp dev typer combine size value = do

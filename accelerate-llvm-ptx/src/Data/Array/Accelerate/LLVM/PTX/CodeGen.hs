@@ -478,7 +478,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
         -- Perform an exclusive over the per-warp values in smem,
         -- and compute the total aggregate (reduced value).
         -- This is executed on a single warp.
-        scanFromSMem dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
+        scanFromSMem dir dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
 
     -- Share aggregate
     prefix <- perWarp' tp $ do
@@ -545,7 +545,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           action' =
             -- If there is no identity, do not do anything with the first (undefined) value
             if isNothing identity then
-              A.when (A.gt singleType lane $ A.liftInt32 0) action
+              A.when (firstLane dir dev (OP_Int32 <$> envsGpuWarpActiveThreads envs) >>= A.neq singleType lane) action
             else
               -- Otherwise, handle all values
               action
@@ -590,7 +590,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           -- When we then scan over the values in this warp, the prefix is part
           -- of each value in the warp
           lane <- laneId
-          y <- A.ifThenElse (tp, A.eq singleType lane (A.liftInt32 0))
+          y <- A.ifThenElse (tp, firstLane dir dev (OP_Int32 <$> envsGpuWarpActiveThreads envs) >>= A.eq singleType lane)
             ( do
               -- The first item does not have a prefix
               isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
