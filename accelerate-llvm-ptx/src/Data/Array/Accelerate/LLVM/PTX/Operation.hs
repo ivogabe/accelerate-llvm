@@ -147,12 +147,12 @@ instance LowerAcc PTXOp where
   mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec PTXBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec PTXGenerate    (a :>: b :>:             ArgsNil)
-  {- mkScan dir f (Just seed) i@(ArgArray In (ArrayR shr ty) sh buf) o
+  mkScan dir f (Just seed) i@(ArgArray In (ArrayR shr ty) sh buf) o
     = Exec (PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
   mkScan dir f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
     = Exec (PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
-    = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)-}
+    = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
   mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
     | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord32
     = aletUnique lhs 

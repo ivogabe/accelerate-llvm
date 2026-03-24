@@ -328,25 +328,27 @@ tileRange descending size tileSize tileCount tileIdx = do
   OP_Bool full <- lte singleType upper' (OP_Int size)
   return (tileIdxAbsolute, lower, upper, full)
 
-mask
+masked
   :: forall arch a.
      TypeR a
-  -> Operand Bool
+  -> Operands Bool
   -> CodeGen arch (Operands a)
   -> CodeGen arch (Operands a)
 -- If the mask is already known at compile time:
-mask tp (ConstantOperand (BooleanConstant bool)) whenTrue
+masked tp (OP_Bool (ConstantOperand (BooleanConstant bool))) whenTrue
   | bool = whenTrue
   | otherwise = return $ undefs tp
-mask tp condition whenTrue = do
+masked tp condition whenTrue = do
   blockEntry <- getBlock
   blockTrue  <- newBlock "mask.true"
   blockExit  <- newBlock "mask.exit"
 
-  _ <- cbr (OP_Bool condition) blockTrue blockExit
+  _ <- cbr condition blockTrue blockExit
   
   setBlock blockTrue
   result <- whenTrue
-
+  blockTrueEnd <- getBlock
   _ <- br blockExit
-  phi tp [(result, blockTrue), (undefs tp, blockEntry)] 
+
+  setBlock blockExit
+  phi tp [(result, blockTrueEnd), (undefs tp, blockEntry)] 

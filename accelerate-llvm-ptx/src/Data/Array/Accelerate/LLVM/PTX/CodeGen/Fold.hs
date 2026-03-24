@@ -508,23 +508,25 @@ reduceBlock dev tp combine size = warpReduce >=> warpAggregate
 -- Efficient warp-wide reduction using shared memory. The aggregate reduction
 -- value for the warp is stored in thread lane zero.
 --
+-- This function may be used under divergent control flow. The 'size' argument
+-- specifies how many lanes/threads are active in this warp. The first 'size'
+-- threads must be active. When 'size' is Nothing, all threads are assumed to
+-- be active.
+--
 reduceWarp
     :: forall e. DeviceProperties
     -> TypeR e
-    -> Maybe (IRExp PTX e)                       -- ^ identity value
     -> IRFun2 PTX (e -> e -> e)                  -- ^ combination function
-    -> Maybe (Operands Int32)                    -- ^ number of items that will be reduced by this warp, otherwise all lanes are valid
+    -> Maybe (Operands Int32)                    -- ^ number of items that will be reduced by this warp, otherwise all lanes are active
     -> Operands e                                -- ^ this thread's input value
     -> CodeGen PTX (Operands e)                  -- ^ final result
-reduceWarp dev typer (Just identity) combine (Just size) = \value -> do
-  -- If not all lanes are active, and we know an identity value,
-  -- then make all lanes active and use the identity value in the previously inactive lanes.
-  lane  <- laneId
-  valid <- A.lt singleType lane (liftInt32 (P.fromIntegral (CUDA.warpSize dev)))
-  identity' <- identity
-  value' <- select typer valid value identity'
-  reduceWarp dev typer (Just identity) combine Nothing value
-reduceWarp dev typer _ combine size = reduce 0
+reduceWarp dev typer combine size value = do
+  mask <- case size of
+    Nothing -> return Nothing
+    Just sz -> do
+      OP_Word32 mask <- A.fromIntegral TypeInt32 numType sz >>= maskTrailing TypeWord32
+      return $ Just mask
+  reduce mask 0 value
   where
     log2 :: Double -> Double
     log2  = P.logBase 2
@@ -540,37 +542,39 @@ reduceWarp dev typer _ combine size = reduce 0
         Just n  -> A.lt singleType i n
 
     -- Unfold the reduction as a recursive code generation function.
-    reduce :: Int -> Operands e -> CodeGen PTX (Operands e)
-    reduce step x
+    reduce :: Maybe (Operand Word32) -> Int -> Operands e -> CodeGen PTX (Operands e)
+    reduce mask step x
       | step > steps = return x
       | otherwise     = do
           let
               offset :: (Bits i, Integral i) => i
               offset = 1 `P.shiftL` step
 
-          y  <- __shfl_down typer x (liftWord32 offset)
+          y  <- __shfl_down typer mask x (liftWord32 offset)
           x' <- if (typer, valid offset)
                   then app2 combine x y
                   else return x
-          reduce (step + 1) x'
+          reduce mask (step + 1) x'
 
 -- In a warp, reduce the values from shared memory to a single value.
+-- The first 'size' threads must be active
 reduceFromSMem
     :: forall e. DeviceProperties
     -> TypeR e
-    -> Maybe (IRExp PTX e)
     -> IRFun2 PTX (e -> e -> e)
     -> Int
     -> Operand Int32 -- Number of warps = number of used entries in shared memory
     -> TupR Operand (Distribute Ptr (Distribute SizedArray (BufferEltR e)))
     -> CodeGen PTX (Operands e)
-reduceFromSMem dev tp identity fun maxSize size smem
+reduceFromSMem dev tp fun maxSize size smem
   | maxSize /= CUDA.warpSize dev = internalError "Expected that the maximum number of warps is equal to the warp size"
   | otherwise = do
     lane <- laneId
-    ptr <- tupleArrayGep tp smem lane
-    value <- tupleLoad tp ptr
-    reduceWarp dev tp identity fun (Just $ OP_Int32 size) value
+    active <- A.lt singleType lane (OP_Int32 size)
+    masked tp active $ do
+      ptr <- tupleArrayGep tp smem lane
+      value <- tupleLoad tp ptr
+      reduceWarp dev tp fun (Just $ OP_Int32 size) value
 
 {-
 

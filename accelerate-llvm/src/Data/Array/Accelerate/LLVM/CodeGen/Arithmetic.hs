@@ -332,6 +332,14 @@ countTrailingZeros i x
        r <- fromIntegral i numType c
        return r
 
+-- Creates a mask where 'x' trailing bits are one.
+maskTrailing :: IntegralType a -> Operands a -> CodeGen arch (Operands a)
+maskTrailing tp x
+  | IntegralDict <- integralDict tp = do
+    let tp' = TupRsingle $ SingleScalarType $ NumSingleType $ IntegralNumType tp
+    a <- binop ShiftL tp (lift tp' 1) x
+    sub (IntegralNumType tp) a (lift tp' 1)
+
 
 -- Operators from Fractional and Floating
 -- --------------------------------------
