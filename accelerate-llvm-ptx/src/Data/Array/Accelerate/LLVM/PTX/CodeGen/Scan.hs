@@ -5,6 +5,7 @@
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE ViewPatterns        #-}
@@ -20,7 +21,8 @@
 
 module Data.Array.Accelerate.LLVM.PTX.CodeGen.Scan (
 
-  scanWarp, scanFromSMem
+  scanWarp, scanFromSMem,
+  firstLane, lastLane
 
 ) where
 
@@ -1243,27 +1245,30 @@ scanWarp
     -> ScanInclusiveness
     -> DeviceProperties                        -- ^ properties of the target device
     -> TypeR e
-    -> Maybe (IRExp PTX e)                     -- ^ Seed value
-    -> Maybe (IRExp PTX e)                     -- ^ Identity value
+    -> Maybe (Bool, IRExp PTX e)               -- ^ Seed value, and whether the seed is the identity value
     -> IRFun2 PTX (e -> e -> e)                -- ^ combination function
-    -> Maybe (Operands Int32)                  -- ^ number of items that will be reduced by this warp, otherwise all lanes are valid
+    -> Maybe (Operands Int32)                  -- ^ number of items that will be reduced by this warp, when Nothing all lanes are active
     -> Operands e                              -- ^ calling thread's input element
     -> CodeGen PTX (Operands e, Operands e)    -- ^ the scanned values and the reduced value. The latter is the same on all lanes of the warp.
--- In an inclusive scan without an identity or seed value the first value is undefined.
-scanWarp dir inclusiveness dev tp seed (Just identity) combine (Just size) = \value -> do
-  -- If not all lanes are active, and we know an identity value,
-  -- then make all lanes active and use the identity value in the previously inactive lanes.
-  lane  <- laneId
-  valid <- A.lt singleType lane size
-  identity' <- identity
-  value' <- select tp valid value identity'
-  scanWarp dir inclusiveness dev tp seed (Just identity) combine Nothing value'
-scanWarp dir ScanExclusive dev tp seed identity combine size = \value -> do
+-- In an inclusive scan without a seed the first value is undefined.
+scanWarp dir ScanExclusive dev tp seed combine size value = do
+  mask <- case size of
+    Nothing -> return Nothing
+    Just sz -> do
+      OP_Word32 mask <- A.fromIntegral TypeInt32 numType sz >>= maskTrailing TypeWord32
+      return $ Just mask
+
   lane <- laneId
-  isFirst <- A.eq singleType lane (liftInt32 0)
+  isFirst <- firstLane dir dev size >>= A.eq singleType lane
+
   (value', seed') <- case seed of
     Nothing -> return (value, Nothing)
-    Just s -> do
+    Just (True, s) -> do
+      -- Seed is an identity value, so we don't need to combine it with the
+      -- first value. We do need the seed, as the first lane of this exclusive
+      -- scan needs this value.
+      return (value, Just s)
+    Just (False, s) -> do
       OP_Pair value' seed' <- A.ifThenElse (TupRpair tp tp, return isFirst)
         ( do
           seed' <- s
@@ -1275,9 +1280,9 @@ scanWarp dir ScanExclusive dev tp seed identity combine size = \value -> do
         ( return $ OP_Pair value $ undefs tp
         )
       return (value', Just $ return seed')
-  (inclusive, reduced) <- scanWarp dir ScanInclusive dev tp Nothing identity combine size value'
-  exclusive <- __shfl_up tp inclusive (liftWord32 1)
-  case seed' <|> identity of
+  (inclusive, reduced) <- scanWarp dir ScanInclusive dev tp Nothing combine size value'
+  exclusive <- __shfl (shuffleOp dir) tp mask inclusive (liftWord32 1)
+  case seed' of
     Nothing ->
       -- If there is no identity or seed, then the first value is undefined.
       -- Hence we don't need to 'fix' anything there.
@@ -1287,9 +1292,10 @@ scanWarp dir ScanExclusive dev tp seed identity combine size = \value -> do
       -- Change value of lane zero to the seed or identity
       result <- select tp isFirst seed''' exclusive
       return (result, reduced)
-scanWarp dir ScanInclusive dev tp (Just seed) identity combine size = \value -> do
+scanWarp dir ScanInclusive dev tp (Just (False, seed)) combine size value = do
+  -- Inclusive scan with a seed, that is not the identity value.
   lane <- laneId
-  value' <- A.ifThenElse (tp, A.eq singleType lane (liftInt32 0))
+  value' <- A.ifThenElse (tp, firstLane dir dev size >>= A.eq singleType lane)
     ( do
       seed' <- seed
       value' <- case dir of
@@ -1299,8 +1305,17 @@ scanWarp dir ScanInclusive dev tp (Just seed) identity combine size = \value -> 
     )
     ( return value
     )
-  scanWarp dir ScanInclusive dev tp Nothing identity combine size value'
-scanWarp dir ScanInclusive dev tp Nothing _ combine size = scan 0
+  scanWarp dir ScanInclusive dev tp Nothing combine size value'
+scanWarp dir ScanInclusive dev tp (Just (True, _)) combine size value =
+  -- An inclusive with an identity value as seed can ignore the seed.
+  scanWarp dir ScanInclusive dev tp Nothing combine size value
+scanWarp dir ScanInclusive dev tp Nothing combine size value = do
+  mask <- case size of
+    Nothing -> return Nothing
+    Just sz -> do
+      OP_Word32 mask <- A.fromIntegral TypeInt32 numType sz >>= maskTrailing TypeWord32
+      return $ Just mask
+  scan mask 0 value
   where
     log2 :: Double -> Double
     log2 = P.logBase 2
@@ -1309,53 +1324,62 @@ scanWarp dir ScanInclusive dev tp Nothing _ combine size = scan 0
     steps = P.floor (log2 (P.fromIntegral (CUDA.warpSize dev)))
 
     -- Unfold the scan as a recursive code generation function
-    scan :: Int -> Operands e -> CodeGen PTX (Operands e, Operands e)
-    scan step x
+    scan :: Maybe (Operand Word32) -> Int -> Operands e -> CodeGen PTX (Operands e, Operands e)
+    scan mask step x
       | step >= steps = do
         -- x is the scanned value. Since this is an inclusive scan,
         -- the last lane has the reduced value of all inputs.
-        lastLane <- case size of
-          Just sz -> A.sub numType sz (liftInt32 1) >>= A.fromIntegral integralType numType
-          Nothing -> return $ liftWord32 $ P.fromIntegral (CUDA.warpSize dev) - 1
-        reduced <- __shfl_idx tp x lastLane
+        reduced <- lastLane dir dev size >>= A.fromIntegral TypeInt32 numType >>= __shfl_idx tp mask x
         return (x, reduced)
       | otherwise     = do
           let offset = 1 `P.shiftL` step
 
           -- share partial result through shared memory buffer
-          y    <- __shfl_up tp x (liftWord32 offset)
+          y    <- __shfl (shuffleOp dir) tp mask x (liftWord32 offset)
           lane <- laneId
 
           -- check whether this thread needs to do anything
-          let condition = A.gte singleType lane (liftInt32 . P.fromIntegral $ offset)
-
-          -- if not all lanes are active, check if this lane is active
-          let condition' = case size of
-                Nothing -> condition
-                Just sz -> do
-                  c1 <- condition
-                  c2 <- A.lt singleType lane sz
-                  A.land c1 c2
+          let condition = case dir of
+                LeftToRight -> A.gte singleType lane $ liftInt32 $ P.fromIntegral $ offset
+                RightToLeft -> do
+                  other <- A.add numType lane $ liftInt32 $ P.fromIntegral $ offset
+                  first <- firstLane RightToLeft dev size
+                  A.lte singleType other first
 
           -- update partial result if in range
-          x'   <- if (tp, condition')
+          x'   <- if (tp, condition)
                     then do
                       case dir of
-                        -- TODO: Remove the dir argument, and let the caller of this function flip combine if dir is RightToLeft?
                         LeftToRight -> app2 combine y x
                         RightToLeft -> app2 combine x y
-
                     else
                       return x
 
-          scan (step+1) x'
+          scan mask (step+1) x'
+
+shuffleOp :: Direction -> ShuffleOp
+shuffleOp LeftToRight = Up
+shuffleOp RightToLeft = Down
+
+firstLane :: Direction -> DeviceProperties -> Maybe (Operands Int32) -> CodeGen PTX (Operands Int32)
+firstLane LeftToRight _ _ =
+  return $ liftInt32 0
+firstLane RightToLeft dev Nothing =
+  return $ liftInt32 $ P.fromIntegral (CUDA.warpSize dev) - 1
+firstLane RightToLeft _ (Just sz) =
+  A.sub numType sz (liftInt32 1)
+
+lastLane :: Direction -> DeviceProperties -> Maybe (Operands Int32) -> CodeGen PTX (Operands Int32)
+lastLane LeftToRight = firstLane RightToLeft
+lastLane RightToLeft = firstLane LeftToRight
 
 -- In a warp, scan the values from shared memory. Computes a left-to-right
 -- exclusive scan. The first value of the output is undefined, unless an
 -- identity value is given. Returns the reduced value.
 scanFromSMem
     :: forall e.
-       DeviceProperties
+       Direction
+    -> DeviceProperties
     -> TypeR e
     -> Maybe (IRExp PTX e) -- Identity
     -> IRFun2 PTX (e -> e -> e)
@@ -1363,15 +1387,17 @@ scanFromSMem
     -> Operand Int32 -- Number of warps = number of used entries in shared memory
     -> TupR Operand (Distribute Ptr (Distribute SizedArray (BufferEltR e)))
     -> CodeGen PTX (Operands e)
-scanFromSMem dev tp identity fun maxSize size smem
+scanFromSMem dir dev tp identity fun maxSize size smem
   | maxSize /= CUDA.warpSize dev = internalError "Expected that the maximum number of warps is equal to the warp size"
   | otherwise = do
     lane <- laneId
-    ptr <- tupleArrayGep tp smem lane
-    value <- tupleLoad tp ptr
-    (scanned, reduced) <- scanWarp LeftToRight ScanExclusive dev tp Nothing identity fun (Just $ OP_Int32 size) value
-    tupleStore tp ptr scanned
-    return reduced
+    active <- A.lt singleType lane (OP_Int32 size)
+    masked tp active $ do
+      ptr <- tupleArrayGep tp smem lane
+      value <- tupleLoad tp ptr
+      (scanned, reduced) <- scanWarp dir ScanExclusive dev tp ((True,) <$> identity) fun (Just $ OP_Int32 size) value
+      tupleStore tp ptr scanned
+      return reduced
 
 -- tupUndef :: TypeR a -> Operands a
 -- tupUndef TupRunit       = OP_Unit

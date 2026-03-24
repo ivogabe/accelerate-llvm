@@ -228,7 +228,7 @@ codegenDim1 name env flatCluster
         (_, lower, upper, full) <- tileRange (isDescending direction) (op TypeInt size) tileSize tileCount tileIdx
 
         -- Compute the number of warps that are active
-        OP_Int32 activeWarps <- do
+        (OP_Int32 groupCount, OP_Int32 activeWarps) <- do
           size <- A.sub numType (OP_Int upper) (OP_Int lower)
           -- ceil(size/warpSize) = (size + warpSize - 1) / warpSize
           a <- A.sub numType size (OP_Int $ integral TypeInt 1) >>= A.fromIntegral TypeInt numType
@@ -242,7 +242,8 @@ codegenDim1 name env flatCluster
           -- size, so we don't have to worry about rounding here.
           threadblockSize <- blockDim
           count2 <- A.quot TypeInt32 threadblockSize warpSz
-          A.min singleType count1 count2
+          count <- A.min singleType count1 count2
+          return (count1, count)
 
         let envs3 = envs2{
             envsTileIndex = OP_Int tileIdx,
@@ -258,12 +259,13 @@ codegenDim1 name env flatCluster
 
           ptBefore tileLoop envs3
           let peel = gpuLoopPeel (ptAnalysis tileLoop) && null loops''
-          loopInThreadblock (isDescending direction) peel elementsPerThread lower upper full $ \active isFirst activeInWarp idxForThread localIdx globalIdx -> do
+          loopInThreadblock (isDescending direction) peel elementsPerThread lower upper full groupCount activeWarps $ \isFirst activeInWarp idxForThread globalIdx -> do
+            localIdx <- A.sub numType (OP_Int globalIdx) (OP_Int lower)
             let envs4 = envs3{
                 envsLoopDepth = 1,
                 envsIdx = Env.partialUpdate globalIdx idxVar $ envsIdx envs3,
                 envsIsFirst = OP_Bool isFirst,
-                envsTileLocalIndex = OP_Int localIdx,
+                envsTileLocalIndex = localIdx,
                 envsTileStorageIndex = OP_Int idxForThread,
                 envsGpuWarpActiveThreads = activeInWarp
               }
@@ -434,11 +436,10 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   -- Code within the tile loop: perform reduction
   (\_ (_, smemWarp) _ envs -> do
     dev <- liftCodeGen $ asks ptxDeviceProperties
-    let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
     warpValue <- reduceWarp
-      dev tp identity' fun'
+      dev tp fun'
       (OP_Int32 <$> envsGpuWarpActiveThreads envs)
       x
     perWarp $ do
@@ -472,12 +473,12 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     aggregate <-
       if foldOrScan == IsFold then
         -- Reduce all per-warp values in smem to a single value.
-        reduceFromSMem dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
+        reduceFromSMem dev tp fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
       else
         -- Perform an exclusive over the per-warp values in smem,
         -- and compute the total aggregate (reduced value).
         -- This is executed on a single warp.
-        scanFromSMem dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
+        scanFromSMem dir dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
 
     -- Share aggregate
     prefix <- perWarp' tp $ do
@@ -544,7 +545,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           action' =
             -- If there is no identity, do not do anything with the first (undefined) value
             if isNothing identity then
-              A.when (A.gt singleType lane $ A.liftInt32 0) action
+              A.when (firstLane dir dev (OP_Int32 <$> envsGpuWarpActiveThreads envs) >>= A.neq singleType lane) action
             else
               -- Otherwise, handle all values
               action
@@ -569,7 +570,6 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   -- Code in next tile loop
   (if foldOrScan == IsFold then Nothing else Just (analysis, \(_, smemWarp) _ envs -> do
     dev <- liftCodeGen $ asks ptxDeviceProperties
-    let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     x <- readArray' envs input index
 
@@ -578,7 +578,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
         -- If there is a seed, then each block and each warp will have a
         -- prefix.
         accum <- tupleLoad tp smemWarp
-        scanWarp dir inclusiveness dev tp (Just $ return accum) identity' fun'
+        scanWarp dir inclusiveness dev tp (Just (False, return accum)) fun'
           (OP_Int32 <$> envsGpuWarpActiveThreads envs) x
       Nothing
         | ScanExclusive <- inclusiveness -> internalError "Exclusive scans (scanl, scanl', scanr') should have a seed"
@@ -590,7 +590,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           -- When we then scan over the values in this warp, the prefix is part
           -- of each value in the warp
           lane <- laneId
-          y <- A.ifThenElse (tp, A.eq singleType lane (A.liftInt32 0))
+          y <- A.ifThenElse (tp, firstLane dir dev (OP_Int32 <$> envsGpuWarpActiveThreads envs) >>= A.eq singleType lane)
             ( do
               -- The first item does not have a prefix
               isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
@@ -606,7 +606,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
             )
             (return x)
           
-          scanWarp dir inclusiveness dev tp Nothing identity' fun'
+          scanWarp dir inclusiveness dev tp Nothing fun'
             (OP_Int32 <$> envsGpuWarpActiveThreads envs) y
 
     codeElement envs scanned
