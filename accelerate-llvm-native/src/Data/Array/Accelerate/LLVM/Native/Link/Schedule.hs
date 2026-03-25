@@ -1990,14 +1990,14 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
 
 printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%d" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt16))) value = printf "%d" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%hhd" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt16))) value = printf "%hd" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt32))) value = printf "%d" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt64))) value = printf "%ld" value
 
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord))) value = printf "%u" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord8))) value = printf "%u" value
-printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord16))) value = printf "%u" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord8))) value = printf "%hhu" value
+printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord16))) value = printf "%hu" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord32))) value = printf "%u" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord64))) value = printf "%lu" value
 
