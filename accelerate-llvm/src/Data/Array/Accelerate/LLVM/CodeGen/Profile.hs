@@ -16,7 +16,7 @@ module Data.Array.Accelerate.LLVM.CodeGen.Profile (
 
   zone_begin, zone_begin_alloc,
   zone_end,
-  global_string, derefGlobalString,
+  global_string, derefGlobalString, locationDataType, source_location_data, TracySrcloc
 
 ) where
 
@@ -69,7 +69,10 @@ global_string str = do
     }
   return (nm, l)
 
-locationDataType :: PrimType (Struct ((((Ptr Int8, Ptr Int8), Ptr Int8), Int32), Int32))
+-- ___tracy_source_location_data
+type TracySrcloc = Struct ((((Ptr Int8, Ptr Int8), Ptr Int8), Int32), Int32)
+
+locationDataType :: PrimType TracySrcloc
 locationDataType = StructPrimType False
   $ TupRsingle primType
   `TupRpair` TupRsingle primType
