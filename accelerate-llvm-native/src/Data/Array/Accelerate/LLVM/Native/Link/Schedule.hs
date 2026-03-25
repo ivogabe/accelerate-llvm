@@ -43,7 +43,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Data.Array.Accelerate.LLVM.CodeGen.Environment (declareAliasScopes)
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
-import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic (liftInt)
+import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.LLVM.Compile.Cache ( UID )
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -1927,27 +1927,28 @@ putArrayDescriptors structVars localVars = foldMapMTupR (putArrayDescriptor stru
 putArrayDescriptor :: forall env t. StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
 putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
   let
-    computeSize :: StructVars env -> LocalVars env -> ShapeR sh -> GroundVars env sh -> Operands Int -> CodeGen Native (LocalVars env, Operands Int)
-    computeSize _ localVars' ShapeRz _ accum = return (localVars', accum)
+    computeSize :: StructVars env -> LocalVars env -> ShapeR sh -> GroundVars env sh -> Operands Int -> CodeGen Native (LocalVars env, Operands Int, [Operands Int])
+    computeSize _ localVars' ShapeRz _ accum = return (localVars', accum, [])
     computeSize structVars' localVars' (ShapeRsnoc shr') (vs `TupRpair` TupRsingle v) accum = do
       let Var _ idx = v
       (localVars'', value) <- getValue structVars' localVars' (GroundRscalar scalarTypeInt) idx
       accum' <- instr' $ Mul numType (op scalarTypeInt accum) value
-      computeSize structVars' localVars'' shr' vs (ir scalarTypeInt accum')
+      (localVars''', sz, sizes) <- computeSize structVars' localVars'' shr' vs (ir scalarTypeInt accum')
+      return (localVars''', sz, (sizes ++ [ir scalarTypeInt value]))
     computeSize _ _ _ _ _ = internalError "Pair impossible"
 
-  (_, sz) <- computeSize structVars localVars shape sh (liftInt 1)
-
+  (_, sz, sizes) <- computeSize structVars localVars shape sh (A.liftInt 1)
+  sz' <- A.sub numType sz (A.liftInt 1)
   let
     printTupleContents :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
     printTupleContents b index = case b of
       TupRunit -> return ()
       TupRsingle _ -> printAtIndex b index
-      TupRpair TupRunit b2 -> printAtIndex b2 index
-      TupRpair b1 b2 -> do
-        printTupleContents b1 index
-        _ <- putchar (liftInt $ fromEnum ',')
-        printAtIndex b2 index
+      TupRpair TupRunit r -> printAtIndex r index
+      TupRpair l r -> do
+        printTupleContents l index
+        _ <- putchar (A.liftInt $ fromEnum ',')
+        printAtIndex r index
         return ()
 
     printAtIndex :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
@@ -1962,23 +1963,31 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
             _ <- printValue t value
             return ()
         | otherwise -> return ()
-      TupRpair b1 b2 -> do
-        _ <- putchar (liftInt $ fromEnum '(')
-        printTupleContents b1 index
-        _ <- putchar (liftInt $ fromEnum ',')
-        printAtIndex b2 index
-        _ <- putchar (liftInt $ fromEnum ')')
+      TupRpair l r -> do
+        _ <- putchar (A.liftInt $ fromEnum '(')
+        printTupleContents l index
+        _ <- putchar (A.liftInt $ fromEnum ',')
+        printAtIndex r index
+        _ <- putchar (A.liftInt $ fromEnum ')')
         return ()
 
   printShape shape
-  printString "(Z :. "
-  putInt sz
-  printString ") ["
+  printString "(Z "
+  mapM_ (\x -> do
+      printString ":. "
+      putInt x
+      return ()
+    ) sizes
+  printString ")\n["
 
-  printAtIndex buffer (liftInt 0)
-  imapFromStepTo [] (liftInt 1) (liftInt 1) sz $ \i -> do
-      _ <- putchar (liftInt $ fromEnum ',') 
-      printAtIndex buffer i
+  imapFromStepTo [] (A.liftInt 0) (A.liftInt 1) sz' $ \i -> do
+    printAtIndex buffer i
+    _ <- putchar (A.liftInt $ fromEnum ',')
+
+    iPlusOne <- A.add numType i (A.liftInt 1)
+    modI <- A.rem integralType iPlusOne (last sizes)
+    A.when (A.eq (NumSingleType (IntegralNumType TypeInt)) modI (A.liftInt 0)) (printString "\n ")
+  printAtIndex buffer sz'
 
 printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d" value
@@ -1997,7 +2006,7 @@ printValue (SingleScalarType (NumSingleType (FloatingNumType TypeHalf))) value =
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeFloat))) value = printf "%f" value
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeDouble))) value = printf "%lf" value
 
-printValue (VectorScalarType _) _ = return (liftInt 0) -- TODO(Mike): Kijken hoe ik dit ga oplossen
+printValue (VectorScalarType _) _ = return (A.liftInt 0) -- TODO(Mike): Kijken hoe ik dit ga oplossen
 
 printShape :: ShapeR sh -> CodeGen Native()
 printShape ShapeRz = printString "Scalar "
