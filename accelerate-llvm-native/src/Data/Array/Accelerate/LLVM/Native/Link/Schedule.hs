@@ -1923,7 +1923,6 @@ awhileBindOutput getStruct = go TupleIdxSelf
 putArrayDescriptors :: StructVars env -> LocalVars env -> ArrayDescriptors env t -> CodeGen Native ()
 putArrayDescriptors structVars localVars = foldMapMTupR (putArrayDescriptor structVars localVars)
 
--- This function assums that the buffer size is of a scalar type and not a vector type
 putArrayDescriptor :: forall env t. StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
 putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
   let
@@ -1934,7 +1933,7 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
       (localVars'', value) <- getValue structVars' localVars' (GroundRscalar scalarTypeInt) idx
       accum' <- instr' $ Mul numType (op scalarTypeInt accum) value
       (localVars''', sz, sizes) <- computeSize structVars' localVars'' shr' vs (ir scalarTypeInt accum')
-      return (localVars''', sz, (sizes ++ [ir scalarTypeInt value]))
+      return (localVars''', sz, sizes ++ [ir scalarTypeInt value])
     computeSize _ _ _ _ _ = internalError "Pair impossible"
 
   (_, sz, sizes) <- computeSize structVars localVars shape sh (A.liftInt 1)
@@ -2006,7 +2005,17 @@ printValue (SingleScalarType (NumSingleType (FloatingNumType TypeHalf))) value =
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeFloat))) value = printf "%f" value
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeDouble))) value = printf "%lf" value
 
-printValue (VectorScalarType _) _ = return (A.liftInt 0) -- TODO(Mike): Kijken hoe ik dit ga oplossen
+printValue (VectorScalarType (VectorType n singleType)) vec = do
+  _ <- putchar (A.liftInt $ fromEnum '<')
+
+  value <- instr $ ExtractElement (0 :: Int32) vec
+  _ <- printValue (SingleScalarType singleType) (op (SingleScalarType singleType) value)
+
+  mapM_ (\i -> do
+    _ <- putchar (A.liftInt $ fromEnum ',')
+    value <- instr $ ExtractElement (fromIntegral i :: Int32) vec
+    printValue (SingleScalarType singleType) (op (SingleScalarType singleType) value)) [1 .. n - 1] 
+  putchar (A.liftInt $ fromEnum '>')
 
 printShape :: ShapeR sh -> CodeGen Native()
 printShape ShapeRz = printString "Scalar "
