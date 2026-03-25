@@ -87,7 +87,11 @@ void* accelerate_worker(void *data_packed) {
       if (attempts_remaining == 0) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
+
+      TRACY_ZONE_BEGIN(run_ctx, &program_run_srcloc, COLOR_NORMAL);
       struct KernelLaunch* kernel = task.program->run(&accelerate_runtime_lib, workers, thread_idx, task.program, task.location);
+      TRACY_ZONE_END(run_ctx);
+
       if (kernel == NULL) {
         accelerate_program_release(task.program);
         task.program = NULL;

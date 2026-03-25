@@ -13,6 +13,14 @@ struct ___tracy_source_location_data
 
 typedef const void* TracyCZoneCtx;
 
+static const struct ___tracy_source_location_data program_run_srcloc = {
+  .name = "program.run()",
+  .function = "-",
+  .file = "-",
+  .line = 0,
+  .color = 0x00FFFF,
+};
+
 TracyCZoneCtx ___tracy_emit_zone_begin(const struct ___tracy_source_location_data* srcloc, int32_t active);
 void ___tracy_emit_zone_end(TracyCZoneCtx ctx);
 void ___tracy_emit_zone_color(TracyCZoneCtx ctx, uint32_t color);
@@ -57,7 +65,7 @@ uint32_t get_color_variant(uint32_t color, ColorVariant variant) {
 
 #define TRACY_ZONE_BEGIN(ctx, tracy_srcloc, color_variant)  \
   TracyCZoneCtx ctx = ___tracy_emit_zone_begin(tracy_srcloc, 1); \
-  ___tracy_emit_zone_color(ctx, get_color_variant(tracy_srcloc->color, color_variant))
+  ___tracy_emit_zone_color(ctx, get_color_variant((tracy_srcloc)->color, color_variant))
 
 #define TRACY_ZONE_END(ctx) ___tracy_emit_zone_end(ctx)
 
