@@ -153,7 +153,8 @@ struct KernelLaunch {
   struct Program *program;
   uint32_t program_continuation;
   _Atomic int32_t active_threads;
-  _Atomic uint64_t index;
+  _Atomic uint64_t work_index;
+  const struct ___tracy_source_location_data *tracy_srcloc;
   // In the future, perhaps also store a uint32_t work_size
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
 };

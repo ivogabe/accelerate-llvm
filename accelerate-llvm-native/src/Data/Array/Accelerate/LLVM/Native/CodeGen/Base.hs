@@ -25,6 +25,7 @@ import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import Data.Array.Accelerate.LLVM.Native.Foreign                    ()
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
+import Data.Array.Accelerate.LLVM.CodeGen.Profile
 
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Downcast
@@ -57,11 +58,12 @@ foreign import ccall unsafe "get_cache_line_size" getCacheSize :: IO CULLong
 --  * continuation: ptr, u32 (program, location)
 --  * active_threads: u32,
 --  * work_index: u64,
+--  * tracy_srcloc: ptr,
 --  * In the future, perhaps also store a work_size: u32
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = ((((Ptr (Struct Int8), Ptr Int8), Word32), Word32), Word64)
+type Header = (((((Ptr (Struct Int8), Ptr Int8), Word32), Word32), Word64), Ptr TracySrcloc)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
@@ -69,6 +71,7 @@ headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
+  `TupRpair` TupRsingle (PtrPrimType (locationDataType) defaultAddrSpace)
 
 -- Type of the array of shard indexes, that keep track of the next tile to process for each shard. 
 -- Depends on the cache width, as each shard needs to be on a separate cache line to avoid false sharing.
@@ -117,7 +120,7 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameIndex                  := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameIndex                  := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ "env"                      := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       extractEnv
       return (
@@ -133,7 +136,7 @@ bindHeaderEnv env =
     argTp = PtrPrimType (StructPrimType False (headerType `TupRpair` TupRsingle envTp `TupRpair` TupRsingle kernelMemTp)) defaultAddrSpace
     (envTp, extractEnv, gamma) = bindEnvFromStruct env
 
-    nameIndex = "workassist.index"
+    nameIndex = "workassist.work_index"
     nameFlag = "workassist.flag"
 
     arg = LocalReference (PrimType argTp) "arg"
