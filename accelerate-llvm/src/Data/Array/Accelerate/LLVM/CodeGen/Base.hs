@@ -1,7 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes  #-}
 {-# LANGUAGE GADTs                #-}
 {-# LANGUAGE LambdaCase           #-}
-{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE RankNTypes           #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE TypeApplications     #-}
@@ -180,6 +180,7 @@ call f args attrs = do
       go :: GlobalFunction t -> (Label, Function Callable t)
       go (Body t k l) = (l, Body t k $ CallGlobal l)
       go (Lam t x l)  = Lam t x <$> go l
+      go (VarLams f) = let (x, y) = go f in (x, VarLams y)
   --
   let (lab, f') = go f
   if labelIsAccPrelude lab

@@ -2,7 +2,8 @@
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeSynonymInstances  #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# OPTIONS_GHC -fno-warn-orphans  #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.Global
@@ -23,6 +24,7 @@ import LLVM.AST.Type.Name
 
 import qualified Data.Map as Map
 
+import Data.Array.Accelerate.Error
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LLVM
 
 
@@ -40,16 +42,18 @@ instance Downcast (GlobalFunction t) LLVM.Declare where
     , LLVM.decRetType = res
     , LLVM.decName = nm
     , LLVM.decArgs = args
-    , LLVM.decVarArgs = False
+    , LLVM.decVarArgs = varArgs
     , LLVM.decAttrs = []
     , LLVM.decComdat = Nothing }
     where
-      trav :: GlobalFunction t -> ([LLVM.Type], LLVM.Type, LLVM.Symbol)
-      trav (Body t _ n) = ([], downcast t, labelToPrettyS n)
-      trav (Lam a _ l)  = let (as, r, n) = trav l
-                          in  (downcast a : as, r, n)
+      trav :: GlobalFunction t -> ([LLVM.Type], Bool, LLVM.Type, LLVM.Symbol)
+      trav (Body t _ n) = ([], False, downcast t, labelToPrettyS n)
+      trav (Lam a _ l)  = let (as, b, r, n) = trav l
+                          in  (downcast a : as, b, r, n)
+      trav (VarLams f) = let (as, b, r, n) = trav f
+                          in  (as, b, r, n)
       --
-      (args, res, nm) = trav f
+      (args, varArgs, res, nm) = trav f
 
 instance Downcast (GlobalFunctionDefinition t) LLVM.Define where
   downcast f = LLVM.Define
@@ -71,5 +75,6 @@ instance Downcast (GlobalFunctionDefinition t) LLVM.Define where
       trav (Lam t p l)
         = (linkage, LLVM.Typed (downcast t) (nameToPrettyI p) : ps, r, n, blocks)
         where (linkage, ps, r, n, blocks) = trav l
+      trav (VarLams _) = internalError "This case is not possible here"
       --
       (linkage', args, res, nm, bs) = trav f

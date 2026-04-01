@@ -75,6 +75,7 @@ data GroupID = GroupID !Word
 data Function kind t where
   Body :: Result r ~ r => Type r -> Maybe TailCall -> kind -> Function kind r
   Lam  :: PrimType a -> Name a -> Function kind t -> Function kind (a -> t)
+  VarLams :: Function kind (Result f) -> Function kind f
 
 lamUnnamed :: PrimType a -> Function kind t -> Function kind (a -> t)
 lamUnnamed tp = Lam tp (UnName 0)

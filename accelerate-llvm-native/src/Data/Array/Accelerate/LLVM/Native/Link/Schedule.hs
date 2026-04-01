@@ -1977,7 +1977,7 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
       putInt x
       return ()
     ) sizes
-  printString ")\n["
+  printString "):\n["
 
   imapFromStepTo [] (A.liftInt 0) (A.liftInt 1) sz' $ \i -> do
     printAtIndex buffer i

@@ -48,6 +48,7 @@ import Prelude                                            hiding ( Ordering(..),
 import Data.Bifunctor                                     ( bimap )
 import Data.Maybe                                         ( fromMaybe )
 import System.IO.Unsafe                                   ( unsafePerformIO )
+import Unsafe.Coerce                                      ( unsafeCoerce )
 
 -- | Non-terminating instructions
 --
@@ -573,6 +574,9 @@ instance Downcast (Instruction a) LP.Instr where
           trav (Lam t _ l)  =
             let (ts, k, r, fm, n) = trav l
             in  (downcast t : ts, k, r, fm, n)
+          trav (VarLams f) = 
+            let (ts, k, r, fm, n) = trav f
+            in  (ts, k, r, fm, n)
 
           travArgs :: Arguments t -> [LP.Typed LP.Value]
           -- TODO: Place the attrs on the argument, when llvm-pretty supports that
@@ -668,6 +672,7 @@ instance TypeOf Instruction where
       fun :: Function kind a -> Type (Result a)
       fun (Lam _ _ l)  = fun l
       fun (Body t _ _) = t
+      fun (VarLams f) = unsafeCoerce (fun f)
 
 -- Utility to construct GetElementPtr instructions for accessing a field of a struct.
 -- This function is not in GetElementPtr.hs as that would cause a cycle.

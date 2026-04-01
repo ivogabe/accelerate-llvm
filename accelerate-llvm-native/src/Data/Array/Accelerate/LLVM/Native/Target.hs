@@ -73,7 +73,7 @@ printf :: IsPrim a => String -> Operand a -> CodeGen Native (Operands Int)
 printf format val = do
   (nm, l) <- global_string format
   let strPtr = ConstantOperand $ derefGlobalString l nm
-  call (lamUnnamed primType $ lamUnnamed primType $ Body (PrimType primType) Nothing (Label "printf"))
+  call (lamUnnamed primType $ VarLams $ Body (PrimType primType) Nothing (Label "printf"))
        (ArgumentsCons strPtr []
          $ ArgumentsCons val []
            ArgumentsNil)
@@ -96,14 +96,11 @@ putString msg = do
        []
 
 printString :: String -> CodeGen Native ()
-printString msg = do
-  mapM_ (putchar . liftInt . fromEnum) msg
-  
--- TODO(Mike): vragen aan Ivo waarom dit niet werkt?
--- printString msg = do 
---   (nm, l) <- global_string msg
---   let strPtr = ConstantOperand $ derefGlobalString l nm
---   printf "%s" strPtr
+printString msg = do 
+  (nm, l) <- global_string msg
+  let strPtr = ConstantOperand $ derefGlobalString l nm
+  _ <- printf "%s" strPtr
+  return ()
 
 fflush :: CodeGen Native (Operands Int)
 fflush = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "fflush"))
