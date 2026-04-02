@@ -1936,20 +1936,7 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
       return (localVars''', sz, sizes ++ [ir scalarTypeInt value])
     computeSize _ _ _ _ _ = internalError "Pair impossible"
 
-  (_, sz, sizes) <- computeSize structVars localVars shape sh (A.liftInt 1)
-  sz' <- A.sub numType sz (A.liftInt 1)
   let
-    printTupleContents :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
-    printTupleContents b index = case b of
-      TupRunit -> return ()
-      TupRsingle _ -> printAtIndex b index
-      TupRpair TupRunit r -> printAtIndex r index
-      TupRpair l r -> do
-        printTupleContents l index
-        _ <- putchar (A.liftInt $ fromEnum ',')
-        printAtIndex r index
-        return ()
-
     printAtIndex :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
     printAtIndex b index = case b of
       TupRunit -> return ()
@@ -1970,14 +1957,28 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
         _ <- putchar (A.liftInt $ fromEnum ')')
         return ()
 
+    printTupleContents :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
+    printTupleContents b index = case b of
+      TupRunit -> return ()
+      TupRsingle _ -> printAtIndex b index
+      TupRpair TupRunit r -> printAtIndex r index
+      TupRpair l r -> do
+        printTupleContents l index
+        _ <- putchar (A.liftInt $ fromEnum ',')
+        printAtIndex r index
+
+  (_, sz, sizes) <- computeSize structVars localVars shape sh (A.liftInt 1)
+
   printShape shape
   printString "(Z "
 
   forM_ sizes $ \x -> do
       printString ":. "
       putInt x
-      return ()
   printString "):\n["
+
+  -- Here the size of the buffer is subtracted by one because the last index is printed outside of the loop
+  sz' <- A.sub numType sz (A.liftInt 1)
 
   imapFromStepTo [] (A.liftInt 0) (A.liftInt 1) sz' $ \i -> do
     printAtIndex buffer i
@@ -1988,23 +1989,26 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
     A.when (A.eq (NumSingleType (IntegralNumType TypeInt)) modI (A.liftInt 0)) (printString "\n ")
   printAtIndex buffer sz'
 
+printShape :: ShapeR sh -> CodeGen Native()
+printShape ShapeRz = printString "Scalar "
+printShape (ShapeRsnoc ShapeRz) = printString "Vector "
+printShape (ShapeRsnoc (ShapeRsnoc ShapeRz)) = printString "Matrix "
+printShape _ = printString "Array "
+
 printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%hhd" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt16))) value = printf "%hd" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt32))) value = printf "%d" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt64))) value = printf "%ld" value
-
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord))) value = printf "%u" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord8))) value = printf "%hhu" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord16))) value = printf "%hu" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord32))) value = printf "%u" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeWord64))) value = printf "%lu" value
-
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeHalf))) value = printf "%f" value
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeFloat))) value = printf "%f" value
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeDouble))) value = printf "%lf" value
-
 printValue (VectorScalarType (VectorType n singleType)) vec = do
   _ <- putchar (A.liftInt $ fromEnum '<')
 
@@ -2016,9 +2020,3 @@ printValue (VectorScalarType (VectorType n singleType)) vec = do
     value <- instr $ ExtractElement (fromIntegral i :: Int32) vec
     printValue (SingleScalarType singleType) (op (SingleScalarType singleType) value)
   putchar (A.liftInt $ fromEnum '>')
-
-printShape :: ShapeR sh -> CodeGen Native()
-printShape ShapeRz = printString "Scalar "
-printShape (ShapeRsnoc ShapeRz) = printString "Vector "
-printShape (ShapeRsnoc (ShapeRsnoc ShapeRz)) = printString "Matrix "
-printShape _ = printString "Array "
