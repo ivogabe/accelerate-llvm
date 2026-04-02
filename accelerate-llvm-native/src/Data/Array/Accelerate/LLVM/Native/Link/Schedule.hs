@@ -32,6 +32,7 @@ import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Array.Buffer
+import qualified Data.Array.Accelerate.Debug.Internal as Debug
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Analysis.Match ((:~:)(..))
 import Data.Array.Accelerate.LLVM.CodeGen.Base
@@ -42,6 +43,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Data.Array.Accelerate.LLVM.CodeGen.Environment (declareAliasScopes)
+import Data.Array.Accelerate.LLVM.CodeGen.Profile
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.LLVM.Compile.Cache ( UID )
@@ -71,10 +73,13 @@ import Data.Text (unpack)
 import Control.Monad
 import Data.String
 import qualified Data.List as List
+import qualified Data.ByteString.Char8 as Char8
 import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.ByteString.Builder.Extra (flush)
+import Data.ByteString.Short ( fromShort )
+import Numeric ( readHex )
 
 data NativeProgram = NativeProgram
   !(Lifetime (FunPtr (Ptr (Ptr Int8) -> Ptr Int8 -> Word16 -> Ptr Int8 -> Int32 -> Ptr Int8)))
@@ -865,17 +870,30 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       -- Header
       workFnPtr' <- instr' $ GetElementPtr $ gepStruct kernelTp imports (tupleLeft importsIdx)
       workFn <- instr' $ Load NonVolatile workFnPtr' Nothing
-      workFnPtr <- instr' $ GetElementPtr $ gepStruct kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
+      workFnPtr <- instr' $ GetElementPtr $ gepStruct kernelTp args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf)
       _ <- instr' $ Store NonVolatile workFnPtr workFn Nothing
-      programPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      programPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile programPtr operandProgram Nothing
       location <- computeLocation inAwhile $ fromIntegral nextBlock
-      locationPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      locationPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile locationPtr location Nothing
-      threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) Nothing -- active_threads
-      workIdxPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      workIdxPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 1) Nothing -- work_index
+
+      when Debug.tracyIsEnabled $ do
+        let name = kernelName kernel
+        let color = colorFromHash (kernelHash kernel)
+
+        tracySrclocName <- source_location_data name "-" "-" 0 (fromIntegral color)
+        let tracySrclocType = PtrPrimType (NamedPrimType "___tracy_source_location_data" locationDataType) defaultAddrSpace
+        let tracySrclocStructPtr = ConstantOperand $ GlobalReference (PrimType tracySrclocType) tracySrclocName
+
+        tracySrclocPtr <- instr' $ GetElementPtr $ gepStruct tracySrclocType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+        _ <- instr' $ Store NonVolatile tracySrclocPtr tracySrclocStructPtr Nothing
+        return ()
+
       -- Arguments
       args' <- instr' $ GetElementPtr $ gepStruct argsTp' args $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
       storeKernelArgs structVars localVars kargs args' TupleIdxSelf
@@ -890,6 +908,19 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       setBlock blockNext
       phase2Sub next1 imports fullState structVars PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + 1)
   }
+  where
+    colorFromHash :: String -> Int
+    colorFromHash hash = case readHex (take 6 hash) of
+        [(n, "")] -> n
+        _         -> 0xFF00FF
+
+    kernelHash :: OpenKernelFun NativeKernel env' t -> String
+    kernelHash (KernelFunLam _ f) = kernelHash f
+    kernelHash (KernelFunBody kernel) = show $ kernelUID kernel
+
+    kernelName :: OpenKernelFun NativeKernel env' t -> [Char]
+    kernelName (KernelFunLam _ f) = kernelName f
+    kernelName (KernelFunBody kernel) = Char8.unpack $ fromShort $ kernelId kernel
 
 convert inAwhile (Effect (SignalAwait []) next) = convert inAwhile next
 convert inAwhile (Effect (SignalAwait signals) next)

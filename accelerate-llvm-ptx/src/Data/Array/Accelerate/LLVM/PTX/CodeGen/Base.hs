@@ -43,6 +43,7 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
   __threadfence_block, __threadfence_grid,
 
   -- Warp shuffle instructions
+  __shfl, ShuffleOp(..),
   __shfl_up, __shfl_down, __shfl_idx, __broadcast,
 
   -- Shared memory
@@ -101,6 +102,7 @@ import Control.Monad.Reader                                         ( asks )
 import Data.Bits
 import Data.Proxy
 import Data.String
+import Data.Maybe
 import Foreign.Storable
 import Prelude                                                      as P
 
@@ -147,7 +149,7 @@ perWarp' tp action = do
     (tp, A.eq singleType lane (liftInt32 0))
     action
     (return $ A.undefs tp)
-  __broadcast tp value
+  __broadcast tp Nothing value
 
 -- Executes code in only one warp per threadblock
 warpPerThreadBlock :: CodeGen PTX () -> CodeGen PTX ()
@@ -277,16 +279,10 @@ __syncwarp = __syncwarp_mask (liftWord32 0xffffffff)
 --
 __syncwarp_mask :: HasCallStack => Operands Word32 -> CodeGen PTX ()
 __syncwarp_mask mask = do
-  llvmver <- getLLVMversion
-  dev <- liftCodeGen $ asks ptxDeviceProperties
-  case (computeCapability dev >= Compute 7 0, llvmver >= 6) of
-    (True, True) ->
-      void $ call
-        (lamUnnamed primType $ Body VoidType (Just Tail) "llvm.nvvm.bar.warp.sync")
-        (ArgumentsCons (op primType mask) [] ArgumentsNil)
-        [NoUnwind, NoDuplicate, Convergent]
-    (True, False) -> internalError "LLVM-6.0 or above is required for Volta devices and later"
-    (False, _) -> return ()
+  void $ call
+    (lamUnnamed primType $ Body VoidType (Just Tail) "llvm.nvvm.bar.warp.sync")
+    (ArgumentsCons (op primType mask) [] ArgumentsNil)
+    [NoUnwind, NoDuplicate, Convergent]
 
 
 -- | Ensure that all writes to shared and global memory before the call to
@@ -358,31 +354,32 @@ data ShuffleOp
 
 -- | Each thread gets the value provided by lower threads
 --
-__shfl_up :: TypeR a -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
-__shfl_up = shfl Up
+__shfl_up :: TypeR a -> Maybe (Operand Word32) -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
+__shfl_up = __shfl Up
 
 -- | Each thread gets the value provided by higher threads
 --
-__shfl_down :: TypeR a -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
-__shfl_down  = shfl Down
+__shfl_down :: TypeR a -> Maybe (Operand Word32) -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
+__shfl_down  = __shfl Down
 
 -- | shfl_idx takes an argument representing the source lane index.
 --
-__shfl_idx :: TypeR a -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
-__shfl_idx = shfl Idx
+__shfl_idx :: TypeR a -> Maybe (Operand Word32) -> Operands a -> Operands Word32 -> CodeGen PTX (Operands a)
+__shfl_idx = __shfl Idx
 
 -- | Distribute the value from lane 0 across the warp
 --
-__broadcast :: TypeR a -> Operands a -> CodeGen PTX (Operands a)
-__broadcast aR a = __shfl_idx aR a (liftWord32 0)
+__broadcast :: TypeR a -> Maybe (Operand Word32) -> Operands a -> CodeGen PTX (Operands a)
+__broadcast aR mask a = __shfl_idx aR mask a (liftWord32 0)
 
 
-shfl :: ShuffleOp
+__shfl :: ShuffleOp
      -> TypeR a
+     -> Maybe (Operand Word32)
      -> Operands a
      -> Operands Word32
      -> CodeGen PTX (Operands a)
-shfl sop tR val delta = go tR val
+__shfl sop tR mask val delta = go tR val
   where
     delta' :: Operand Word32
     delta' = op integralType delta
@@ -498,7 +495,7 @@ shfl sop tR val delta = go tR val
     num (FloatingNumType t) = floating t
 
     integral :: forall s. IntegralType s -> Operands s -> CodeGen PTX (Operands s)
-    integral TypeInt32 a = shfl_op sop ShuffleInt32 delta' a
+    integral TypeInt32 a = shfl_op sop ShuffleInt32 mask delta' a
     integral t         a
       | IntegralDict <- integralDict t
       = case finiteBitSize (undefined::s) of
@@ -518,7 +515,7 @@ shfl sop tR val delta = go tR val
             return d
 
     floating :: FloatingType s -> Operands s -> CodeGen PTX (Operands s)
-    floating TypeFloat  a = shfl_op sop ShuffleFloat delta' a
+    floating TypeFloat  a = shfl_op sop ShuffleFloat mask delta' a
     floating TypeDouble a = do
       b <- A.bitcast scalarType (scalarType @(Vec 2 Int32)) a
       c <- vector (VectorType 2 singleType) b
@@ -539,10 +536,11 @@ shfl_op
     :: forall a.
        ShuffleOp
     -> ShuffleType a
+    -> Maybe (Operand Word32)       -- mask of active threads, or Nothing if all threads are active. See https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/cpp-language-extensions.html#warp-sync-intrinsic-constraints
     -> Operand Word32               -- delta
     -> Operands a                   -- value to give
     -> CodeGen PTX (Operands a)     -- value received
-shfl_op sop t delta val
+shfl_op sop t mask delta val
   | Refl <- result t = do
   dev <- liftCodeGen $ asks ptxDeviceProperties
 
@@ -568,14 +566,10 @@ shfl_op sop t delta val
       -- way, except they start with a 'mask' argument specifying which
       -- threads participate in the shuffle.
       --
-      mask :: Operand Int32
-      mask  = A.integral integralType (-1) -- all threads participate
+      mask' :: Operand Word32
+      mask' = fromMaybe (A.integral integralType 0xFFFFFFFF) mask -- if mask is Nothing, all threads participate
 
-      useSyncShfl = CUDA.computeCapability dev >= Compute 7 0
-
-      sync  = if useSyncShfl then "sync." else ""
-      asm   = "llvm.nvvm.shfl."
-           <> sync
+      asm   = "llvm.nvvm.shfl.sync."
            <> case sop of
                 Idx  -> "idx."
                 Up   -> "up."
@@ -589,20 +583,10 @@ shfl_op sop t delta val
                 ShuffleInt32 -> primType :: PrimType Int32
                 ShuffleFloat -> primType :: PrimType Float
 
-  if useSyncShfl then
-    -- Arguments:
-    -- mask, value, delta, width
-    call
-      (lamUnnamed primType $ lamUnnamed t_val $ lamUnnamed primType $ lamUnnamed primType $ Body (PrimType t_val) (Just Tail) asm)
-      (ArgumentsCons mask [] $ ArgumentsCons (op t_val val) [] $ ArgumentsCons delta [] $ ArgumentsCons width [] ArgumentsNil)
-      [Convergent, NoUnwind, InaccessibleMemOnly]
-  else
-    -- Arguments:
-    -- value, delta, width
-    call
-      (lamUnnamed t_val $ lamUnnamed primType $ lamUnnamed primType $ Body (PrimType t_val) (Just Tail) asm)
-      (ArgumentsCons (op t_val val) [] $ ArgumentsCons delta [] $ ArgumentsCons width [] ArgumentsNil)
-      [Convergent, NoUnwind, InaccessibleMemOnly]
+  call
+    (lamUnnamed primType $ lamUnnamed t_val $ lamUnnamed primType $ lamUnnamed primType $ Body (PrimType t_val) (Just Tail) asm)
+    (ArgumentsCons mask' [] $ ArgumentsCons (op t_val val) [] $ ArgumentsCons delta [] $ ArgumentsCons width [] ArgumentsNil)
+    [Convergent, NoUnwind, InaccessibleMemOnly]
   where
     result :: ShuffleType a -> a :~: Result a
     result ShuffleFloat = Refl
