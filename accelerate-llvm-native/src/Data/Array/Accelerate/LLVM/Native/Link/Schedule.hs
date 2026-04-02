@@ -1972,11 +1972,11 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
 
   printShape shape
   printString "(Z "
-  mapM_ (\x -> do
+
+  forM_ sizes $ \x -> do
       printString ":. "
       putInt x
       return ()
-    ) sizes
   printString "):\n["
 
   imapFromStepTo [] (A.liftInt 0) (A.liftInt 1) sz' $ \i -> do
@@ -2011,10 +2011,10 @@ printValue (VectorScalarType (VectorType n singleType)) vec = do
   value <- instr $ ExtractElement (0 :: Int32) vec
   _ <- printValue (SingleScalarType singleType) (op (SingleScalarType singleType) value)
 
-  mapM_ (\i -> do
+  forM_ [1 .. n - 1] $ \i -> do
     _ <- putchar (A.liftInt $ fromEnum ',')
     value <- instr $ ExtractElement (fromIntegral i :: Int32) vec
-    printValue (SingleScalarType singleType) (op (SingleScalarType singleType) value)) [1 .. n - 1] 
+    printValue (SingleScalarType singleType) (op (SingleScalarType singleType) value)
   putchar (A.liftInt $ fromEnum '>')
 
 printShape :: ShapeR sh -> CodeGen Native()
