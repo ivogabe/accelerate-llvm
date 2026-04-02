@@ -1936,7 +1936,6 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
       return (localVars''', sz, sizes ++ [ir scalarTypeInt value])
     computeSize _ _ _ _ _ = internalError "Pair impossible"
 
-  let
     printAtIndex :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
     printAtIndex b index = case b of
       TupRunit -> return ()
