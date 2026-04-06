@@ -48,7 +48,6 @@ import Prelude                                            hiding ( Ordering(..),
 import Data.Bifunctor                                     ( bimap )
 import Data.Maybe                                         ( fromMaybe )
 import System.IO.Unsafe                                   ( unsafePerformIO )
-import Unsafe.Coerce                                      ( unsafeCoerce )
 
 -- | Non-terminating instructions
 --
@@ -556,6 +555,7 @@ instance Downcast (Instruction a) LP.Instr where
         where
           trav :: Function Callable t
                -> ( [LP.Type]           -- argument types
+                  , Bool                -- var args
                   , Bool                -- tail call?
                   , LP.Type             -- return type
                   , [LP.FMF]            -- fast-math flags for this return type
@@ -569,22 +569,22 @@ instance Downcast (Instruction a) LP.Instr where
                   \support it. For a workaround, see the solution for nanosleep \
                   \in Data.Array.Accelerate.LLVM.PTX.Compile."
                 -- ([], downcast k, downcast u, Left  (downcast (LLVM.FunctionType ret argt False, asm)))
-              CallGlobal n -> ([], fromMaybe False (downcast k), downcast u, fmfFor u, LP.ValSymbol (labelToPrettyS n))
-              CallLocal n  -> ([], fromMaybe False (downcast k), downcast u, fmfFor u, LP.ValIdent (labelToPrettyI n))
+              CallGlobal n -> ([], False, fromMaybe False (downcast k), downcast u, fmfFor u, LP.ValSymbol (labelToPrettyS n))
+              CallLocal n  -> ([], False, fromMaybe False (downcast k), downcast u, fmfFor u, LP.ValIdent (labelToPrettyI n))
           trav (Lam t _ l)  =
-            let (ts, k, r, fm, n) = trav l
-            in  (downcast t : ts, k, r, fm, n)
+            let (ts, va, k, r, fm, n) = trav l
+            in  (downcast t : ts, va, k, r, fm, n)
           trav (VarLams f) = 
-            let (ts, k, r, fm, n) = trav f
-            in  (ts, k, r, fm, n)
+            let (ts, _, k, r, fm, n) = trav f
+            in  (ts, True, k, r, fm, n)
 
           travArgs :: Arguments t -> [LP.Typed LP.Value]
           -- TODO: Place the attrs on the argument, when llvm-pretty supports that
           travArgs (ArgumentsCons operand attrs args') = downcast operand : travArgs args'
           travArgs ArgumentsNil = []
 
-          (argt, tail, ret, fmFlags, target) = trav f
-          fun_ty = LP.FunTy ret argt False
+          (argt, varArgs, tail, ret, fmFlags, target) = trav f
+          fun_ty = LP.FunTy ret argt varArgs
 
 
 instance Downcast (Named Instruction a) LP.Stmt where
@@ -672,7 +672,7 @@ instance TypeOf Instruction where
       fun :: Function kind a -> Type (Result a)
       fun (Lam _ _ l)  = fun l
       fun (Body t _ _) = t
-      fun (VarLams f) = unsafeCoerce (fun f)
+      fun (VarLams f)  = fun f
 
 -- Utility to construct GetElementPtr instructions for accessing a field of a struct.
 -- This function is not in GetElementPtr.hs as that would cause a cycle.

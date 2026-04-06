@@ -75,7 +75,7 @@ data GroupID = GroupID !Word
 data Function kind t where
   Body :: Result r ~ r => Type r -> Maybe TailCall -> kind -> Function kind r
   Lam  :: PrimType a -> Name a -> Function kind t -> Function kind (a -> t)
-  VarLams :: Function kind (Result f) -> Function kind f
+  VarLams :: Result (Result f) ~ Result f => Function kind (Result f) -> Function kind f
 
 lamUnnamed :: PrimType a -> Function kind t -> Function kind (a -> t)
 lamUnnamed tp = Lam tp (UnName 0)
@@ -107,6 +107,18 @@ instance Downcast TailCall Bool where
 type family Result t where
   Result (s -> t) = Result t
   Result t        = t
+
+typeIsResult :: Type r -> r :~: Result r
+typeIsResult VoidType = Refl
+typeIsResult (PrimType t) = primTypeIsResult t
+
+primTypeIsResult :: PrimType r -> r :~: Result r
+primTypeIsResult BoolPrimType = Refl
+primTypeIsResult PtrPrimType{} = Refl
+primTypeIsResult ArrayPrimType{} = Refl
+primTypeIsResult StructPrimType{} = Refl
+primTypeIsResult NamedPrimType{} = Refl
+primTypeIsResult (ScalarPrimType tp) = scalarTypeIsResult tp
 
 scalarTypeIsResult :: ScalarType r -> r :~: Result r
 scalarTypeIsResult (VectorScalarType _) = Refl

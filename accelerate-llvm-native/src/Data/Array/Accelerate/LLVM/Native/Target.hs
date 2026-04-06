@@ -57,46 +57,44 @@ instance Target Native where
 
 instance Intrinsic Native where
   trapWithMessage msg = do
-    _ <- putString (unpack msg)
+    printString (unpack msg)
     _ <- fflush
 
-    -- On Windows calling putString and llvm.trap consecutively causes
+    -- On Windows calling puts and llvm.trap consecutively causes
     -- the program to hang in an infinite loop, repeatedly printing newline characters.
     -- So instead of using llvm.trap, we call the abort function from the C standard library.
     -- This is also what llvm.trap would be lowered to if the target does not have a trap instruction.
     -- See: https://llvm.org/docs/LangRef.html#llvm-trap-intrinsic
+    --
+    -- TODO: This was tested when we used 'puts', but now we use 'printf' (via putString).
+    -- We should test this again.
     if Info.os == "mingw32"
       then abort
       else trap
 
-printf :: IsPrim a => String -> Operand a -> CodeGen Native (Operands Int)
+printf :: IsPrim a => String -> Operand a -> CodeGen Native ()
 printf format val = do
   (nm, l) <- global_string format
   let strPtr = ConstantOperand $ derefGlobalString l nm
-  call (lamUnnamed primType $ VarLams $ Body (PrimType primType) Nothing (Label "printf"))
+  call (lamUnnamed primType $ VarLams $ Body (PrimType $ primType @Int32) Nothing (Label "printf"))
        (ArgumentsCons strPtr []
          $ ArgumentsCons val []
            ArgumentsNil)
        []
+  return ()
 
 putInt :: Operands Int -> CodeGen Native ()
 putInt x = void $ printf "%d" (op TypeInt x)
 
-putchar :: Operands Int -> CodeGen Native (Operands Int)
-putchar x = call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "putchar"))
-                 (ArgumentsCons (op TypeInt x) [] ArgumentsNil)
-                 []
-
-putString :: String -> CodeGen Native (Operands Int)
-putString msg = do
-  (nm, l) <- global_string msg
-  let strPtr = ConstantOperand $ derefGlobalString l nm
-  call (lamUnnamed primType $ Body (PrimType primType) Nothing (Label "puts"))
-       (ArgumentsCons strPtr [] ArgumentsNil)
-       []
+putchar :: Operands Int32 -> CodeGen Native ()
+putchar x = void $
+  call (lamUnnamed primType $ Body (PrimType $ primType @Int32) Nothing (Label "putchar"))
+       (ArgumentsCons (op TypeInt32 x) [] ArgumentsNil) []
 
 printString :: String -> CodeGen Native ()
-printString msg = do 
+printString "" = return ()
+printString [c] = putchar $ liftInt32 $ Prelude.fromIntegral $ fromEnum c
+printString msg = do
   (nm, l) <- global_string msg
   let strPtr = ConstantOperand $ derefGlobalString l nm
   _ <- printf "%s" strPtr

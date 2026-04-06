@@ -50,8 +50,8 @@ instance Downcast (GlobalFunction t) LLVM.Declare where
       trav (Body t _ n) = ([], False, downcast t, labelToPrettyS n)
       trav (Lam a _ l)  = let (as, b, r, n) = trav l
                           in  (downcast a : as, b, r, n)
-      trav (VarLams f) = let (as, b, r, n) = trav f
-                          in  (as, b, r, n)
+      trav (VarLams f)  = let (as, _, r, n) = trav f
+                          in  (as, True, r, n)
       --
       (args, varArgs, res, nm) = trav f
 

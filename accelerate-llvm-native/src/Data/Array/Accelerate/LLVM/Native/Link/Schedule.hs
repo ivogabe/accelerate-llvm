@@ -1095,9 +1095,9 @@ convert inAwhile (Effect (Atrace msg t) next)
       varsInStruct = varsInStruct next1,
       maySuspend = maySuspend next1,
       phase2 = \imports fullState structVars localVars importsIdx stateIdx nextBlock -> do
-        printString (unpack msg ++ ": ")
-        putArrayDescriptors structVars localVars t -- TODO(Mike): Array ook schrijven naar console
-        printString "]\n"
+        -- TODO: Acquire lock for printing to the console
+        printString (unpack msg ++ ":\n")
+        putArrayDescriptors structVars localVars t
         phase2Sub next1 imports fullState structVars localVars importsIdx stateIdx nextBlock
     }
 -- Bindings
@@ -1955,7 +1955,7 @@ putArrayDescriptors :: StructVars env -> LocalVars env -> ArrayDescriptors env t
 putArrayDescriptors structVars localVars = foldMapMTupR (putArrayDescriptor structVars localVars)
 
 putArrayDescriptor :: forall env t. StructVars env -> LocalVars env -> ArrayDescriptor env t -> CodeGen Native ()
-putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
+putArrayDescriptor structVars localVars (ArrayDescriptor shr sh buffer) = do
   let
     computeSize :: StructVars env -> LocalVars env -> ShapeR sh -> GroundVars env sh -> Operands Int -> CodeGen Native (LocalVars env, Operands Int, [Operands Int])
     computeSize _ localVars' ShapeRz _ accum = return (localVars', accum, [])
@@ -1972,19 +1972,18 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
       TupRunit -> return ()
       TupRsingle (Var tp idx)
         | GroundRbuffer t <- tp -> do
-            ptr   <- getPtr structVars idx
-            ptr'  <- instr' $ Load NonVolatile ptr Nothing
-            ptr'' <- instr' $ GetElementPtr $ GEP1 ptr' $ op scalarTypeInt index
-            value <- load NonVolatile t ptr'' Nothing
-            _ <- printValue t value
+            (_, ptr) <- getValue structVars localVars tp idx
+            ptr' <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt index
+            value <- load NonVolatile t ptr' Nothing
+            printValue t value
             return ()
         | otherwise -> return ()
       TupRpair l r -> do
-        _ <- putchar (A.liftInt $ fromEnum '(')
+        printString "("
         printTupleContents l index
-        _ <- putchar (A.liftInt $ fromEnum ',')
+        printString ","
         printAtIndex r index
-        _ <- putchar (A.liftInt $ fromEnum ')')
+        printString ")"
         return ()
 
     printTupleContents :: forall x. TupR (Var GroundR env) x -> Operands Int -> CodeGen Native ()
@@ -1994,38 +1993,55 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shape sh buffer) = do
       TupRpair TupRunit r -> printAtIndex r index
       TupRpair l r -> do
         printTupleContents l index
-        _ <- putchar (A.liftInt $ fromEnum ',')
+        printString ","
         printAtIndex r index
 
-  (_, sz, sizes) <- computeSize structVars localVars shape sh (A.liftInt 1)
+  (_, sz, sizes) <- computeSize structVars localVars shr sh (A.liftInt 1)
 
-  printShape shape
-  printString "(Z "
+  printShape shr
 
-  forM_ sizes $ \x -> do
-      printString ":. "
-      putInt x
-  printString "):\n["
+  case shr of 
+    ShapeRz -> do
+      printString "["
+      printAtIndex buffer $ A.liftInt 0
+      printString "]\n"
+    ShapeRsnoc ShapeRz -> do
+      printString "(Z :. "
+      putInt $ head sizes
+      printString ") ["
 
-  -- Here the size of the buffer is subtracted by one because the last index is printed outside of the loop
-  sz' <- A.sub numType sz (A.liftInt 1)
+      A.when (A.neq singleType sz (A.liftInt 0)) $ do
+        printAtIndex buffer $ A.liftInt 0 -- Peel first iteration out of the loop
+        imapFromStepTo [] (A.liftInt 1) (A.liftInt 1) sz $ \i -> do
+          printString ","
+          printAtIndex buffer i
+      printString $ "]\n"
+    _ -> do
+      printString "(Z"
+      forM_ sizes $ \x -> do
+          printString " :. "
+          putInt x
+      printString ")\n   ["
 
-  imapFromStepTo [] (A.liftInt 0) (A.liftInt 1) sz' $ \i -> do
-    printAtIndex buffer i
-    _ <- putchar (A.liftInt $ fromEnum ',')
+      A.when (A.neq singleType sz (A.liftInt 0)) $ do
+        printAtIndex buffer $ A.liftInt 0
+        imapFromStepTo [] (A.liftInt 1) (A.liftInt 1) sz $ \i -> do
+          printString ","
+          modI <- A.rem integralType i (last sizes)
+          A.when (A.eq (NumSingleType (IntegralNumType TypeInt)) modI (A.liftInt 0)) (printString "\n   ")
+          printString " "
 
-    iPlusOne <- A.add numType i (A.liftInt 1)
-    modI <- A.rem integralType iPlusOne (last sizes)
-    A.when (A.eq (NumSingleType (IntegralNumType TypeInt)) modI (A.liftInt 0)) (printString "\n ")
-  printAtIndex buffer sz'
+          printAtIndex buffer i
 
-printShape :: ShapeR sh -> CodeGen Native()
-printShape ShapeRz = printString "Scalar "
-printShape (ShapeRsnoc ShapeRz) = printString "Vector "
-printShape (ShapeRsnoc (ShapeRsnoc ShapeRz)) = printString "Matrix "
-printShape _ = printString "Array "
+      printString $ "]\n"
 
-printValue :: ScalarType e -> Operand e -> CodeGen Native (Operands Int)
+printShape :: ShapeR sh -> CodeGen Native ()
+printShape ShapeRz = printString "  Scalar "
+printShape (ShapeRsnoc ShapeRz) = printString "  Vector "
+printShape (ShapeRsnoc (ShapeRsnoc ShapeRz)) = printString "  Matrix "
+printShape _ = printString "  Array "
+
+printValue :: ScalarType e -> Operand e -> CodeGen Native ()
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt))) value = printf "%d" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt8))) value = printf "%hhd" value
 printValue (SingleScalarType (NumSingleType (IntegralNumType TypeInt16))) value = printf "%hd" value
@@ -2040,13 +2056,13 @@ printValue (SingleScalarType (NumSingleType (FloatingNumType TypeHalf))) value =
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeFloat))) value = printf "%f" value
 printValue (SingleScalarType (NumSingleType (FloatingNumType TypeDouble))) value = printf "%lf" value
 printValue (VectorScalarType (VectorType n singleType)) vec = do
-  _ <- putchar (A.liftInt $ fromEnum '<')
+  printString "<"
 
   value <- instr $ ExtractElement (0 :: Int32) vec
   _ <- printValue (SingleScalarType singleType) (op (SingleScalarType singleType) value)
 
   forM_ [1 .. n - 1] $ \i -> do
-    _ <- putchar (A.liftInt $ fromEnum ',')
+    printString ","
     value <- instr $ ExtractElement (fromIntegral i :: Int32) vec
     printValue (SingleScalarType singleType) (op (SingleScalarType singleType) value)
-  putchar (A.liftInt $ fromEnum '>')
+  printString ">"
