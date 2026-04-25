@@ -85,7 +85,7 @@ codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
-  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "workassist.first_index") $ do
+  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "thread.index" . LLVM.Lam primType "thread.count") $ do
     extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -94,7 +94,7 @@ codegen name env cluster args
     initBlock <- newBlock "init"
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
-    _ <- switch (OP_Word64 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
+    _ <- switch (OP_Word32 threadIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
 
     if parallelDepth == 0 && rank shr /= 0 then do
@@ -180,7 +180,7 @@ codegen name env cluster args
             -- here.
             bindLocals 0 envs' >>=
             bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize
-          workassistLoop workassistIndex workassistFirstIndex tileCount $ \seqMode tileIdx' -> do
+          workassistLoop workassistIndex threadIndex threadCount tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
             (_, lower, upper, _) <- tileRange (isDescending direction) (op TypeInt size) (integral TypeInt tileSize) tileCount' tileIdx
 
@@ -302,7 +302,7 @@ codegen name env cluster args
             if parallelDepth /= rank shr then []
             else {- if hasPermute then -} [Loop.LoopInterleave]
             -- else [Loop.LoopVectorize]
-      workassistChunked ann parallelShr workassistIndex workassistFirstIndex tileSize parSizes $ \idx -> do
+      workassistChunked ann parallelShr workassistIndex threadIndex threadCount tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -316,7 +316,7 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, workassistIndex, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, workassistIndex, threadIndex {- or flag -}, threadCount, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True

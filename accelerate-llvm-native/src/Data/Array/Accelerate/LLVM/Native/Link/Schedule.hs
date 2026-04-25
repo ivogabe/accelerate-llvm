@@ -880,7 +880,7 @@ convert inAwhile (Effect effect@(Exec _ kernel kargs) next)
       threadsPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       _ <- instr' $ Store NonVolatile threadsPtr (integral TypeWord32 0) Nothing -- active_threads
       workIdxPtr <- instr' $ GetElementPtr $ gepStruct primType args (TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
-      _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 1) Nothing -- work_index
+      _ <- instr' $ Store NonVolatile workIdxPtr (integral TypeWord64 0) Nothing -- work_index
 
       when Debug.tracyIsEnabled $ do
         let name = kernelName kernel

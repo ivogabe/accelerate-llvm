@@ -145,7 +145,7 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
 // locks: an array of locks that can be used by any permutes in the kernel.
 // This array is global, i.e. all kernels use the same array of locks, and is
 // taken from Workers.locks.
-typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint8_t *locks, uint32_t first_index);
+typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint8_t *locks, uint32_t thread_index, uint32_t max_thread_count);
 struct KernelLaunch {
   KernelFunction *work_function;
   struct Program *program;

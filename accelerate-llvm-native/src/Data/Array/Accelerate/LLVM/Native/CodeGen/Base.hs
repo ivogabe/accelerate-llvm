@@ -45,7 +45,7 @@ import qualified Data.ByteString.Short.Char8                        as S8
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = ((((((Ptr (Struct Int8)), Ptr Int8), Word32), Word32), Word64), Ptr TracySrcloc)
+type Header = (((((Ptr (Struct Int8), Ptr Int8), Word32), Word32), Word64), Ptr TracySrcloc)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
@@ -60,8 +60,10 @@ type KernelType env
   = Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word))
   -- Ptr to the locks array (for any permutes)
   -> Ptr Word8
-  -- first_index, or a magic value for single-threaded initialization or finalization
-  -> Word64
+  -- thread_index, or a magic value for single-threaded initialization or finalization
+  -> Word32
+  -- max_thread_count
+  -> Word32
   -- Only in initialization, this function returns whether the kernel should run sequentially or in parallel
   -> Word8
 
@@ -70,7 +72,8 @@ bindHeaderEnv
   -> ( PrimType (Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)))
      , CodeGen Native ()
      , Operand (Ptr Word64) -- Pointer to work index
-     , Operand (Word64) -- First work index index
+     , Operand Word32 -- First work index index
+     , Operand Word32 -- Maximum number of threads (currently always the total number of worker threads of the system)
      , Operand (Ptr (SizedArray Word))
      , Gamma env
      )
@@ -82,7 +85,8 @@ bindHeaderEnv env =
       instr_ $ downcast $ nameKernelMemory := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
-  , LocalReference type' nameFirstIndex
+  , LocalReference type' nameThreadIndex
+  , LocalReference type' nameThreadCount
   , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
   , gamma
   )
@@ -94,7 +98,8 @@ bindHeaderEnv env =
     (envTp, extractEnv, gamma) = bindEnvFromStruct env
 
     nameIndex = "workassist.index"
-    nameFirstIndex = "workassist.first_index"
+    nameThreadIndex = "thread.index"
+    nameThreadCount = "thread.count"
     nameKernelMemory = "kernel_memory"
 
     kernelMemTp :: PrimType (SizedArray Word)
