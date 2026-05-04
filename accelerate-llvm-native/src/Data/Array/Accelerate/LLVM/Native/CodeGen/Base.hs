@@ -30,6 +30,7 @@ import Data.Primitive.Vec
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Operand
 
 import Data.String
@@ -40,15 +41,17 @@ import qualified Data.ByteString.Short.Char8                        as S8
 --  * continuation: ptr, u32 (program, location)
 --  * active_threads: u32,
 --  * work_index: u64,
+--  * work_per_thread: ptr (to array of u64),
 --  * tracy_srcloc: ptr,
 --  * In the future, perhaps also store a work_size: u32
 -- We store the work function as a pointer to a struct, as that makes it easy
 -- to separate pointers to a kernel from pointers to buffers, when compiling
 -- a schedule.
-type Header = (((((Ptr (Struct Int8), Ptr Int8), Word32), Word32), Word64), Ptr TracySrcloc)
+type Header = ((((((Ptr (Struct Int8), Ptr Int8), Word32), Word32), Word64), Ptr Word64), Ptr TracySrcloc)
 
 headerType :: TupR PrimType Header
 headerType = TupRsingle (PtrPrimType (StructPrimType False $ TupRsingle primType) defaultAddrSpace)
+  `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
   `TupRpair` TupRsingle primType
@@ -72,6 +75,7 @@ bindHeaderEnv
   -> ( PrimType (Ptr (Struct ((Header, Struct (MarshalEnv env)), SizedArray Word)))
      , CodeGen Native ()
      , Operand (Ptr Word64) -- Pointer to work index
+     , Operand (Ptr Word64) -- work_per_thread
      , Operand Word32 -- First work index index
      , Operand Word32 -- Maximum number of threads (currently always the total number of worker threads of the system)
      , Operand (Ptr (SizedArray Word))
@@ -80,11 +84,14 @@ bindHeaderEnv
 bindHeaderEnv env =
   ( argTp
   , do
-      instr_ $ downcast $ nameIndex := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameIndex := GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      workPerThreadPtr <- instr' $ GetElementPtr (gepStruct primType arg $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
+      instr_ $ downcast $ nameWorkPerThread := Load NonVolatile workPerThreadPtr Nothing
       instr_ $ downcast $ "env" := GetElementPtr (gepStruct envTp arg $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf)
       instr_ $ downcast $ nameKernelMemory := GetElementPtr (gepStruct kernelMemTp arg $ TupleIdxRight TupleIdxSelf)
       extractEnv
   , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameIndex
+  , LocalReference (PrimType $ PtrPrimType (ScalarPrimType scalarType) defaultAddrSpace) nameWorkPerThread
   , LocalReference type' nameThreadIndex
   , LocalReference type' nameThreadCount
   , LocalReference (PrimType $ PtrPrimType kernelMemTp defaultAddrSpace) nameKernelMemory
@@ -98,6 +105,7 @@ bindHeaderEnv env =
     (envTp, extractEnv, gamma) = bindEnvFromStruct env
 
     nameIndex = "workassist.index"
+    nameWorkPerThread = "work_per_thread"
     nameThreadIndex = "thread.index"
     nameThreadCount = "thread.count"
     nameKernelMemory = "kernel_memory"

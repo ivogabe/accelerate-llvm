@@ -180,7 +180,12 @@ codegen name env cluster args
             -- here.
             bindLocals 0 envs' >>=
             bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize
-          workassistLoop workassistIndex threadIndex threadCount tileCount $ \seqMode tileIdx' -> do
+          -- TODO: Set maxClaim based on:
+          -- * If the kernel contains scans, then 1.
+          -- * If the kernel contains non-commutative folds, then a small number between 2 and 8 (only possible after implementing folds based on interleaved scans)
+          -- * Otherwise, a high number like 1024. In this case, the kernel contains commutative folds which do not require a specific order.
+          let maxClaim = 1
+          workassistLoop workassistIndex workPerThread maxClaim threadIndex threadCount tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
             (_, lower, upper, _) <- tileRange (isDescending direction) (op TypeInt size) (integral TypeInt tileSize) tileCount' tileIdx
 
@@ -302,7 +307,7 @@ codegen name env cluster args
             if parallelDepth /= rank shr then []
             else {- if hasPermute then -} [Loop.LoopInterleave]
             -- else [Loop.LoopVectorize]
-      workassistChunked ann parallelShr workassistIndex threadIndex threadCount tileSize parSizes $ \idx -> do
+      workassistChunked ann parallelShr workassistIndex workPerThread 1024 threadIndex threadCount tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -316,7 +321,7 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, workassistIndex, threadIndex {- or flag -}, threadCount, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, workassistIndex, workPerThread, threadIndex {- or flag -}, threadCount, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True

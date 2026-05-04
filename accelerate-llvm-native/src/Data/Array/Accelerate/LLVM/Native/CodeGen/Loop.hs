@@ -21,7 +21,6 @@ module Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Shape                   hiding ( eq )
 
-import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                hiding ( lift )
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
@@ -39,12 +38,15 @@ import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Constant
+import LLVM.AST.Type.GetElementPtr
 import qualified LLVM.AST.Type.Instruction.RMW as RMW
 import qualified LLVM.AST.Type.Instruction.Compare as Compare
+import LLVM.AST.Type.Name
+import Data.Array.Accelerate.LLVM.CodeGen.Base
+
 import Control.Monad.Trans
 import Control.Monad.State
-import Data.Array.Accelerate.LLVM.CodeGen.Base
-import LLVM.AST.Type.Name
+import Data.Bits
 
 -- | A standard 'for' loop, that steps from the start to end index executing the
 -- given function at each index.
@@ -55,7 +57,7 @@ imapFromTo
     -> (Operands Int -> CodeGen Native ())            -- ^ apply at each index
     -> CodeGen Native ()
 imapFromTo start end body =
-  Loop.imapFromStepTo [] start (liftInt 1) end body
+  Loop.imapFromStepTo [] start (A.liftInt 1) end body
 
 
 -- | Generate a series of nested 'for' loops which iterate between the start and
@@ -83,7 +85,7 @@ imapNestFromTo annOuter annInner shr start end extent body =
 
     go (ShapeRsnoc shr') (OP_Pair ssh ssz) (OP_Pair esh esz) k
       = go shr' ssh esh
-      $ \sz      -> Loop.imapFromStepTo ann ssz (liftInt 1) esz
+      $ \sz      -> Loop.imapFromStepTo ann ssz (A.liftInt 1) esz
       $ \i       -> k (OP_Pair sz i)
       where
         ann = case shr' of
@@ -179,16 +181,22 @@ iterFromTo
     -> (Operands Int -> Operands a -> CodeGen Native (Operands a))    -- ^ apply at each index
     -> CodeGen Native (Operands a)
 iterFromTo tp start end seed body =
-  Loop.iterFromStepTo [] tp start (liftInt 1) end seed body
+  Loop.iterFromStepTo [] tp start (A.liftInt 1) end seed body
+
+-- Should match with ACCELERATE_WORK_PER_THREAD_STRIDE in types.h
+workPerThreadStride :: Word32
+workPerThreadStride = 8
 
 workassistLoop
     :: Operand (Ptr Word64)                 -- index into work
+    -> Operand (Ptr Word64)                 -- work_per_thread
+    -> Word64                               -- maximum number of tiles to claim at once. When zero, this performs self scheduling, otherwise it performs data-parallel work stealing.
     -> Operand Word32                       -- thread index
     -> Operand Word32                       -- maximum number of threads
     -> Operand Word64                       -- size of total work
     -> (Operand Bool -> Operand Word64 -> CodeGen Native ())
     -> CodeGen Native ()
-workassistLoop counter threadIndex threadCount size doWork = do
+workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork = do
   entry    <- getBlock
   claim    <- newBlock "workassist.loop.claim"
   work     <- newBlock "workassist.loop.work"
@@ -206,18 +214,144 @@ workassistLoop counter threadIndex threadCount size doWork = do
   _ <- br claim
 
   _ <- setBlock claim
-  instr_ $ downcast $ "block_index" := AtomicRMW numType NonVolatile RMW.Add counter (integral TypeWord64 1) (CrossThread, Monotonic)
+  if maxClaim == 1 then do
+    instr_ $ downcast $ "block_index" := AtomicRMW numType NonVolatile RMW.Add counter (integral TypeWord64 1) (CrossThread, Monotonic)
+    condition <- A.lt singleType (OP_Word64 index) (OP_Word64 size)
+    _ <- cbr condition work exit
 
-  condition <- lt singleType (OP_Word64 index) (OP_Word64 size)
-  _ <- cbr condition work exit
+    _ <- setBlock work
+    return ()
+  else do
+    claimGlobal <- newBlock "workassist.loop.claim.global"
+    claimGlobalGo <- newBlock "workassist.loop.claim.global.go"
+    claimGlobalSuccess <- newBlock "workassist.loop.claim.global.success"
+    claimSteal <- newBlock "workassist.loop.claim.steal"
 
-  _ <- setBlock work
+    -- In workPerThread, each thread stores the range of work it has claimed,
+    -- but has not started working on.
+    -- We represent this range as a single Word64 by packing the start and
+    -- size of the range. The 48 most significant bits are used for the
+    -- start tile index, and the 16 least significant store the size.
+    -- The size is treated as a *signed* integer, and may become negative
+    -- when multiple threads concurrently claim (steal) work from this entry.
+    -- We limit the size of a steal, to ensure the size won't wrap around
+    -- (underflow) during many concurrent steals.
+    --
+    -- Scheduling works via three sub-procedures:
+    -- 1. Claiming from our own workPerThread entry.
+    -- 2. If that fails, claim work from the global counter, add that to our
+    --    entry in workPerThread.
+    -- 3. If that also fails, steal work from other threads by updating their
+    --    workPerThread entry.
+
+    OP_Word32 threadIndexMulStride <- A.mul numType (OP_Word32 threadIndex) $ OP_Word32 $ integral TypeWord32 workPerThreadStride
+    workPerThreadSelf <- instr' $ GetElementPtr $ GEP1 workPerThread threadIndexMulStride
+
+    -- 1. Claim from our own workPerThread entry.
+    indexLocal <- do
+      -- Increment the start index of the range by one,
+      -- and decrement the size by one,
+      -- to claim the first item (tile) of the range.
+      let increment = (1 `shiftL` 16) - 1
+      packed <- instr' $ AtomicRMW numType NonVolatile RMW.Add workPerThreadSelf (integral TypeWord64 increment) (CrossThread, Monotonic)
+
+      -- Unpack the packed value
+      OP_Word64 start <- A.shiftR TypeWord64 (OP_Word64 packed) (A.liftInt 16)
+      let sizeMask = (1 `shiftL` 16) - 1
+      size' <- A.band TypeWord64 (OP_Word64 packed) (A.liftWord64 sizeMask)
+      -- Convert to signed 16 bit number
+      size16 <- A.fromIntegral TypeWord64 numType size'
+      OP_Int64 size <- A.fromIntegral TypeInt16 numType size16
+
+      success <- A.gt singleType (OP_Int64 size) $ A.liftInt64 0
+
+      _ <- cbr success work claimGlobal
+      return start
+
+    -- 2. Otherwise, claim from global counter
+    indexGlobal <- do
+      _ <- setBlock claimGlobal
+      -- First, use a heuristic to compute how many tiles we will claim from
+      -- the global counter. This is based on the current number of remaining
+      -- tiles. There is a risk for a race condition here, as there is time
+      -- between computing the tile size and doing the actual fetch-and-add.
+      -- This race condition is not a correctness problem however; it will
+      -- only impact performance when we claim too many tiles.
+      -- In case this happens, other threads can still steal those tiles back,
+      -- and we can thus still balance the work (although with slightly more
+      -- overhead).
+      -- TODO: Change volatile load to atomic load
+      currentCounter <- instr' $ Load Volatile counter Nothing
+      check <- A.lt singleType (OP_Word64 currentCounter) (OP_Word64 size)
+      _ <- cbr check claimGlobalGo claimSteal
+
+      -- TODO: If maxClaim is small (<= 32) we could drop this heuristic, and
+      -- always claim maxClaim tiles. We could then also drop the early out
+      -- via 'check'.
+      -- The following code somewhat assumes that maxClaim is more than 16.
+      -- (It will work, but the heuristic is essentially doing nothing
+      -- and always claiming maxClaim tiles if maxClaim <= 16).
+
+      _ <- setBlock claimGlobalGo
+      OP_Word64 currentRemaining <- A.sub numType (OP_Word64 size) (OP_Word64 currentCounter)
+      OP_Word64 maxThreadsMul2 <- A.fromIntegral integralType numType (OP_Word32 maxThreads) >>= A.mul numType (A.liftWord64 2)
+      -- Use 'remaining / (maxThreads * 2)' as initial heuristic
+      count1 <- A.quot TypeWord64 (OP_Word64 currentRemaining) (OP_Word64 maxThreadsMul2)
+      -- Claim at least 16 tiles
+      count2 <- A.max singleType count1 (A.liftWord64 2)
+      -- Claim at most maxClaim tiles
+      OP_Word64 count3 <- A.min singleType count2 (A.liftWord64 maxClaim)
+
+      -- TODO: Maybe we should announce here that we will claim something from
+      -- the global counter. This informs other threads during stealing, that
+      -- more stealable work might become available soon, and that they should
+      -- not exit yet.
+      -- We can announce this by storing a magic value in workPerThreadSelf.
+      -- This magic value will be overwritten already by the newly claimed
+      -- work. However, if there is no more work to be claimed, we need to
+      -- explicitely remove this announcement.
+
+      -- Increment the global counter by count3
+      index <- instr' $ AtomicRMW numType NonVolatile RMW.Add counter count3 (CrossThread, Monotonic)
+
+      success <- A.lt singleType (OP_Word64 index) (OP_Word64 size)
+
+      _ <- cbr success claimGlobalSuccess claimSteal
+
+      _ <- setBlock claimGlobalSuccess
+      -- Success, we claimed some blocks from the global counter.
+      -- Check how many we actually claimed (since we may have claimed fewer
+      -- tiles if those were the last tiles).
+      maxClaimed <- A.sub numType (OP_Word64 size) (OP_Word64 index)
+      claimed <- A.min singleType (OP_Word64 count3) maxClaimed
+      claimedSubOne <- A.sub numType claimed $ A.liftWord64 1
+      _ <- br work
+
+      indexPlusOne <- A.add numType (OP_Word64 index) $ A.liftWord64 1
+      -- Pack indexPlusOne and claimedSubOne into a word, and store that in workPerThread
+      OP_Word64 packed <- A.shiftL TypeWord64 indexPlusOne (A.liftInt 16) >>= A.bor TypeWord64 claimedSubOne
+      -- TODO: Change volatile store to atomic store
+      _ <- instr' $ Store Volatile workPerThreadSelf packed Nothing
+
+      return index
+
+    -- 3. Otherwise, steal from other thread
+    indexSteal <- do
+      -- TODO: Steal work from other threads
+      _ <- setBlock claimSteal
+      _ <- br exit
+      return $ integral TypeWord64 0xFFFFFFFF -- TODO
+
+    -- Add phi node to the work block, so it will choose the correct index
+    _ <- setBlock work
+    _ <- phi1 work "block_index" [(indexLocal, claim), (indexGlobal, claimGlobalSuccess) {-, (indexSteal, claimSteal TODO: Is this the right block? (We problably add if-then-elses to stealing...)) -}]
+    return ()
 
   instr_ $ downcast $ "sequential_mode" := Cmp singleType Compare.EQ index nextIfSeq
   doWork seqMode index
 
-  nextNextIfSeq <- add numType (OP_Word64 nextIfSeq) (OP_Word64 $ integral TypeWord64 1)
-  OP_Word64 nextNextIfSeq' <- select (TupRsingle scalarTypeWord64) (OP_Bool seqMode) nextNextIfSeq (OP_Word64 $ integral TypeWord64 0)
+  nextNextIfSeq <- A.add numType (OP_Word64 nextIfSeq) (OP_Word64 $ integral TypeWord64 1)
+  OP_Word64 nextNextIfSeq' <- A.select (TupRsingle scalarTypeWord64) (OP_Bool seqMode) nextNextIfSeq (OP_Word64 $ integral TypeWord64 0)
 
   _ <- br claim
 
@@ -225,18 +359,18 @@ workassistLoop counter threadIndex threadCount size doWork = do
   -- We can only do this now, as we need to have 'nextIndex', and know the
   -- exit block of 'doWork'.
   currentBlock <- getBlock
-  phi1 claim nextIfSeqName [(integral TypeWord64 0, entry), (nextNextIfSeq', currentBlock)]
+  _ <- phi1 claim nextIfSeqName [(integral TypeWord64 0, entry), (nextNextIfSeq', currentBlock)]
 
   setBlock exit
   retval_ $ scalar (scalarType @Word8) 0
 
-workassistChunked :: [Loop.LoopAnnotation] -> ShapeR sh -> Operand (Ptr Word64) -> Operand Word32 -> Operand Word32 -> sh -> Operands sh -> (Operands sh -> CodeGen Native ()) -> CodeGen Native ()
-workassistChunked ann shr counter threadIndex threadCount chunkSz' sh doWork = do
+workassistChunked :: [Loop.LoopAnnotation] -> ShapeR sh -> Operand (Ptr Word64) -> Operand (Ptr Word64) -> Word64 -> Operand Word32 -> Operand Word32 -> sh -> Operands sh -> (Operands sh -> CodeGen Native ()) -> CodeGen Native ()
+workassistChunked ann shr counter workPerThread maxClaim threadIndex maxThreads chunkSz' sh doWork = do
   let chunkSz = A.lift (shapeType shr) chunkSz'
   chunkCounts <- chunkCount shr sh chunkSz
   chunkCnt <- shapeSize shr chunkCounts
   chunkCnt' :: Operand Word64 <- instr' $ BitCast scalarType $ op TypeInt chunkCnt
-  workassistLoop counter threadIndex threadCount chunkCnt' $ \_ chunkLinearIndex -> do
+  workassistLoop counter workPerThread maxClaim threadIndex maxThreads chunkCnt' $ \_ chunkLinearIndex -> do
     chunkLinearIndex' <- instr' $ BitCast scalarType chunkLinearIndex
     chunkIndex <- indexOfInt shr chunkCounts (OP_Int chunkLinearIndex')
     start <- chunkStart shr chunkSz chunkIndex
@@ -249,10 +383,10 @@ chunkSizeOne (ShapeRsnoc sh) = (chunkSizeOne sh, 1)
 
 chunkSize :: ShapeR sh -> sh
 chunkSize ShapeRz = ()
-chunkSize (ShapeRsnoc ShapeRz) = ((), 1024 * 8)
-chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 64), 128)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 8), 16), 64)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((chunkSizeOne sh, 4), 4), 8), 64)
+chunkSize (ShapeRsnoc ShapeRz) = ((), 1024)
+chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 32), 32)
+chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 8), 8), 16)
+chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((chunkSizeOne sh, 4), 4), 8), 8)
 
 chunkCount :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen Native (Operands sh)
 chunkCount ShapeRz OP_Unit OP_Unit = return OP_Unit
@@ -261,8 +395,8 @@ chunkCount (ShapeRsnoc shr) (OP_Pair sh sz) (OP_Pair chunkSh chunkSz) = do
   
   -- Compute ceil(sz / chunkSz), as
   -- (sz + chunkSz - 1) `quot` chunkSz
-  chunkszsub1 <- sub numType chunkSz $ liftInt 1
-  sz' <- add numType sz chunkszsub1
+  chunkszsub1 <- A.sub numType chunkSz $ A.liftInt 1
+  sz' <- A.add numType sz chunkszsub1
   count <- A.quot TypeInt sz' chunkSz
 
   return $ OP_Pair counts count
@@ -271,7 +405,7 @@ chunkStart :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen Native (Operand
 chunkStart ShapeRz OP_Unit OP_Unit = return OP_Unit
 chunkStart (ShapeRsnoc shr) (OP_Pair chunkSh chunkSz) (OP_Pair sh sz) = do
   ixs <- chunkStart shr chunkSh sh
-  ix <- mul numType sz chunkSz
+  ix <- A.mul numType sz chunkSz
   return $ OP_Pair ixs ix
 
 chunkEnd
@@ -283,6 +417,6 @@ chunkEnd
 chunkEnd ShapeRz OP_Unit OP_Unit OP_Unit = return OP_Unit
 chunkEnd (ShapeRsnoc shr) (OP_Pair sh0 sz0) (OP_Pair sh1 sz1) (OP_Pair sh2 sz2) = do
   sh3 <- chunkEnd shr sh0 sh1 sh2
-  sz3 <- add numType sz2 sz1
+  sz3 <- A.add numType sz2 sz1
   sz3' <- A.min singleType sz3 sz0
   return $ OP_Pair sh3 sz3'

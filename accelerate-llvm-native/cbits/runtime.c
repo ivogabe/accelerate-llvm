@@ -53,6 +53,49 @@ void accelerate_parker_wake_all(struct ThreadParker *parker) {
   pthread_mutex_unlock(&parker->lock);
 }
 
+// Claims an entry from Workers.work_per_thread_array.
+// Note that this claims one array, to be used for scheduling within a kernel.
+// It does not claim the actual work within that kernel.
+// See comment on Workers.work_per_thread_array
+inline _Atomic uint64_t* accelerate_work_per_thread_claim(struct Workers *workers, uint16_t thread_idx) {
+  uint16_t thread_count = workers->thread_count;
+  int16_t inc = (thread_idx % 2 == 0) ? 1 : (thread_count - 1);
+  int16_t i = thread_idx;
+
+  // This loop will terminate, because:
+  // Each thread may only 'own' one work_per_thread at a time.
+  // There are thread_count work_per_threads.
+  // A thread cannot call accelerate_work_per_thread_claim when it already owns
+  // one.
+  // Hence there will be at least one free entry; we just need to find it.
+  // Note that due to concurrent access, which entry is free may change during
+  // the execution of the function. We just know that at any point in time, at
+  // least one entry will be free.
+  while (true) {
+    uint16_t slot_idx = i / 64;
+    uint16_t bit_idx = i % 64;
+
+    // If this ever becomes a bottleneck, we can optimize this code by using
+    // the fact that multiple bits are in one uint64. We can for instance
+    // find a free spot directly using count-leading-zeros over the bitwise negated value,
+    // instead of individually trying all bits via atomic_fetch_or_explicit.
+    uint64_t old = atomic_fetch_or_explicit(&workers->work_per_thread_free[slot_idx], 1 << bit_idx, memory_order_acquire);
+    if ((old & (1 << bit_idx)) != 0) {
+      return &workers->work_per_thread_array[i * thread_count * ACCELERATE_WORK_PER_THREAD_STRIDE];
+    }
+
+    i += inc;
+    if (i >= thread_count) i -= thread_count;
+  }
+}
+
+inline void accelerate_work_per_thread_free(struct Workers *workers, _Atomic uint64_t *work_per_thread) {
+  int16_t idx = (work_per_thread - workers->work_per_thread_array) / (workers->thread_count * ACCELERATE_WORK_PER_THREAD_STRIDE);
+  uint16_t slot_idx = idx / 64;
+  uint16_t bit_idx = idx % 64;
+  atomic_fetch_and_explicit(&workers->work_per_thread_free[slot_idx], ~(1 << bit_idx), memory_order_release);
+}
+
 #define ATTEMPTS 16
 
 void* accelerate_worker(void *data_packed) {
@@ -97,6 +140,7 @@ void* accelerate_worker(void *data_packed) {
         task.program = NULL;
         task.location = 0;
       } else {
+        kernel->work_per_thread = accelerate_work_per_thread_claim(workers, thread_idx);
         // Initialize kernel memory and check if the kernel should be executed in parallel.
         TRACY_ZONE_BEGIN(init_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
         unsigned char parallel =
@@ -165,6 +209,8 @@ void* accelerate_worker(void *data_packed) {
           TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE, workers->thread_count);
           TRACY_ZONE_END(final_ctx);
+          // Recycle work_per_thread for later kernels
+          accelerate_work_per_thread_free(workers, kernel->work_per_thread);
           // Then continue the program after this kernel, via
           // program_continuation in the KernelLaunch structure.
           task.program = kernel->program;
@@ -181,13 +227,12 @@ void* accelerate_worker(void *data_packed) {
     // Try assisting with the data-parallel activity (KernelLaunch) from another thread.
     // try_assist from the Work Assisting paper
     uint16_t thread_count = workers->thread_count;
-    int16_t inc = (thread_idx % 2 == 0) ? 1 : -1;
+    int16_t inc = (thread_idx % 2 == 0) ? 1 : (thread_count - 1);
     int16_t other_thread = thread_idx;
     bool workassisting_found = false;
     while (true) {
       other_thread += inc;
-      while (other_thread >= thread_count) other_thread -= thread_count;
-      if (other_thread < 0) other_thread += thread_count;
+      if (other_thread >= thread_count) other_thread -= thread_count;
       if (other_thread == thread_idx) break;
 
       _Atomic(uintptr_t) *ptr = &workers->scheduler.activities[other_thread];
@@ -235,6 +280,8 @@ void* accelerate_worker(void *data_packed) {
         TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_DARK);
         kernel->work_function(kernel, workers->locks, 0xFFFFFFFE, workers->thread_count);
         TRACY_ZONE_END(final_ctx);
+        // Recycle work_per_thread for later kernels
+        accelerate_work_per_thread_free(workers, kernel->work_per_thread);
         // Then continue the program after this kernel, via
         // program_continuation in the KernelLaunch structure.
         task.program = kernel->program;
@@ -272,16 +319,15 @@ struct Workers* accelerate_start_workers(uint64_t thread_count) {
     exit(1);                                                                    
   }
 
-  workers->scheduler.activities = malloc(sizeof(uintptr_t) * thread_count);
+  workers->scheduler.activities = calloc(thread_count, sizeof(uintptr_t));
 
   workers->thread_count = thread_count;
 
   // ACCELERATE_LOCK_ARRAY_SIZE is measured in bits, convert to bytes.
   workers->locks = calloc(ACCELERATE_LOCK_ARRAY_SIZE / 8, 1);
 
-  for (uint64_t i = 0; i < thread_count; i++) {
-    workers->scheduler.activities[i] = 0;
-  }
+  workers->work_per_thread_array = calloc(thread_count * thread_count * ACCELERATE_WORK_PER_THREAD_STRIDE, sizeof(uint64_t));
+  workers->work_per_thread_free = calloc((thread_count + 63) / 64, sizeof(uint64_t));
 
   for (uint64_t i = 0; i < thread_count; i++) {
     // TODO: Check if setting thread affinities helps

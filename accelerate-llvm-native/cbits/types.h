@@ -8,6 +8,10 @@
 #include <pthread.h>
 
 #define ACCELERATE_LOCK_ARRAY_SIZE (16 * 1024 * 8)
+// Stride used in KernelLaunch.work_per_thread.
+// By using a higher stride than 1, we prevent false sharing between cache
+// lines.
+#define ACCELERATE_WORK_PER_THREAD_STRIDE (8)
 
 struct Workers;
 struct Program;
@@ -82,6 +86,16 @@ struct Workers {
   // A permute will need to map indices of the array to indices in the array of
   // locks.
   uint8_t *locks;
+  // Array of work_per_thread arrays. Each kernel launch needs such an array,
+  // which we will take from this array. 
+  // work_per_thread has size thread_count * ACCELERATE_WORK_PER_THREAD_STRIDE
+  // items, and we need at most thread_count of those concurrently.
+  // Hence we represent work_per_thread_array as a flattened array of
+  // thread_count * thread_count * ACCELERATE_WORK_PER_THREAD_STRIDE items. 
+  _Atomic(uint64_t)* work_per_thread_array;
+  // Bitset of all entries in work_per_thread_array that are free.
+  // This contains thread_count bits, thus ceil(thread_count/64) fields.
+  _Atomic(uint64_t)* _Atomic work_per_thread_free;
 };
 
 struct Signal {
@@ -152,6 +166,13 @@ struct KernelLaunch {
   uint32_t program_continuation;
   _Atomic int32_t active_threads;
   _Atomic uint64_t work_index;
+  // Pointer to an array with thread_count values, with stride ACCELERATE_WORK_PER_THREAD_STRIDE.
+  // Total size of the array is thus thread_count * ACCELERATE_WORK_PER_THREAD_STRIDE.
+  // At the beginning of the kernel launch, all slots must be initialized to zero.
+  // During execution of the function, the work function uses this array to store which thread has claimed
+  // which part of the array. In a data-parallel work stealer, this replaces the per-thread queues
+  // (and encodes the per thread state in a single uint64 instead of an array or other queue datastructure).
+  _Atomic uint64_t *work_per_thread;
   const struct ___tracy_source_location_data *tracy_srcloc;
   // In the future, perhaps also store a uint32_t work_size
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
