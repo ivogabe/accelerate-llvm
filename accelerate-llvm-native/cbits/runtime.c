@@ -79,8 +79,9 @@ inline _Atomic uint64_t* accelerate_work_per_thread_claim(struct Workers *worker
     // the fact that multiple bits are in one uint64. We can for instance
     // find a free spot directly using count-leading-zeros over the bitwise negated value,
     // instead of individually trying all bits via atomic_fetch_or_explicit.
-    uint64_t old = atomic_fetch_or_explicit(&workers->work_per_thread_free[slot_idx], 1 << bit_idx, memory_order_acquire);
-    if ((old & (1 << bit_idx)) != 0) {
+    uint64_t bit = ((uint64_t) 1) << bit_idx;
+    uint64_t old = atomic_fetch_or_explicit(&workers->work_per_thread_free[slot_idx], bit, memory_order_acquire);
+    if ((old & bit) == 0) {
       return &workers->work_per_thread_array[i * thread_count * ACCELERATE_WORK_PER_THREAD_STRIDE];
     }
 
@@ -93,7 +94,8 @@ inline void accelerate_work_per_thread_free(struct Workers *workers, _Atomic uin
   int16_t idx = (work_per_thread - workers->work_per_thread_array) / (workers->thread_count * ACCELERATE_WORK_PER_THREAD_STRIDE);
   uint16_t slot_idx = idx / 64;
   uint16_t bit_idx = idx % 64;
-  atomic_fetch_and_explicit(&workers->work_per_thread_free[slot_idx], ~(1 << bit_idx), memory_order_release);
+  uint64_t bit = ((uint64_t) 1) << bit_idx;
+  atomic_fetch_and_explicit(&workers->work_per_thread_free[slot_idx], ~bit, memory_order_release);
 }
 
 #define ATTEMPTS 16
@@ -154,7 +156,7 @@ void* accelerate_worker(void *data_packed) {
         }
 
         TRACY_ZONE_BEGIN(work_ctx, kernel->tracy_srcloc, COLOR_NORMAL);
-        kernel->work_function(kernel, workers->locks, thread_idx, workers->thread_count);
+        kernel->work_function(kernel, workers->locks, parallel == 1 ? thread_idx : 0, parallel == 1 ? workers->thread_count : 1);
         TRACY_ZONE_END(work_ctx);
 
         // Keep track of whether this was the last thread working on the kernel
