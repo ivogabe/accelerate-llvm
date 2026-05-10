@@ -518,9 +518,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
         tupleStore tp valuePtrs new
 
         -- Release the lock
-        _ <- instr' $ LLVM.Fence (CrossThread, Release)
-        -- TODO: Change to atomic store
-        _ <- instr' $ Store Volatile lock (scalar scalarTypeWord8 0) Nothing
+        _ <- instr' $ AtomicStore singleType lock (scalar scalarTypeWord8 0) Release
         return ()
   )
   -- Code after the loop
@@ -673,12 +671,11 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         else do
           _ <- Loop.while [] TupRunit
             (\_ -> do
-              idx <- instr $ Load Volatile idxPtr Nothing
+              idx <- instr $ AtomicLoad singleType idxPtr Acquire
               A.neq singleType idx (envsTileIndex envs)
             )
             (\_ -> return OP_Unit)
             OP_Unit
-          _ <- instr' $ LLVM.Fence (CrossThread, Acquire)
           return ()
 
         local <- tupleLoad tp accumVar
@@ -720,9 +717,8 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
         tupleStore tp valuePtrs new
 
-        _ <- instr' $ LLVM.Fence (CrossThread, Release)
         OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-        _ <- instr' $ Store Volatile idxPtr nextIdx Nothing
+        _ <- instr' $ AtomicStore singleType idxPtr nextIdx Release
         return ()
   )
   (\_ _ _ -> return ())

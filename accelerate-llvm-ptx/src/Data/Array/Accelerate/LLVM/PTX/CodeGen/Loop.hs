@@ -76,6 +76,8 @@ loopSelfScheduled counter size doWork = do
   __syncthreads
   perThreadBlock $ do
     claimed <- Loop.atomicAdd Monotonic counter (integral TypeWord64 1)
+    -- TODO: Should we change the volatile operations to normal non-volatile
+    -- operations, or atomic operations?
     _ <- instr' $ Store Volatile index claimed Nothing
     return ()
   __syncthreads
