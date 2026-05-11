@@ -309,14 +309,13 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
       -- Claim at most maxClaim tiles
       OP_Word64 count3 <- A.min singleType count2 (A.liftWord64 maxClaim)
 
-      -- TODO: Maybe we should announce here that we will claim something from
-      -- the global counter. This informs other threads during stealing, that
-      -- more stealable work might become available soon, and that they should
-      -- not exit yet.
-      -- We can announce this by storing a magic value in workPerThreadSelf.
-      -- This magic value will be overwritten already by the newly claimed
-      -- work. However, if there is no more work to be claimed, we need to
-      -- explicitely remove this announcement.
+      -- Mark that we are about to claim something
+      -- A range where the start is 2^47+2^46, and the size is non-positive,
+      -- denotes that a thread is about to claim work. Since the size is
+      -- non-positive, other threads know that this thread has no work,
+      -- and those threads can then check the start index for 2^47+2^46.
+      let markAnnounce = (1 `shiftL` 63) + (1 `shiftL` 62)
+      _ <- instr' $ AtomicStore singleType workPerThreadSelf (integral TypeWord64 markAnnounce) Monotonic
 
       -- Increment the global counter by count3
       index <- instr' $ AtomicRMW numType NonVolatile RMW.Add counter count3 (CrossThread, Monotonic)
@@ -326,7 +325,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
       _ <- cbr success claimGlobalSuccess claimSteal
 
       _ <- setBlock claimGlobalSuccess
-      -- Success, we claimed some blocks from the global counter.
+      -- Success, we claimed some tiles from the global counter.
       -- Check how many we actually claimed (since we may have claimed fewer
       -- tiles if those were the last tiles).
       maxClaimed <- A.sub numType (OP_Word64 size) (OP_Word64 index)
@@ -344,6 +343,8 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
     -- 3. Otherwise, steal from other thread
     indexSteal <- do
       _ <- setBlock claimSteal
+      -- Unmark that we will claim something
+      _ <- instr' $ AtomicStore singleType workPerThreadSelf (integral TypeWord64 0) Monotonic
       single <- A.eq singleType (OP_Word32 maxThreads) $ A.liftWord32 1
       -- TODO: Set inc to:
       -- int16_t inc = (thread_idx % 2 == 0) ? 1 : (thread_count - 1);
@@ -370,7 +371,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
       otherWorkPtr <- instr' $ GetElementPtr $ GEP1 workPerThread otherIndexMulStride
       -- First perform an early check, before we perform an atomic fetch-and-add
       earlyPacked <- instr $ AtomicLoad singleType otherWorkPtr Monotonic
-      (_, earlySize) <- unpackWorkRange earlyPacked
+      (earlyStart, earlySize) <- unpackWorkRange earlyPacked
       canSteal <- A.gte singleType earlySize $ A.liftInt64 1
 
       _ <- cbr canSteal claimStealGo claimStealFail
@@ -398,7 +399,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
       -- Compute the start index of the range we claimed
       currentEnd <- A.add numType currentStart currentSize'
       OP_Word64 claimedStart <- A.sub numType currentEnd claimedSize
-      -- Store claimed blocks (but one) in our own workPerThread entry
+      -- Store claimed tiles (but one) in our own workPerThread entry
       claimedStartPlusOne <- A.add numType (OP_Word64 claimedStart) $ A.liftWord64 1
       claimedSizeSubOne <- A.sub numType claimedSize $ A.liftWord64 1
       OP_Word64 selfPacked <- packWorkRange claimedStartPlusOne claimedSizeSubOne
@@ -406,6 +407,20 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
       _ <- br work
 
       _ <- setBlock claimStealFail
+      failStart <- phi (TupRsingle scalarTypeWord64) [(earlyStart, claimStealLoop), (currentStart, claimStealGo)]
+      A.when (A.eq singleType failStart $ A.liftWord64 $ (1 `shiftL` 47) + (1 `shiftL` 46)) $ do
+        -- The other thread is about to claim something. This thread should
+        -- thus not exit yet, as we may be able to steal something of the
+        -- other thread in a bit. Reset 'remaining'. We should reset it to:
+        -- totalAttempts = (maxThreads - 1) * 2
+        -- Since stealAttempts will be lowered by one a few lines later,
+        -- we set it to (maxThreads - 1) * 2 + 1
+        --
+        -- Subtract one, as a thread won't steal from itself.
+        OP_Word32 totalAttemptsPlus1 <- A.sub numType (OP_Word32 maxThreads) (A.liftWord32 1) >>=
+          A.mul numType (A.liftWord32 2) >>= A.add numType (A.liftWord32 1)
+        _ <- instr' $ Store NonVolatile stealAttempts totalAttemptsPlus1 Nothing
+        return ()
       -- Update nextClaimThreadIdx
       OP_Word32 nextIndex <- do
         i <- A.add numType otherIndex inc
@@ -425,6 +440,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
 
     -- Add phi node to the work block, so it will choose the correct index
     _ <- setBlock work
+    -- TODO: Rename block_index to tile_index
     _ <- phi1 work "block_index" [(indexLocal, claim), (indexGlobal, claimGlobalSuccess), (indexSteal, claimStealSuccess)]
     return ()
 
