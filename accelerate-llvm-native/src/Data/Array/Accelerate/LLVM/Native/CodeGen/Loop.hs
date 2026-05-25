@@ -210,6 +210,9 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
   -- Expected next block index, if we continue in sequential mode
   let nextIfSeqName = "next_block_if_seq"
   let nextIfSeq = LocalReference type' nextIfSeqName
+  -- Estimate of the value in counter. This must be an underapproximation of
+  -- counter.
+  counterEstimate <- hoistAlloca $ primType @Word64
 
   _ <- br claim
 
@@ -230,6 +233,9 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
     claimStealGo <- newBlock "workassist.loop.claim.steal.go"
     claimStealSuccess <- newBlock "workassist.loop.claim.steal.success"
     claimStealFail <- newBlock "workassist.loop.claim.steal.fail"
+
+    initialCounter <- instr' $ AtomicLoad singleType counter Monotonic
+    _ <- instr' $ Store NonVolatile counterEstimate initialCounter Nothing
 
     -- The index from which we will next try to claim new work
     nextClaimThreadIdx <- hoistAlloca $ primType @Word32
@@ -288,7 +294,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
       -- In case this happens, other threads can still steal those tiles back,
       -- and we can thus still balance the work (although with slightly more
       -- overhead).
-      currentCounter <- instr' $ AtomicLoad singleType counter Monotonic
+      currentCounter <- instr' $ Load NonVolatile counterEstimate Nothing
       check <- A.lt singleType (OP_Word64 currentCounter) (OP_Word64 size)
       _ <- cbr check claimGlobalGo claimSteal
 
@@ -304,8 +310,8 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
       OP_Word64 maxThreadsMul2 <- A.fromIntegral integralType numType (OP_Word32 maxThreads) >>= A.mul numType (A.liftWord64 2)
       -- Use 'remaining / (maxThreads * 2)' as initial heuristic
       count1 <- A.quot TypeWord64 (OP_Word64 currentRemaining) (OP_Word64 maxThreadsMul2)
-      -- Claim at least 16 tiles
-      count2 <- A.max singleType count1 (A.liftWord64 2)
+      -- Claim at least 8 tiles
+      count2 <- A.max singleType count1 (A.liftWord64 8)
       -- Claim at most maxClaim tiles
       OP_Word64 count3 <- A.min singleType count2 (A.liftWord64 maxClaim)
 
@@ -319,6 +325,8 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
 
       -- Increment the global counter by count3
       index <- instr' $ AtomicRMW numType NonVolatile RMW.Add counter count3 (CrossThread, Monotonic)
+      OP_Word64 newCounter <- A.add numType (OP_Word64 index) (OP_Word64 count3)
+      _ <- instr' $ Store NonVolatile counterEstimate newCounter Nothing
 
       success <- A.lt singleType (OP_Word64 index) (OP_Word64 size)
 
@@ -343,12 +351,17 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size doWork
     -- 3. Otherwise, steal from other thread
     indexSteal <- do
       _ <- setBlock claimSteal
+      _ <- instr' $ Store NonVolatile counterEstimate size Nothing
+
       -- Unmark that we will claim something
       _ <- instr' $ AtomicStore singleType workPerThreadSelf (integral TypeWord64 0) Monotonic
       single <- A.eq singleType (OP_Word32 maxThreads) $ A.liftWord32 1
-      -- TODO: Set inc to:
-      -- int16_t inc = (thread_idx % 2 == 0) ? 1 : (thread_count - 1);
-      inc <- return $ A.liftWord32 1
+      inc <- do
+        -- (threadIdx % 2 == 0) ? 1 : thread_count - 1
+        even <- A.band TypeWord32 (OP_Word32 threadIndex) (A.liftWord32 1) >>= A.eq singleType (A.liftWord32 0)
+        let whenEven = A.liftWord32 1
+        whenOdd <- A.sub numType (OP_Word32 maxThreads) (A.liftWord32 1)
+        A.select (TupRsingle scalarType) even whenEven whenOdd
       -- totalAttempts = (maxThreads - 1) * 2
       -- Subtract one, as a thread won't steal from itself.
       OP_Word32 totalAttempts <- A.sub numType (OP_Word32 maxThreads) (A.liftWord32 1) >>= A.mul numType (A.liftWord32 2)
@@ -495,10 +508,10 @@ chunkSizeOne (ShapeRsnoc sh) = (chunkSizeOne sh, 1)
 
 chunkSize :: ShapeR sh -> sh
 chunkSize ShapeRz = ()
-chunkSize (ShapeRsnoc ShapeRz) = ((), 1024)
-chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 32), 32)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 8), 8), 16)
-chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((chunkSizeOne sh, 4), 4), 8), 8)
+chunkSize (ShapeRsnoc ShapeRz) = ((), 512)
+chunkSize (ShapeRsnoc (ShapeRsnoc ShapeRz)) = (((), 16), 32)
+chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc ShapeRz))) = ((((), 4), 8), 16)
+chunkSize (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc (ShapeRsnoc sh)))) = ((((chunkSizeOne sh, 4), 4), 4), 8)
 
 chunkCount :: ShapeR sh -> Operands sh -> Operands sh -> CodeGen Native (Operands sh)
 chunkCount ShapeRz OP_Unit OP_Unit = return OP_Unit
