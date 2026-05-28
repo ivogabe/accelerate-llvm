@@ -48,10 +48,12 @@ import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
 import Data.Array.Accelerate.LLVM.CodeGen.Default
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
 import Data.Maybe
+import Data.Bits
 
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
@@ -139,6 +141,10 @@ codegen name env cluster args
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
             -- Decide whether tileCount is large enough
+
+            -- Assert that there are at most 2^47 tiles
+            A.when (A.gt singleType (OP_Int tileCount') $ A.liftInt (1 `shiftL` 47)) $
+              trapWithMessage "Accelerate: Parallel loops must have at most 2^47 tiles"
 
             OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
             value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
@@ -293,6 +299,10 @@ codegen name env cluster args
         tileCount <- chunkCount parallelShr parSizes (A.lift (shapeType parallelShr) tileSize)
         tileCount' <- shapeSize parallelShr tileCount
         -- We are not using kernel memory, so no need to initialize it.
+
+        -- Assert that there are at most 2^47 tiles
+        A.when (A.gt singleType tileCount' $ A.liftInt (1 `shiftL` 47)) $
+          trapWithMessage "Accelerate: Parallel loops must have at most 2^47 tiles"
 
         OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
         value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)

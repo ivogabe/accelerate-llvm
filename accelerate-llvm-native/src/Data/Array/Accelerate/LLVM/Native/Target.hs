@@ -65,9 +65,6 @@ instance Intrinsic Native where
     -- So instead of using llvm.trap, we call the abort function from the C standard library.
     -- This is also what llvm.trap would be lowered to if the target does not have a trap instruction.
     -- See: https://llvm.org/docs/LangRef.html#llvm-trap-intrinsic
-    --
-    -- TODO: This was tested when we used 'puts', but now we use 'printf' (via putString).
-    -- We should test this again.
     if Info.os == "mingw32"
       then abort
       else trap

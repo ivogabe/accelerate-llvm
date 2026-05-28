@@ -184,9 +184,39 @@ iterFromTo tp start end seed body =
   Loop.iterFromStepTo [] tp start (A.liftInt 1) end seed body
 
 -- Should match with ACCELERATE_WORK_PER_THREAD_STRIDE in types.h
+--
+-- Note that we could dynamically figure out the cache line size and base this
+-- stride on that, but that's probably not worth the complexity and maintance
+-- cost. If we change our mind, this is a possible implementation:
+-- https://github.com/ivogabe/accelerate-llvm/pull/4/changes#diff-02f146262b0961de9166aef529dab4eecccf091256d3a12a17c00588f4de8c09
+-- (get_cache_line_size in runtime.c)
 workPerThreadStride :: Word32
 workPerThreadStride = 8
 
+-- Generate code for a parallel loop. Any thread working on this parallel loop
+-- will execute this code, and claim work from a shared counter.
+-- When maxClaim is one, this will claim tiles one by one, via standard self
+-- scheduling.
+--
+-- When maxClaim is higher, it will claim multiple tiles at once. The number of
+-- tiles is chosen via a simple heuristic, and at most maxClaim. When all work
+-- is claimed, and threads become idle, they will try to steal tiles that have
+-- already been claimed by other threads, similar to work stealing for task
+-- parallelism. Instead of a queue per thread, the claimed work is stored in
+-- one 64-bit word, representing a range of tiles, to ensure a low scheduling
+-- overhead.
+--
+-- Setting maxClaim to 1 has the advantage that tiles are claimed in order, and
+-- generates the most simple code. Setting maxClaim higher often has better
+-- performance, due to two reasons:
+-- 1. Lower scheduling overhead because of lower contention on 'counter'.
+-- 2. More cache locality as threads work on a range of tiles.
+-- The first point was the primary goal during the design of a new scheduling
+-- algorithm. However during this research (as part of a master thesis, see
+-- https://studenttheses.uu.nl/items/d9017822-f192-4a71-a8c8-648ee5eedad9),
+-- we also saw large speedups due to improved cache locality.
+-- This work-stealing based data-parallel scheduler was implemented based on
+-- the findings of that thesis.
 workassistLoop
     :: Operand (Ptr Word64)                 -- index into work
     -> Operand (Ptr Word64)                 -- work_per_thread
