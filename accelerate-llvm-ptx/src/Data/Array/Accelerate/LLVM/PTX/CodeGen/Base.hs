@@ -598,6 +598,7 @@ shfl_op sop t mask delta val
 sharedMemAddrSpace :: AddrSpace
 sharedMemAddrSpace = AddrSpace 3
 
+-- TODO: Should we change volatile loads and stores to shared memory to atomic loads and stores?
 sharedMemVolatility :: Volatility
 sharedMemVolatility = Volatile
 
@@ -813,11 +814,11 @@ nanosleep ns = do
 -- -------------------------
 
 codeGenKernel
-  :: forall arch f a. (HasCallStack, Target arch, Intrinsic arch, Result f ~ ())
+  :: forall f a. (HasCallStack, Result f ~ ())
   => String
   -> (forall k. Function k () -> Function k f)
-  -> CodeGen arch a
-  -> LLVM arch (a, Module f)
+  -> CodeGen PTX a
+  -> LLVM PTX (a, Module f)
 codeGenKernel name args body =
   codeGenFunction Nothing name VoidType args $ do
     addNamedMetadata "nvvm.annotations"

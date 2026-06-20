@@ -41,6 +41,7 @@ import Data.Array.Accelerate.AST                          ( PrimBool )
 import Data.Array.Accelerate.AST.Idx
 import qualified Data.Array.Accelerate.Debug.Internal     as Debug
 import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import Data.Primitive.Vec
 
@@ -217,6 +218,11 @@ data Instruction a where
                   -> Operand (Ptr a)
                   -> Maybe Align
                   -> Instruction a
+  
+  AtomicLoad      :: SingleType a
+                  -> Operand (Ptr a)
+                  -> MemoryOrdering
+                  -> Instruction a
 
   -- <http://llvm.org/docs/LangRef.html#store-instruction>
   --
@@ -224,6 +230,12 @@ data Instruction a where
                   -> Operand (Ptr a)
                   -> Operand a
                   -> Maybe Align
+                  -> Instruction ()
+
+  AtomicStore     :: SingleType a
+                  -> Operand (Ptr a)
+                  -> Operand a
+                  -> MemoryOrdering
                   -> Instruction ()
 
   -- <http://llvm.org/docs/LangRef.html#getelementptr-instruction>
@@ -377,6 +389,8 @@ data Instruction a where
 -- don't need names.
 --
 data Named ins a where
+  -- TODO: This should be 'ins (ops a)' (actually 'CodeGen arch (Operands a)') in some cases.
+  -- We should try to find a way to encode this properly.
   (:=) :: Name a -> ins a -> Named ins a
   Do   :: ins ()          -> Named ins ()
 
@@ -407,6 +421,8 @@ instance Downcast (Instruction a) LP.Instr where
     Alloca tp             -> LP.Alloca (downcast tp) Nothing Nothing
     Store vol p x align   -> LP.Store (downcast vol) (downcast x) (downcast p) atomicity align
     Load vol p align      -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity align
+    AtomicStore tp p x m  -> LP.Store False (downcast x) (downcast p) (Just $ downcast m) (Just $ singleTypeSize tp)
+    AtomicLoad tp p m     -> LP.Load False (downcast tp) (downcast p) (Just $ downcast m) (Just $ singleTypeSize tp)
     GetElementPtr (GEP n i1 path) -> case typeOf n of
       PrimType (PtrPrimType t _) ->
         LP.GEP inbounds (downcast t) (downcast n) (downcast i1 : downcastGEPIndex constantTyped path t)
@@ -618,6 +634,8 @@ instance TypeOf Instruction where
     Alloca t              -> PrimType $ PtrPrimType t defaultAddrSpace
     Load _ ptr _          -> PrimType $ pointeeType $ typeOf ptr
     Store{}               -> VoidType
+    AtomicLoad t _ _      -> PrimType $ ScalarPrimType $ SingleScalarType t
+    AtomicStore{}         -> VoidType
     GetElementPtr gep     -> typeOf gep
     Fence{}               -> VoidType
     CmpXchg t _ _ _ _ _ _ -> PrimType . StructPrimType False $ ScalarPrimType (SingleScalarType (NumSingleType (IntegralNumType t))) `pair` primType

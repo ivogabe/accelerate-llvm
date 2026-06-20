@@ -489,6 +489,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           -- Wait on our turn
           _ <- Loop.while [] TupRunit
             (\_ -> do
+              -- TODO: Change to atomic load?
               idx <- instr $ Load Volatile idxPtr Nothing
               A.neq singleType idx (envsTileIndex envs)
             )
@@ -528,6 +529,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
 
           _ <- instr' $ LLVM.Fence (CrossThread, Release)
           OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
+          -- TODO: Change to atomic store?
           _ <- instr' $ Store Volatile idxPtr nextIdx Nothing
           return exclusive
     

@@ -48,10 +48,12 @@ import Data.Array.Accelerate.LLVM.CodeGen.Environment hiding ( Empty )
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
 import Data.Array.Accelerate.LLVM.CodeGen.Default
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
 import Data.Maybe
+import Data.Bits
 
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
@@ -85,7 +87,7 @@ codegen name env cluster args
  | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
-  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "workassist.first_index") $ do
+  codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "thread.index" . LLVM.Lam primType "thread.count") $ do
     extractEnv
 
     -- Before the parallel work of a kernel is started, we first run the function once.
@@ -94,7 +96,7 @@ codegen name env cluster args
     initBlock <- newBlock "init"
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
-    _ <- switch (OP_Word64 workassistFirstIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
+    _ <- switch (OP_Word32 threadIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
     let hasPermute = hasNPermute flat
 
     if parallelDepth == 0 && rank shr /= 0 then do
@@ -140,6 +142,10 @@ codegen name env cluster args
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
             -- Decide whether tileCount is large enough
 
+            -- Assert that there are at most 2^47 tiles
+            A.when (A.gt singleType (OP_Int tileCount') $ A.liftInt (1 `shiftL` 47)) $
+              trapWithMessage "Accelerate: Parallel loops must have at most 2^47 tiles"
+
             OP_Bool isSmall <- A.lt singleType (OP_Int tileCount') $ A.liftInt 2
             value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
             retval_ value
@@ -180,7 +186,12 @@ codegen name env cluster args
             -- here.
             bindLocals 0 envs' >>=
             bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 tileSize
-          workassistLoop workassistIndex workassistFirstIndex tileCount $ \seqMode tileIdx' -> do
+          -- TODO: Set maxClaim based on:
+          -- * If the kernel contains scans, then 1.
+          -- * If the kernel contains non-commutative folds, then a small number between 2 and 8 (only possible after implementing folds based on interleaved scans)
+          -- * Otherwise, a high number like 1024. In this case, the kernel contains commutative folds which do not require a specific order.
+          let maxClaim = 1
+          workassistLoop workassistIndex workPerThread maxClaim threadIndex threadCount tileCount $ \seqMode tileIdx' -> do
             tileIdx <- instr' $ BitCast scalarType tileIdx'
             (_, lower, upper, _) <- tileRange (isDescending direction) (op TypeInt size) (integral TypeInt tileSize) tileCount' tileIdx
 
@@ -289,6 +300,10 @@ codegen name env cluster args
         tileCount' <- shapeSize parallelShr tileCount
         -- We are not using kernel memory, so no need to initialize it.
 
+        -- Assert that there are at most 2^47 tiles
+        A.when (A.gt singleType tileCount' $ A.liftInt (1 `shiftL` 47)) $
+          trapWithMessage "Accelerate: Parallel loops must have at most 2^47 tiles"
+
         OP_Bool isSmall <- A.lt singleType tileCount' $ A.liftInt 2
         value <- instr' $ LLVM.Select isSmall (scalar (scalarType @Word8) 0) (scalar scalarType 1)
         retval_ value
@@ -302,7 +317,7 @@ codegen name env cluster args
             if parallelDepth /= rank shr then []
             else {- if hasPermute then -} [Loop.LoopInterleave]
             -- else [Loop.LoopVectorize]
-      workassistChunked ann parallelShr workassistIndex workassistFirstIndex tileSize parSizes $ \idx -> do
+      workassistChunked ann parallelShr workassistIndex workPerThread 1024 threadIndex threadCount tileSize parSizes $ \idx -> do
         let envs' = envs{
             envsLoopDepth = parallelDepth,
             envsIdx =
@@ -316,7 +331,7 @@ codegen name env cluster args
 
       pure 0
   where
-    (argTp, extractEnv, workassistIndex, workassistFirstIndex, kernelMem', gamma) = bindHeaderEnv env
+    (argTp, extractEnv, workassistIndex, workPerThread, threadIndex {- or flag -}, threadCount, kernelMem', gamma) = bindHeaderEnv env
 
     isDescending :: LoopDirection Int -> Bool
     isDescending LoopDescending = True
@@ -513,9 +528,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
         tupleStore tp valuePtrs new
 
         -- Release the lock
-        _ <- instr' $ LLVM.Fence (CrossThread, Release)
-        -- TODO: Change to atomic store
-        _ <- instr' $ Store Volatile lock (scalar scalarTypeWord8 0) Nothing
+        _ <- instr' $ AtomicStore singleType lock (scalar scalarTypeWord8 0) Release
         return ()
   )
   -- Code after the loop
@@ -668,12 +681,11 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         else do
           _ <- Loop.while [] TupRunit
             (\_ -> do
-              idx <- instr $ Load Volatile idxPtr Nothing
+              idx <- instr $ AtomicLoad singleType idxPtr Acquire
               A.neq singleType idx (envsTileIndex envs)
             )
             (\_ -> return OP_Unit)
             OP_Unit
-          _ <- instr' $ LLVM.Fence (CrossThread, Acquire)
           return ()
 
         local <- tupleLoad tp accumVar
@@ -715,9 +727,8 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
         tupleStore tp valuePtrs new
 
-        _ <- instr' $ LLVM.Fence (CrossThread, Release)
         OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-        _ <- instr' $ Store Volatile idxPtr nextIdx Nothing
+        _ <- instr' $ AtomicStore singleType idxPtr nextIdx Release
         return ()
   )
   (\_ _ _ -> return ())
