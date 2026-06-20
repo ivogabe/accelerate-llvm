@@ -29,7 +29,7 @@ maintainer:             Trevor L. McDonell <trevor.mcdonell@gmail.com>
 bug-reports:            https://github.com/AccelerateHS/accelerate/issues
 category:               Accelerate, Compilers/Interpreters, Concurrency, Data, Parallelism
 
-extra-source-files:
+extra-doc-files:
     CHANGELOG.md
     README.md
     cbits/*.c
@@ -37,8 +37,8 @@ extra-source-files:
 
 custom-setup
   setup-depends:
-      base              >= 4.10
-    , Cabal
+      base              >= 4.10 && < 5
+    , Cabal             >= 2 && < 3.18
     , filepath
 
 
@@ -90,12 +90,14 @@ Library
 
     Paths_accelerate_llvm_native
 
+  autogen-modules:
+    Paths_accelerate_llvm_native
+
   build-depends:
           base                          >= 4.10 && < 5
         , accelerate                    == 1.4.*
         , accelerate-llvm               == 1.4.*
         , bytestring                    >= 0.10.4
-        , cereal                        >= 0.4
         , containers                    >= 0.5 && < 0.9
         , deepseq                       >= 1.4
         , directory                     >= 1.0
@@ -111,9 +113,9 @@ Library
         , mtl                           >= 2.2.1
           -- only used to render llvm-pretty output
         , pretty
-        -- used to pretty print intermediate representations of the compiler
+          -- used to pretty print intermediate representations of the compiler
         , prettyprinter                 >= 1.7
-        , process
+        , process                       >= 1.4.3
           -- TODO: These are only used for lifting ByteStrings. bytestring
           --       0.11.2.0 include its own, better lifting instances. Once
           --       that's stable, we can remove this dependency and bump
@@ -137,17 +139,12 @@ Library
         -Wall
         -fwarn-tabs
 
-  ghc-prof-options:
-        -caf-all
-        -auto-all
-
   if os(windows)
     build-depends:
           Win32
   else
     build-depends:
-          process                       >= 1.4.3
-        , unix                          >= 2.7
+          unix                          >= 2.7
 
   c-sources:
     cbits/scheduler.c

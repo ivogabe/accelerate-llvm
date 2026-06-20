@@ -10,15 +10,12 @@ packages:
 - accelerate-llvm-ptx
 
 extra-deps:
-- cuda-0.12.8.0
-- nvvm-0.10.0.1
+- cuda-0.13.0.0
 - OptDir-0.0.4
 - bytestring-encoding-0.1.2.0
 - ../accelerate
 - MIP-0.2.0.0
 
-- github: tomsmeding/llvm-pretty
-  commit: a253a7fc1c62f4825ffce6b2507eebc5dadff32c
 
 # for llvm-pretty:
 - monadLib-3.10.3
