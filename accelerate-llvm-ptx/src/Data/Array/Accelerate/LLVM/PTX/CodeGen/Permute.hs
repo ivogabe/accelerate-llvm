@@ -271,6 +271,9 @@ atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
     if computeCapability dev >= Compute 7 0
       then atomically_thread bufptr i action
       else atomically_warp   bufptr i action
+      -- TODO: We should remove atomically_warp as we now require compute capability >= 7.0.
+      -- Keeping the code for now as we should use it as inspiration for new backends, that
+      -- do still execute in lockstep.
   | otherwise = internalError "Expected IRBufferScopeArray"
 
 -- Atomically execute the critical section only when the lock at the given
