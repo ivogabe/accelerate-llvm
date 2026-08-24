@@ -403,12 +403,12 @@ instance MakesILP NativeOp where
   getClusterArg LOp{} = BCAN
 
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
-  finalize :: FusionGraph -> Constraint NativeOp
+  finalize :: FusionGraph -> LinearConstraint NativeOp
   finalize g = foldMap (\(w,b) -> timesN (manifest b) .>. ILP.var (WriteDir w b)) (g^.writeEdges)
 
   encodeBackendClusterArg BCAN = intHost $(hashQ ("BCAN" :: String))
 
-inputConstraints :: Node Comp -> Nodes Comp -> Constraint NativeOp
+inputConstraints :: Node Comp -> Nodes Comp -> LinearConstraint NativeOp
 inputConstraints c = foldMap $ \wIn ->
     --             timesN (fused lIn l) .>=. ILP.var (InDims l) .-. ILP.var (OutDims lIn)
     -- <> (-1) .*. timesN (fused lIn l) .<=. ILP.var (InDims l) .-. ILP.var (OutDims lIn)
