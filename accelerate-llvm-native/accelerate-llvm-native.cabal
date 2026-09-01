@@ -29,11 +29,15 @@ maintainer:             Trevor L. McDonell <trevor.mcdonell@gmail.com>
 bug-reports:            https://github.com/AccelerateHS/accelerate/issues
 category:               Accelerate, Compilers/Interpreters, Concurrency, Data, Parallelism
 
+extra-source-files:
+    cbits/*.c
+    cbits/*.h
+    -- Concurrent Queue
+    cbits/concurrentqueue/concurrentqueue.h
+
 extra-doc-files:
     CHANGELOG.md
     README.md
-    cbits/*.c
-    cbits/*.h
 
 custom-setup
   setup-depends:
