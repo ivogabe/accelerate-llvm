@@ -51,6 +51,7 @@ import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
 import Data.Array.Accelerate.Type (scalarType, Word8, scalarTypeWord8, scalarTypeInt)
 import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver hiding ( var, int )
 import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver as ILP
 import Lens.Micro
