@@ -270,7 +270,6 @@ instance SetOpIndices NativeOp where
 -- TODO: constraints and bounds for the new variable(s)
 -- TODO: remove commented out old code
 instance MakesILP NativeOp where
-  type BackendVar NativeOp = ()
   type BackendArg NativeOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
   defaultBA :: BackendArg NativeOp
   defaultBA = 0
@@ -396,7 +395,7 @@ instance MakesILP NativeOp where
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
 
-  labelLabelledArg :: M.Map (Graph.Var NativeOp) Int -> Node Comp -> LabelledArg env a -> LabelledArgOp NativeOp env a
+  labelLabelledArg :: Solution -> Node Comp -> LabelledArg env a -> LabelledArgOp NativeOp env a
   labelLabelledArg vars c (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! ReadDir  (getLabelArrDep y) c)
   labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
   labelLabelledArg _ _ (L x y) = LOp x y 0
@@ -405,12 +404,12 @@ instance MakesILP NativeOp where
   getClusterArg LOp{} = BCAN
 
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
-  finalize :: FusionGraph -> [Constraint NativeOp]
+  finalize :: FusionGraph -> [Constraint]
   finalize g = map NegativeDirIfManifest $ S.toList $ g^.writeEdges
 
   encodeBackendClusterArg BCAN = intHost $(hashQ ("BCAN" :: String))
 
-defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds NativeOp
+defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
 
