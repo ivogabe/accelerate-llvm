@@ -40,6 +40,7 @@ import Foreign.ForeignPtr
 
 import Control.Monad.Reader
 import Control.Monad.State
+import Control.Monad (forM_, void)
 import Control.Concurrent
 
 newtype Par a = Par { runPar :: ReaderT Stream (StateT [CleanUp] (LLVM PTX)) a }
