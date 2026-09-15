@@ -61,11 +61,14 @@ import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW
+import LLVM.AST.Type.GetElementPtr
+import LLVM.AST.Type.Operand
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
+import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically)
 import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists))
@@ -122,8 +125,14 @@ codegen name env cluster args
                 else
                   1024 * 16 -- TODO: Implement a better heuristic to choose the tile size
 
+          -- Number of tiles
+          sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
+          OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
+          tileCount <- instr' $ BitCast scalarType tileCount'
+
           let envs' = envs{
             envsLoopDepth = 0,
+            envsTileSizeCount = [(tileSize, OP_Int tileCount')],
             envsDescending = isDescending direction
           }
 
@@ -134,10 +143,6 @@ codegen name env cluster args
 
           setBlock initBlock
           do
-            -- Number of tiles
-            sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
-            OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
-
             -- Initialize kernel memory
             parCodeGenInitMemory kernelMem envs' TupleIdxSelf parCodes
             -- Decide whether tileCount is large enough
@@ -162,10 +167,6 @@ codegen name env cluster args
             retval_ $ scalar (scalarType @Word8) 0
 
           setBlock workBlock
-          -- Number of tiles
-          sizeAdd <- A.add numType size (A.liftInt $ tileSize - 1)
-          OP_Int tileCount' <- A.quot TypeInt sizeAdd (A.liftInt tileSize)
-          tileCount <- instr' $ BitCast scalarType tileCount'
 
           -- Emit code to initialize a thread, and get the codes for the tile loops
           tileLoops <- genParallel kernelMem envs' TupleIdxSelf parCodes
@@ -319,6 +320,10 @@ codegen name env cluster args
             -- else [Loop.LoopVectorize]
       workassistChunked ann parallelShr workassistIndex workPerThread 1024 threadIndex threadCount tileSize parSizes $ \idx -> do
         let envs' = envs{
+            -- Tile size and count are currently only needed when parallelizing
+            -- collective operations; not when parallelizing over independent
+            -- dimensions.
+            envsTileSizeCount = internalError "Tile size and count are not available when parallelizing over independent dimensions.",
             envsLoopDepth = parallelDepth,
             envsIdx =
               foldr (\(o, i) -> Env.partialUpdate o i) (envsIdx envs)
@@ -576,20 +581,30 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
   -- of that block.
-  (bufferEltsR memoryTp)
+  (TupRsingle memoryTp)
   -- Initialize kernel memory
   (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0) Nothing
-        case seed of
-          Nothing -> return ()
-          Just s -> do
-            value <- llvmOfExp (compileArrayInstrEnvs envs) s
-            codeSeed envs value
-            tupleStore tp valuePtrs value
+    -- Initialize all flags to flagInit
+    imapFromTo (A.liftInt 0) (A.liftInt descriptorsLength) $ \i -> do
+      (flagPtr, _) <- getDescriptorSlot memorySlotTp ptr i
+      -- Initialize with 0xFF:
+      -- Tag is stored in 7 most significant bits, and 0xFE is the tag
+      -- before 0 (with wrap around).
+      -- The state is stored in the least significant bit, and 1 denotes
+      -- that that tile is finished (flagPrefix).
+      _ <- instr' $ Store NonVolatile flagPtr (integral TypeWord8 0xFF) Nothing
+      return ()
+
+    case seed of
+      Nothing -> return ()
+      Just s -> do
+        (flagPtr, valuePtrs) <- getDescriptorSlot memorySlotTp ptr $ A.liftInt 0 -- $ descriptorsLength - 1
+        -- tag = 0, tag | flagPrefix = flagPrefix, so
+        -- we can write flagPrefix directly.
+        _ <- instr' $ Store NonVolatile flagPtr flagPrefix Nothing
+        value <- llvmOfExp (compileArrayInstrEnvs envs) s
+        codeSeed envs value
+        tupleStore tp valuePtrs value
   )
   -- Initialize a thread
   (\_ _ -> tupleAlloca tp)
@@ -598,14 +613,12 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
     if singleThreaded then do
       -- In the single threaded mode, we directly do a scan over this tile,
       -- instead of the reduce, lookback and scan phases.
-      ptrs <- tuplePtrs memoryTp ptr
-      case ptrs of
-        TupRsingle _ -> internalError "Pair impossible"
-        TupRpair _ valuePtrs -> do
-          prefix <- tupleLoad tp valuePtrs
-          tupleStore tp accumVar prefix
-          -- Note: on the first tile, we read an undefined value if there is no
-          -- seed. This is fine, as we don't use this value in the tile loop.
+      (descIdx, _) <- descriptorIdxTag (envsTileIndex envs)
+      (flagPtr, valuePtrs) <- getDescriptorSlot memorySlotTp ptr descIdx
+      prefix <- tupleLoad tp valuePtrs
+      tupleStore tp accumVar prefix
+      -- Note: on the first tile, we read an undefined value if there is no
+      -- seed. This is fine, as we don't use this value in the tile loop.
     else
       case identity of
         Nothing -> return ()
@@ -670,76 +683,82 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
   )
   -- Code after the tile loop
   (\singleThreaded accumVar ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle idxPtr) valuePtrs -> do
-        if singleThreaded then
-          -- It is our turn since we are in the sequential mode,
-          -- no need to wait
-          return ()
-        else do
-          _ <- Loop.while [] TupRunit
-            (\_ -> do
-              idx <- instr $ AtomicLoad singleType idxPtr Acquire
-              A.neq singleType idx (envsTileIndex envs)
-            )
-            (\_ -> return OP_Unit)
-            OP_Unit
-          return ()
+    nextTileIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
+    (prevDescIdx, prevTag) <- descriptorIdxTag (envsTileIndex envs)
+    (thisDescIdx, thisTag) <- descriptorIdxTag nextTileIdx
+    (prevFlagPtr, prevValuePtrs) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
+    (thisFlagPtr, thisValuePtrs) <- getDescriptorSlot memorySlotTp ptr thisDescIdx
+    if singleThreaded then
+      -- It is our turn since we are in the sequential mode,
+      -- no need to wait
+      return ()
+    else do
+      -- TODO: Decoupled look-back: also check for flagAggregate
+      expected <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
+      _ <- Loop.while [] TupRunit
+        (\_ -> do
+          flag <- instr $ AtomicLoad singleType prevFlagPtr Acquire
+          A.neq singleType flag expected
+        )
+        (\_ -> return OP_Unit)
+        OP_Unit
+      return ()
 
-        local <- tupleLoad tp accumVar
+    local <- tupleLoad tp accumVar
 
-        new <-
-          if singleThreaded then
-            -- In the single threaded mode, 'local' is already the prefix,
-            -- as this loop starts with the prefix value of the previous
-            -- thread. We can directly write that to kernel memory.
+    new <-
+      if singleThreaded then
+        -- In the single threaded mode, 'local' is already the prefix,
+        -- as this loop starts with the prefix value of the previous
+        -- thread. We can directly write that to kernel memory.
+        return local
+      else if isNothing seed then
+        -- If there is no seed, then write the output directly in the first tiles.
+        -- The other tiles must combine their result with the given operator.
+        -- Note that the first tile should typically be handled in the sequential mode,
+        -- but this sequential mode is not always generated:
+        -- A non-commutative fold is handled as a scan without the sequential mode.
+        -- Furthermore we could decide to skip the sequential mode if it leads to
+        -- a lot of code duplication (but we don't do that yet).s
+        A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
+          (do
             return local
-          else if isNothing seed then
-            -- If there is no seed, then write the output directly in the first tiles.
-            -- The other tiles must combine their result with the given operator.
-            -- Note that the first tile should typically be handled in the sequential mode,
-            -- but this sequential mode is not always generated:
-            -- A non-commutative fold is handled as a scan without the sequential mode.
-            -- Furthermore we could decide to skip the sequential mode if it leads to
-            -- a lot of code duplication (but we don't do that yet).s
-            A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
-              (do
-                return local
-              )
-              (do
-                prefix <- tupleLoad tp valuePtrs
-                tupleStore tp accumVar prefix
-                if envsDescending envs then
-                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
-                else
-                  app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
-              )
-          -- If there is a seed, then all tile will combine their local result with
-          -- the already available value.
-          else do
-            prefix <- tupleLoad tp valuePtrs
+          )
+          (do
+            prefix <- tupleLoad tp prevValuePtrs
             tupleStore tp accumVar prefix
             if envsDescending envs then
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
             else
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
-        tupleStore tp valuePtrs new
+          )
+      -- If there is a seed, then all tile will combine their local result with
+      -- the already available value.
+      else do
+        prefix <- tupleLoad tp prevValuePtrs
+        tupleStore tp accumVar prefix
+        if envsDescending envs then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
+    tupleStore tp thisValuePtrs new
 
-        OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-        _ <- instr' $ AtomicStore singleType idxPtr nextIdx Release
-        return ()
+    OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagPrefix
+    _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
+    return ()
   )
   (\_ _ _ -> return ())
   -- Code after the loop
   (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair _ valuePtrs -> do
-        value <- tupleLoad tp valuePtrs
-        codeEnd envs value
+    let tileCount
+          | envsLoopDepth envs /= 0 = internalError "Parallel scan should be 1-dimensional here"
+          | (_, tc) : _ <- envsTileSizeCount envs = tc
+          | otherwise = internalError "envsTileSizeCount should not be empty during codegen of parallel scan"
+
+    (descIdx, _) <- descriptorIdxTag tileCount
+    (_, valuePtrs) <- getDescriptorSlot memorySlotTp ptr descIdx
+    value <- tupleLoad tp valuePtrs
+    codeEnd envs value
   )
   -- In the next tile loop, we prefer loop peeling iff there is no seed.
   -- In the first iteration, the first tile loop will then start without a prefix value,
@@ -776,7 +795,10 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
     )
   )
   where
-    memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
+    memorySlotTp = TupRsingle scalarTypeWord8 `TupRpair` tp -- TODO: For decoupled look-back, store two values of type tp
+    memoryTp = ArrayPrimType (fromIntegral descriptorsLength) $ StructPrimType False $ bufferEltsR memorySlotTp
+    flagAggregate = scalar scalarTypeWord8 0
+    flagPrefix = scalar scalarTypeWord8 1
     ArgArray _ (ArrayR _ tp) _ _ = input
     identity
       | Just s <- seed
@@ -797,3 +819,38 @@ hasNPermute (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
     go (FlatOpsOp (FlatOp NPermute _ _) _) = True
     go (FlatOpsOp (FlatOp NPermute' _ _) _) = True
     go (FlatOpsOp _ ops) = go ops
+
+maxLookbackLength :: Int
+maxLookbackLength = 512
+
+descriptorsLength :: Int
+descriptorsLength = maxLookbackLength * 2
+
+nextDescriptor :: Operands Int -> CodeGen Native (Operands Int)
+nextDescriptor i = do
+  OP_Int j <- A.add numType i (A.liftInt 1)
+  OP_Bool overflow <- A.gte singleType (OP_Int j) (A.liftInt descriptorsLength)
+  OP_Int sub <- A.sub numType (OP_Int j) (A.liftInt descriptorsLength)
+  instr $ LLVM.Select overflow sub j
+
+descriptorIdxTag :: Operands Int -> CodeGen Native (Operands Int, Operands Word8)
+descriptorIdxTag tileIdx = do
+  descIdx <- A.rem TypeInt tileIdx (A.liftInt descriptorsLength)
+  tag <- A.quot TypeInt tileIdx (A.liftInt descriptorsLength) >>= A.mul numType (A.liftInt 2)
+  tag8 <- A.fromIntegral TypeInt (numType @Word8) tag
+  return (descIdx, tag8)
+
+getDescriptorSlot
+  :: TupR ScalarType (Word8, value)
+  -> Operand (Ptr (Struct (SizedArray (Struct (BufferEltR (Word8, value))))))
+  -> Operands Int
+  -> CodeGen Native (Operand (Ptr Word8), TupR Operand (Distribute Ptr (BufferEltR value)))
+getDescriptorSlot memorySlotTp ptr (OP_Int i) = do
+  slot <- instr' $ GetElementPtr $
+    GEP ptr (A.num numType 0 :: Operand Int32) $
+    GEPStruct (ArrayPrimType (fromIntegral descriptorsLength) $ StructPrimType False $ bufferEltsR memorySlotTp) TupleIdxSelf $
+    GEPArray i GEPEmpty
+  ptrs <- tuplePtrs memorySlotTp slot
+  case ptrs of
+    TupRsingle flag `TupRpair` value -> return (flag, value)
+    _ -> internalError "Pair impossible"
