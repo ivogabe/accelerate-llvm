@@ -77,7 +77,7 @@ instance Downcast (Terminator a) LLVM.Instr where
                                  (labelToPrettyBL d)
                                  (map (bimap fromConstant labelToPrettyBL) a)
       where
-        fromConstant :: Constant a -> Integer
+        fromConstant :: Constant a' -> Integer
         fromConstant cnst = case downcast @_ @(LLVM.Typed LLVM.Value) cnst of
           LLVM.Typed _ (LLVM.ValInteger n) -> n
           _ -> error "TODO: llvm-pretty supports only integral cases for Switch"

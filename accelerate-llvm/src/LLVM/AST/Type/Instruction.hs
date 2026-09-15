@@ -478,30 +478,30 @@ instance Downcast (Instruction a) LP.Instr where
       --         , LLVM.approxFunc      = True
       --         }
 
-      constantTyped :: IsScalar a => a -> LP.Typed LP.Value
+      constantTyped :: IsScalar a' => a' -> LP.Typed LP.Value
       constantTyped x = downcast (ConstantOperand (ScalarConstant scalarType x))
 
-      constant :: IsScalar a => a -> LP.Value
+      constant :: IsScalar a' => a' -> LP.Value
       constant = LP.typedValue . constantTyped
 
-      add :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      add :: NumType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       add IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Add nsw nuw) x y
       add FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FAdd fmf)    x y
 
-      sub :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      sub :: NumType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       sub IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Sub nsw nuw) x y
       sub FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FSub fmf)    x y
 
-      mul :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      mul :: NumType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       mul IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Mul nsw nuw) x y
       mul FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FMul fmf)    x y
 
-      quot :: IntegralType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      quot :: IntegralType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       quot t x (LP.Typed _ y)
         | signed t  = LP.Arith (LP.SDiv exact) x y
         | otherwise = LP.Arith (LP.UDiv exact) x y
 
-      rem :: IntegralType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      rem :: IntegralType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       rem t x (LP.Typed _ y)
         | signed t  = LP.Arith LP.SRem x y
         | otherwise = LP.Arith LP.URem x y
@@ -513,7 +513,7 @@ instance Downcast (Instruction a) LP.Instr where
             PrimType (StructPrimType _ tuple) -> tupleIdxToInt tuple ix
             _ -> internalError "Struct impossible"
 
-      ext :: BoundedType a -> BoundedType b -> LP.Typed LP.Value -> LP.Instr
+      ext :: BoundedType a' -> BoundedType b -> LP.Typed LP.Value -> LP.Instr
       ext a (downcast -> b) x
         | signed a  = LP.Conv LP.SExt x b
         | otherwise = LP.Conv (LP.ZExt False) x b
@@ -523,7 +523,7 @@ instance Downcast (Instruction a) LP.Instr where
         | signed t  = LP.Conv LP.FpToSi x t'
         | otherwise = LP.Conv LP.FpToUi x t'
 
-      int2float :: IntegralType a -> FloatingType b -> LP.Typed LP.Value -> LP.Instr
+      int2float :: IntegralType a' -> FloatingType b -> LP.Typed LP.Value -> LP.Instr
       int2float a (downcast -> b) x
         | signed a  = LP.Conv LP.SiToFp x b
         | otherwise = LP.Conv (LP.UiToFp False) x b
@@ -531,7 +531,7 @@ instance Downcast (Instruction a) LP.Instr where
       isNaN :: LP.Typed LP.Value -> LP.Instr
       isNaN x = LP.FCmp fmf LP.Funo x (LP.typedValue x)
 
-      cmp :: SingleType a -> Ordering -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      cmp :: SingleType a' -> Ordering -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       cmp t p x (LP.Typed _ y) =
         case t of
           NumSingleType FloatingNumType{} -> LP.FCmp fastmathFlags (fp p) x y

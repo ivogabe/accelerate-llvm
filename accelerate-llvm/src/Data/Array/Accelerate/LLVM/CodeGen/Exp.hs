@@ -1,4 +1,5 @@
 {-# LANGUAGE EmptyCase           #-}
+{-# LANGUAGE KindSignatures      #-}
 {-# LANGUAGE MonoLocalBinds      #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE RankNTypes          #-}
@@ -40,6 +41,7 @@ import Data.Array.Accelerate.LLVM.Foreign
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as L
 
+import qualified Data.Kind
 import Data.Primitive.Vec
 import Data.Text                                                    ( Text )
 
@@ -80,7 +82,7 @@ llvmOfFun2 arrayInstr (Lam lhs1 (Lam lhs2 (Body body)))
   = IRFun2 $ \x y -> llvmOfOpenExp arrayInstr body (Empty `pushE` (lhs1, x) `pushE` (lhs2, y))
 llvmOfFun2 _ _ = internalError "impossible evaluation"
 
-type CompileArrayInstr arch arr = forall env s t. arr (s -> t) -> Operands s -> IROpenExp arch env t
+type CompileArrayInstr arch arr = forall (env :: Data.Kind.Type) s t. arr (s -> t) -> Operands s -> IROpenExp arch env t
 
 compileArrayInstrGamma :: forall arch genv. Gamma genv -> CompileArrayInstr arch (ArrayInstr genv)
 compileArrayInstrGamma genv arr arg = case arr of

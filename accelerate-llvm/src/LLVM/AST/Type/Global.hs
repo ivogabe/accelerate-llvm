@@ -45,7 +45,7 @@ instance Downcast (GlobalFunction t) LLVM.Declare where
     , LLVM.decAttrs = []
     , LLVM.decComdat = Nothing }
     where
-      trav :: GlobalFunction t -> ([LLVM.Type], Bool, LLVM.Type, LLVM.Symbol)
+      trav :: GlobalFunction t' -> ([LLVM.Type], Bool, LLVM.Type, LLVM.Symbol)
       trav (Body t _ n) = ([], False, downcast t, labelToPrettyS n)
       trav (Lam a _ l)  = let (as, b, r, n) = trav l
                           in  (downcast a : as, b, r, n)
@@ -69,7 +69,7 @@ instance Downcast (GlobalFunctionDefinition t) LLVM.Define where
     , LLVM.defMetadata = Map.empty
     , LLVM.defComdat = Nothing }
     where
-      trav :: GlobalFunctionDefinition t -> ((Maybe LLVM.Linkage), [LLVM.Typed LLVM.Ident], LLVM.Type, LLVM.Symbol, [LLVM.BasicBlock])
+      trav :: GlobalFunctionDefinition t' -> ((Maybe LLVM.Linkage), [LLVM.Typed LLVM.Ident], LLVM.Type, LLVM.Symbol, [LLVM.BasicBlock])
       trav (Body t _ (GlobalFunctionBody linkage n blocks)) = (linkage, [], downcast t, labelToPrettyS n, blocks)
       trav (Lam t p l)
         = (linkage, LLVM.Typed (downcast t) (nameToPrettyI p) : ps, r, n, blocks)
