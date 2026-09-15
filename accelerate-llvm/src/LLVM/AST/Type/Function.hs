@@ -155,3 +155,4 @@ data Arguments f where
 functionBody :: Function kind t -> kind
 functionBody (Lam _ _ f) = functionBody f
 functionBody (Body _ _ b) = b
+functionBody VarLams{} = error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"

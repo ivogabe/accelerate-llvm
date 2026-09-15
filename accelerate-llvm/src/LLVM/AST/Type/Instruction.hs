@@ -25,7 +25,6 @@ import LLVM.AST.Type.Constant                             ( Constant(ScalarConst
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function
 import LLVM.AST.Type.GetElementPtr
-import LLVM.AST.Type.InlineAssembly
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
@@ -37,8 +36,6 @@ import LLVM.AST.Type.Instruction.Volatile                 ( Volatility(..) )
 
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
-import Data.Array.Accelerate.AST                          ( PrimBool )
-import Data.Array.Accelerate.AST.Idx
 import qualified Data.Array.Accelerate.Debug.Internal     as Debug
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Elt
@@ -468,8 +465,10 @@ instance Downcast (Instruction a) LP.Instr where
       atomicity :: Maybe LP.AtomicOrdering
       atomicity = Nothing
 
+      {- TODO WALL: DEAD CODE
       alignment :: Maybe LP.Align
       alignment = Nothing  -- was: 0
+      -}
 
       -- fmf :: LLVM.FastMathFlags
       -- fmf = LLVM.FastMathFlags
@@ -579,7 +578,7 @@ instance Downcast (Instruction a) LP.Instr where
                   )
           trav (Body u k o) =
             case o of
-              CallAssembly asm ->
+              CallAssembly _asm ->
                 internalError
                   "Inline assembly should not be used as llvm-pretty does not \
                   \support it. For a workaround, see the solution for nanosleep \
@@ -590,13 +589,13 @@ instance Downcast (Instruction a) LP.Instr where
           trav (Lam t _ l)  =
             let (ts, va, k, r, fm, n) = trav l
             in  (downcast t : ts, va, k, r, fm, n)
-          trav (VarLams f) = 
-            let (ts, _, k, r, fm, n) = trav f
+          trav (VarLams f') = 
+            let (ts, _, k, r, fm, n) = trav f'
             in  (ts, True, k, r, fm, n)
 
           travArgs :: Arguments t -> [LP.Typed LP.Value]
           -- TODO: Place the attrs on the argument, when llvm-pretty supports that
-          travArgs (ArgumentsCons operand attrs args') = downcast operand : travArgs args'
+          travArgs (ArgumentsCons operand _attrs args') = downcast operand : travArgs args'
           travArgs ArgumentsNil = []
 
           (argt, varArgs, tail, ret, fmFlags, target) = trav f

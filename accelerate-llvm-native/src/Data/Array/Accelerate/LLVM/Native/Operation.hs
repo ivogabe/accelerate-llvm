@@ -40,20 +40,13 @@ import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
 
 
-import Data.Array.Accelerate.AST.Environment (weakenId)
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
-import Data.Array.Accelerate.Trafo.Var (DeclareVars(..), declareVars)
-import Data.Array.Accelerate.Representation.Ground (buffersR)
-import Data.Array.Accelerate.AST.LeftHandSide
-import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken)
 import Data.Array.Accelerate.Trafo.Operation.Bounds
-import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
+import Data.Array.Accelerate.Representation.Shape (ShapeR (..), rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
-import Data.Array.Accelerate.Type (scalarType, Word8, scalarTypeWord8, scalarTypeInt)
-import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph
+import Data.Array.Accelerate.Type (scalarType, scalarTypeInt)
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver hiding ( var, int )
-import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver as ILP
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
 import Lens.Micro
 import Lens.Micro.Mtl
 
@@ -62,7 +55,6 @@ import qualified Data.Set as S
 import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Control.Monad.State.Strict
 
-import Data.Foldable (fold)
 import Data.Array.Accelerate.Analysis.Match ((:~:)(Refl))
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
 
@@ -242,27 +234,27 @@ instance SetOpIndices NativeOp where
         | otherwise = Nothing
 
   getOpLoopDirections (NScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections (NScan1 dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections (NScan' dir) _ (_ :>: _ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections NFold _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', LoopMonotone)]
   getOpLoopDirections NFold1 _ (_ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', LoopMonotone)]
   getOpLoopDirections _ _ _ = []
 
 -- TODO: factor out more common parts of mkGraph
@@ -283,7 +275,7 @@ instance MakesILP NativeOp where
           -> NativeOp args
           -> LabelledArgs env args
           -> State (BackendGraphState NativeOp env) ()
-  mkGraph c@(Node i _) NBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c@(Node _i _) NBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn

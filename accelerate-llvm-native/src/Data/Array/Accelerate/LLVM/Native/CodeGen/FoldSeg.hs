@@ -17,6 +17,7 @@
 module Data.Array.Accelerate.LLVM.Native.CodeGen.FoldSeg
   where
 
+{- TODO WALL: DEAD CODE
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Type
 
@@ -36,6 +37,7 @@ import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 
 import Control.Monad
 import Prelude                                                      as P
+-}
 
 {--
 -- Segmented reduction where a single processor reduces the entire array. The

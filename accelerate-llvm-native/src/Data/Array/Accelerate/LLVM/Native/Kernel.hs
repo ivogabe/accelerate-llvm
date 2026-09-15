@@ -23,17 +23,11 @@ module Data.Array.Accelerate.LLVM.Native.Kernel (
 
 -- accelerate
 
-import Data.Array.Accelerate.Array.Buffer
-import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Shape
-import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.AST.Exp
-import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.Schedule
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Backend
-import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Pretty.Schedule
 
@@ -45,20 +39,14 @@ import Data.Array.Accelerate.LLVM.Native.CodeGen
 import Data.Array.Accelerate.LLVM.Native.Compile
 import Data.Array.Accelerate.LLVM.Native.Link
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
-import LLVM.AST.Type.Function
 import Data.ByteString.Short                                        ( ShortByteString, fromShort )
 import qualified Data.ByteString.Char8 as Char8
-import System.FilePath                                              ( FilePath, (<.>) )
 import System.IO.Unsafe
 import Control.DeepSeq
-import Data.Typeable
 import Foreign.Ptr
 import Prettyprinter
 import Data.String
-import LLVM.AST.Type.Downcast
-import LLVM.AST.Type.Representation
 
 data NativeKernel env where
   NativeKernel

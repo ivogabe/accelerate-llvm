@@ -24,19 +24,14 @@ module Data.Array.Accelerate.LLVM.CodeGen.Default where
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
-import Data.Array.Accelerate.AST.Idx
-import Data.Array.Accelerate.AST.Environment
-import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.Error
 
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
 import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Data.Array.Accelerate.LLVM.CodeGen.Cluster
-import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
-import Data.Array.Accelerate.LLVM.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic (Intrinsic)
@@ -44,10 +39,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
 import Data.Array.Accelerate.LLVM.Foreign
 
 import LLVM.AST.Type.Operand
-import LLVM.AST.Type.Representation
-import LLVM.AST.Type.Instruction
 
-import Data.Maybe
 import Control.Monad
 
 type CG f = forall target op env idxEnv. (CompileForeignExp target, Intrinsic target) => Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)

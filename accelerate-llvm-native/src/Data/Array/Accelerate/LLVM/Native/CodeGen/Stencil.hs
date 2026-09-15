@@ -20,6 +20,7 @@ module Data.Array.Accelerate.LLVM.Native.CodeGen.Stencil (
 
 ) where
 
+{- TODO WALL: DEAD CODE
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Stencil
@@ -45,6 +46,7 @@ import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LP
 
 import Control.Monad
+-}
 
 {-
 

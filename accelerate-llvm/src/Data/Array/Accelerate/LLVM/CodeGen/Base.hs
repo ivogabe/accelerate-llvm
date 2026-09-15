@@ -37,9 +37,7 @@ import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function                                       as LLVMType
 import LLVM.AST.Type.Global
-import LLVM.AST.Type.InlineAssembly
 import LLVM.AST.Type.Instruction
-import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
@@ -47,8 +45,6 @@ import LLVM.AST.Type.Representation
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
-import Data.Array.Accelerate.LLVM.CodeGen.Sugar
-import Data.Array.Accelerate.Representation.Array                   ( Array, ArrayR(..) )
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 
@@ -58,7 +54,6 @@ import Data.Monoid
 import Data.String
 import Data.Typeable
 import Text.Printf
-import qualified Data.IntMap                                        as IM
 import Prelude                                                      as P
 
 
@@ -75,6 +70,7 @@ global tp n = travTypeToOperands tp (\t i -> ConstantOperand (GlobalReference (P
 -- Generating names for things
 -- ---------------------------
 
+{- TODO WALL: DEAD CODE
 -- | Names of array data components
 --
 arrayName :: Name (Array sh e) -> Int -> Name e'        -- for the i-th component of the ArrayData
@@ -86,6 +82,7 @@ arrayName (UnName n) i = Name (     fromString (printf "%d.ad%d" n i))
 shapeName :: Name (Array sh e) -> Int -> Name sh'       -- for the i-th component of the shape structure
 shapeName (Name n)   i = Name (n <> fromString (printf   ".sh%d"   i))
 shapeName (UnName n) i = Name (     fromString (printf "%d.sh%d" n i))
+-}
 
 -- | Names combined with traversing
 --
@@ -93,6 +90,7 @@ rename :: Name t -> Int -> Name t'                      -- for the i-th componen
 rename (Name   n) i = Name (n <> fromString (printf    "%d"   i))
 rename (UnName n) i = Name (     fromString (printf "%d.%d" n i))
 
+{- TODO WALL: DEAD CODE
 {-# INLINEABLE travTypeToList #-}
 travTypeToList
     :: forall tp a.
@@ -109,6 +107,7 @@ travTypeToList tp f = snd $ go tp 0
                                 (i2, r2) = go t2 i1
                             in
                             (i2, r2 ++ r1)
+-}
 
 {-# INLINEABLE travTypeToOperands #-}
 travTypeToOperands
@@ -180,7 +179,7 @@ call f args attrs = do
       go :: GlobalFunction t -> (Label, Function Callable t)
       go (Body t k l) = (l, Body t k $ CallGlobal l)
       go (Lam t x l)  = Lam t x <$> go l
-      go (VarLams f) = let (x, y) = go f in (x, VarLams y)
+      go (VarLams f') = let (x, y) = go f' in (x, VarLams y)
   --
   let (lab, f') = go f
   if labelIsAccPrelude lab
@@ -203,6 +202,7 @@ call' f args attrs = do
       go :: GlobalFunction t -> Function Callable t
       go (Body t k l) = Body t k (CallGlobal l)
       go (Lam t x l)  = Lam t x (go l)
+      go VarLams{}    = error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
   --
   declareExternFunc decl
   instr' (Call (go f) args)
@@ -214,6 +214,7 @@ callLocal f args _attrs = do
       go :: Function Label t -> Function Callable t
       go (Body t k l) = Body t k (CallLocal l)
       go (Lam t x l)  = Lam t x (go l)
+      go VarLams{}    = error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
   --
   instr' (Call (go f) args)
 
@@ -224,21 +225,21 @@ type family MarshalScalars a res where
   MarshalScalars t      res = t -> res
 
 bindScalars :: String -> TypeR t -> (Result f :~: Result (MarshalScalars t f), GlobalFunctionDefinition f -> GlobalFunctionDefinition (MarshalScalars t f), Operands t)
-bindScalars prefix tp = (eq, fun, operands)
+bindScalars prefix tp = (eq', fun, operands)
   where
-    (_, eq, fun, operands) = bindScalars' prefix 0 tp
+    (_, eq', fun, operands) = bindScalars' prefix 0 tp
 
 bindScalars' :: forall t f. String -> Int -> TypeR t -> (Int, Result f :~: Result (MarshalScalars t f), GlobalFunctionDefinition f -> GlobalFunctionDefinition (MarshalScalars t f), Operands t)
-bindScalars' prefix fresh (TupRpair t1 t2)
-  | (fresh1, eq1, f1, o1) <- bindScalars' prefix fresh  t1
+bindScalars' prefix fresh' (TupRpair t1 t2)
+  | (fresh1, eq1, f1, o1) <- bindScalars' prefix fresh' t1
   , (fresh2, eq2, f2, o2) <- bindScalars' prefix fresh1 t2
   = (fresh2, case (eq1, eq2) of (Refl, Refl) -> Refl, f1 . f2, OP_Pair o1 o2)
-bindScalars' prefix fresh (TupRsingle tp)
-  | Refl <- marshalScalar @t @f tp = (fresh + 1, Refl, LLVMType.Lam (ScalarPrimType tp) name, ir tp operand)
+bindScalars' prefix fresh' (TupRsingle tp)
+  | Refl <- marshalScalar @t @f tp = (fresh' + 1, Refl, LLVMType.Lam (ScalarPrimType tp) name, ir tp operand)
     where
     operand = LocalReference (PrimType $ ScalarPrimType tp) name
-    name = fromString $ prefix ++ show fresh
-bindScalars' _      fresh (TupRunit) = (fresh, Refl, id, OP_Unit)
+    name = fromString $ prefix ++ show fresh'
+bindScalars' _      fresh' (TupRunit) = (fresh', Refl, id, OP_Unit)
 
 marshalScalar :: ScalarType t -> (t -> res) :~: MarshalScalars t res
 -- Pattern match to prove that 't' is not () or a pair type

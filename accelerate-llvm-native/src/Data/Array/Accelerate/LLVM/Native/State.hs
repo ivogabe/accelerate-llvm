@@ -60,7 +60,7 @@ evalNative target acc = do
 createTarget
     :: [Int]              -- ^ CPUs to launch worker threads on
     -> IO Native
-createTarget cpus = do
+createTarget _cpus = do
   linker  <- LC.new
   return  $! Native linker
 

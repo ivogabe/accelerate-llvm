@@ -20,22 +20,15 @@
 module Data.Array.Accelerate.LLVM.PTX.CodeGen.Fold
   where
 
-import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Shape                   hiding ( size )
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Error
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Array
-import Data.Array.Accelerate.LLVM.CodeGen.Base
-import Data.Array.Accelerate.LLVM.CodeGen.Constant
-import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Loop                      as Loop
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
-import Data.Array.Accelerate.LLVM.Compile.Cache
 
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
@@ -46,8 +39,6 @@ import LLVM.AST.Type.Representation
 
 import qualified Foreign.CUDA.Analysis                              as CUDA
 
-import Control.Monad                                                ( (>=>) )
-import Control.Monad.Reader                                         ( asks )
 import Data.String                                                  ( fromString )
 import Data.Bits                                                    as P
 import Prelude                                                      as P

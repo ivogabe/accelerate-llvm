@@ -25,7 +25,6 @@ import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.LLVM.Native.Link.Object
 import qualified Data.Array.Accelerate.LLVM.Native.Debug            as Debug
 
-import Control.Monad
 import Data.ByteString.Short.Char8                                  ( ShortByteString )
 import Formatting
 import qualified Data.ByteString.Short.Char8                        as B8

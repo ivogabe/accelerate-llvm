@@ -16,6 +16,7 @@
 module Data.Array.Accelerate.LLVM.Native.CodeGen.Map
   where
 
+{- TODO WALL: DEAD CODE
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
@@ -32,6 +33,7 @@ import Data.Array.Accelerate.LLVM.Compile.Cache
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
+-}
 
 
 -- C Code

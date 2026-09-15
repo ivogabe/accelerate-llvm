@@ -12,9 +12,7 @@ module Data.Array.Accelerate.LLVM.PTX.Link.Object
   where
 
 import Data.Array.Accelerate.Lifetime
-import Data.ByteString.Short.Char8                                  ( ShortByteString, unpack )
-import Data.List
-import Formatting
+import Data.ByteString.Short.Char8                                  ( ShortByteString )
 import qualified Foreign.CUDA.Driver                                as CUDA
 
 data KernelObject = KernelObject

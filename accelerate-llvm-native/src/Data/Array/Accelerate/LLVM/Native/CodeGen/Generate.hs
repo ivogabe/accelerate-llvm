@@ -17,6 +17,7 @@
 module Data.Array.Accelerate.LLVM.Native.CodeGen.Generate
   where
 
+{- TODO WALL: DEAD CODE
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
@@ -48,6 +49,7 @@ import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Module
 
 import Data.Typeable
+-}
 
 -- Construct a new array by applying a function to each index. Each thread
 -- processes multiple adjacent elements.

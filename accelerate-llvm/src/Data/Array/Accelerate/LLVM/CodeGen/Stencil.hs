@@ -20,6 +20,7 @@
 module Data.Array.Accelerate.LLVM.CodeGen.Stencil
   where
 
+{- TODO WALL: DEAD CODE
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.AST.Partitioned                        ( Arg(..), In )
 import Data.Array.Accelerate.Representation.Array
@@ -39,7 +40,7 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 
 import Control.Applicative
 import Data.String
-import Prelude
+-}
 
 {-
 -- Stencil boundary conditions

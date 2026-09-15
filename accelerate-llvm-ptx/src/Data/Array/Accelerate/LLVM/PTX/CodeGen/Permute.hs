@@ -19,26 +19,17 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (
 ) where
 
 import Data.Array.Accelerate.Error
-import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Elt
-import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.AST.Operation (Mut, Arg (ArgArray), Modifier (Mut))
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
-import Data.Array.Accelerate.LLVM.CodeGen.Array
-import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
-import Data.Array.Accelerate.LLVM.CodeGen.Permute
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
-import Data.Array.Accelerate.LLVM.Compile.Cache
 
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
-import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.PTX.Target
 
 import LLVM.AST.Type.Instruction
@@ -51,7 +42,6 @@ import LLVM.AST.Type.Representation
 
 import Foreign.CUDA.Analysis
 
-import Control.Monad                                                ( void )
 import Control.Monad.Reader                                         ( asks )
 import Prelude
 

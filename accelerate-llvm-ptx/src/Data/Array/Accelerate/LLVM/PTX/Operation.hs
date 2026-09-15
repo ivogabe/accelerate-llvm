@@ -31,44 +31,32 @@ module Data.Array.Accelerate.LLVM.PTX.Operation
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Operation
 import Data.Array.Accelerate.AST.Partitioned
-import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.Analysis.Hash.Exp
 import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
-import Data.Array.Accelerate.Error
 
 
-import qualified Data.Set as Set
-import Data.Array.Accelerate.AST.Environment (weakenId, weakenEmpty, weakenSucc' )
+import Data.Array.Accelerate.AST.Environment (weakenId)
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Var (DeclareVars(..), declareVars)
 import Data.Array.Accelerate.Representation.Ground (buffersR)
 import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Trafo.Operation.Bounds
-import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken, LHS (..), mkLHS)
+import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken)
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Analysis.Match
-import Data.Maybe (isJust)
-import Data.Array.Accelerate.Interpreter (InOut (..))
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
-import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver hiding ( c )
-import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver as ILP
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
 import Lens.Micro
 import Lens.Micro.Mtl
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
-
-import Data.Array.Accelerate.AST.Idx (Idx(..))
-import Data.Array.Accelerate.Pretty.Operation (prettyFun)
-import Data.Array.Accelerate.Pretty.Exp (Val (Push))
-import Unsafe.Coerce (unsafeCoerce)
 
 import Control.Monad.State.Strict
 
@@ -149,11 +137,11 @@ instance LowerAcc PTXOp where
   mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec PTXBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec PTXGenerate    (a :>: b :>:             ArgsNil)
-  mkScan dir f (Just seed) i@(ArgArray In (ArrayR shr ty) sh buf) o
+  mkScan dir f (Just seed) i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o
     = Exec (PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
-  mkScan dir f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
+  mkScan dir f Nothing i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o
     = Exec (PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
-  mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
+  mkScan' dir f seed i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o1 o2
     = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
   mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
     | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord32
@@ -263,27 +251,27 @@ instance SetOpIndices PTXOp where
         | otherwise = Nothing
 
   getOpLoopDirections (PTXScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections (PTXScan1 dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections (PTXScan' dir) _ (_ :>: _ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections PTXFold _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', LoopMonotone)]
   getOpLoopDirections PTXFold1 _ (_ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', LoopMonotone)]
   getOpLoopDirections _ _ _ = []
 
 instance MakesILP PTXOp where
@@ -295,7 +283,7 @@ instance MakesILP PTXOp where
           -> PTXOp args
           -> LabelledArgs env args
           -> State (BackendGraphState PTXOp env) ()
-  mkGraph c@(Node i _) PTXBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c@(Node _i _) PTXBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
@@ -429,6 +417,8 @@ instance MakesILP PTXOp where
   finalize g = map NegativeDirIfManifest $ S.toList $ g^.writeEdges
 
   encodeBackendClusterArg (BCAN) = intHost $(hashQ ("BCAN" :: String))
+
+  combineBackendClusterArg = error "TODO WALL: NO EXPLICIT IMPLEMENTATION"
 
 defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn

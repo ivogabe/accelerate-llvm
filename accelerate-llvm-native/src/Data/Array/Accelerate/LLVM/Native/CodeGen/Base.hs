@@ -25,16 +25,12 @@ import Data.Array.Accelerate.LLVM.Native.Foreign                    ()
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.LLVM.CodeGen.Profile
-import Data.Primitive.Vec
 
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Operand
-
-import Data.String
-import qualified Data.ByteString.Short.Char8                        as S8
 
 -- The struct passed as argument to a call contains:
 --  * work_function: ptr

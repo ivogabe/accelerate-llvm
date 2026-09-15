@@ -29,7 +29,6 @@ module Data.Array.Accelerate.LLVM.Native.Execute (
 
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Representation.Elt
-import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Ground
 import Data.Array.Accelerate.AST.Execute
 import Data.Array.Accelerate.AST.LeftHandSide

@@ -82,11 +82,11 @@ imapFromStepTo
     -> CodeGen arch ()
 imapFromStepTo ann start step end body =
   for ann
-      (TupRsingle $ SingleScalarType $ NumSingleType num) start
-      (\i -> lt (NumSingleType num) i end)
-      (\i -> add num i step)
+      (TupRsingle $ SingleScalarType $ NumSingleType num') start
+      (\i -> lt (NumSingleType num') i end)
+      (\i -> add num' i step)
       body
-  where num = numType @i
+  where num' = numType @i
 
 
 -- | Execute the given function at each index in the range.
@@ -101,13 +101,13 @@ imapReverseFromStepTo
     -> (Operands i -> CodeGen arch ())                -- ^ loop body
     -> CodeGen arch ()
 imapReverseFromStepTo ann start step end body = do
-  end' <- sub num end step
+  end' <- sub num' end step
   for ann
-      (TupRsingle $ SingleScalarType $ NumSingleType num) end'
-      (\i -> gte (NumSingleType num) i start)
-      (\i -> sub num i step)
+      (TupRsingle $ SingleScalarType $ NumSingleType num') end'
+      (\i -> gte (NumSingleType num') i start)
+      (\i -> sub num' i step)
       body
-  where num = numType @i
+  where num' = numType @i
 
 
 -- | Iterate with an accumulator between given start and end indices, executing
@@ -125,11 +125,11 @@ iterFromStepTo
     -> CodeGen arch (Operands a)
 iterFromStepTo ann tp start step end seed body =
   iter ann
-       (TupRsingle $ SingleScalarType $ NumSingleType num) tp start seed
-       (\i -> lt (NumSingleType num) i end)
-       (\i -> add num i step)
+       (TupRsingle $ SingleScalarType $ NumSingleType num') tp start seed
+       (\i -> lt (NumSingleType num') i end)
+       (\i -> add num' i step)
        body
-  where num = numType @i
+  where num' = numType @i
 
 
 -- | A standard 'for' loop.

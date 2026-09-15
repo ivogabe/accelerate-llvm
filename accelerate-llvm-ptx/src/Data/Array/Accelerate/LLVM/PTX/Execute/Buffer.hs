@@ -13,27 +13,16 @@ module Data.Array.Accelerate.LLVM.PTX.Execute.Buffer where
 
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Error
-import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Lifetime
 
-import Data.Array.Accelerate.LLVM.State
-import Data.Array.Accelerate.LLVM.PTX.Target                        ( PTX(..) )
-import Data.Array.Accelerate.LLVM.PTX.Execute.Stream
 import Data.Array.Accelerate.LLVM.PTX.Execute.Par
 
-import Foreign.CUDA.Driver.Error
 import qualified Foreign.CUDA.Ptr                                   as CUDA
 import qualified Foreign.CUDA.Driver                                as CUDA
-import qualified Foreign.CUDA.Driver.Stream                         as CUDA
 
-import Control.Exception
-import Control.Monad
 import Control.Monad.Reader
-import Control.Monad.State
-import Data.Text.Lazy.Builder
-import Formatting
 import Foreign.Ptr
 import Foreign.ForeignPtr
 
@@ -54,7 +43,7 @@ mallocDevice tp size = do
   return $ PTXBuffer size' lifetime
 
 copyToDevice :: ScalarType t -> Buffer t -> Par (PTXBuffer t)
-copyToDevice tp buffer@(Buffer hostPtr) = do
+copyToDevice tp (Buffer hostPtr) = do
   byteSize <- liftIO $ withForeignPtr hostPtr (memoryByteSize . castPtr)
   let byteSize' = max 1 $ fromIntegral byteSize
   devicePtr <- liftIO (CUDA.mallocArray byteSize')
@@ -108,7 +97,7 @@ readFromDevice tp (PTXBuffer size lifetime) idx
 
     block
 
-    liftIO $ CUDA.unregisterArray hostPtr2
+    _ <- liftIO $ CUDA.unregisterArray hostPtr2
     liftIO $ touchForeignPtr hostPtr
     liftIO $ touchLifetime lifetime
 

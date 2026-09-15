@@ -45,7 +45,6 @@ import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.Error
 
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
-import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
@@ -142,19 +141,19 @@ genSequential envs sizes ops = do
       -- there are nested loops. Furthermore, if there are (expensive) nested
       -- loops, then the benefit of loop peeling here will be less.
       let peeling' = if null szs then peeling else PeelNot
-      loopWith (loopPeelingToAnnotation peeling') (isDescending dir) (A.liftInt 0) sz $ \isFirst idx -> do
+      loopWith (loopPeelingToAnnotation peeling') (isDescending' dir) (A.liftInt 0) sz $ \isFirst idx -> do
         let envs2 = envs1{
             envsLoopDepth = depth + 1,
             envsIdx = partialUpdate (op scalarTypeInt idx) idxIdx $ envsIdx envs1,
             envsIsFirst = isFirst,
-            envsDescending = isDescending dir
+            envsDescending = isDescending' dir
           }
         genSequential envs2 szs nested
   after
   where
-    isDescending :: LoopDirection Int -> Bool
-    isDescending LoopDescending = True
-    isDescending _ = False
+    isDescending' :: LoopDirection Int -> Bool
+    isDescending' LoopDescending = True
+    isDescending' _ = False
 
 genSequential'
   :: Envs env idxEnv
@@ -306,7 +305,7 @@ parHoistDeeperLoops :: ParCodeGens target analysis op env idxEnv kernelMemory ->
 parHoistDeeperLoops ParGenNil = ParGenNil
 parHoistDeeperLoops (ParGenBind d lhs expr next) = ParGenBind d lhs expr $ parHoistDeeperLoops next
 parHoistDeeperLoops (ParGenPar par next) = ParGenPar par $ parHoistDeeperLoops next
-parHoistDeeperLoops (ParGenDeeper d op next) = ParGenDeeper d op $ parHoistDeeperLoops next
+parHoistDeeperLoops (ParGenDeeper d op' next) = ParGenDeeper d op' $ parHoistDeeperLoops next
 parHoistDeeperLoops (ParGenTileLoopBoundary next)
   | (deeper, next') <- go next
   = foldr (uncurry ParGenDeeper) (ParGenTileLoopBoundary next') deeper
@@ -320,9 +319,9 @@ parHoistDeeperLoops (ParGenTileLoopBoundary next)
     go (ParGenTileLoopBoundary n)
       | (deeper, n') <- go n
       = (deeper, ParGenTileLoopBoundary n')
-    go (ParGenDeeper d op n)
+    go (ParGenDeeper d op' n)
       | (deeper, n') <- go n
-      = ((d, op) : deeper, n')
+      = ((d, op') : deeper, n')
 
 data ParCodeGens target analysis op env idxEnv kernelMemory where
   ParGenNil
@@ -425,10 +424,10 @@ parCodeGenInitMemory ptr envs tupleIdx = \case
       parCodeGenInitMemory ptr envs' tupleIdx next
   ParGenDeeper _ _ next -> parCodeGenInitMemory ptr envs tupleIdx next
   ParGenTileLoopBoundary next -> parCodeGenInitMemory ptr envs tupleIdx next
-  ParGenPar (ParLoopCodeGen _ tp init _ _ _ _ _ _ _) next -> do
+  ParGenPar (ParLoopCodeGen _ tp init' _ _ _ _ _ _ _) next -> do
     -- Pointer to the kernel memory of this operation
     thisPtr <- instr' $ GetElementPtr $ gepStruct (StructPrimType False tp) ptr $ tupleLeft tupleIdx
-    init thisPtr envs
+    init' thisPtr envs
     parCodeGenInitMemory ptr envs (tupleRight tupleIdx) next
   where
     depth = envsLoopDepth envs
@@ -519,11 +518,11 @@ genParallel ptr envs tupleIdx = \case
           (loopSkippedEnv d lhs expr loopSeq)
           (withSkippedEnv lhs exit)
 
-  ParGenPar (ParLoopCodeGen analysis tp _ init before body after exit _ nextLoop) next -> do
+  ParGenPar (ParLoopCodeGen analysis tp _ init' before body after exit _ nextLoop) next -> do
     -- Pointer to the kernel memory of this operation
     thisPtr <- instr' $ GetElementPtr $ gepStruct (StructPrimType False tp) ptr $ tupleLeft tupleIdx
     -- Initialize the thread state of this operation (type variable 'a' in ParLoopCodeGen)
-    a <- init thisPtr envs
+    a <- init' thisPtr envs
     -- Initialize later operations
     ParTileLoops loop loops loopSeq exitNext <- genParallel ptr envs (tupleRight tupleIdx) next
     -- Construct data structures describing the code generation of the tile loops

@@ -64,20 +64,18 @@ import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
 import Data.Array.Accelerate.LLVM.PTX.Target
-import Data.Array.Accelerate.LLVM.PTX.CodeGen.Intrinsic
+import Data.Array.Accelerate.LLVM.PTX.CodeGen.Intrinsic             ()
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant        as A
 import Data.Array.Accelerate.Backend (KernelMetadata)
 
-import Foreign.CUDA.Analysis                                        ( Compute(..), computeCapability )
 import qualified Foreign.CUDA.Analysis                              as CUDA
 
 import LLVM.AST.Type.Constant
@@ -85,7 +83,6 @@ import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function
 import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Global
-import LLVM.AST.Type.InlineAssembly
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
 import qualified LLVM.AST.Type.Instruction.RMW                      as RMW
@@ -155,8 +152,8 @@ perWarp' tp action = do
 -- Executes code in only one warp per threadblock
 warpPerThreadBlock :: CodeGen PTX () -> CodeGen PTX ()
 warpPerThreadBlock action = do
-  id <- warpId
-  when (A.eq singleType id (liftInt32 0)) action
+  id' <- warpId
+  when (A.eq singleType id' (liftInt32 0)) action
 
 -- Executes code only once per thread block (instead of once per thread)
 perThreadBlock :: CodeGen PTX () -> CodeGen PTX ()
@@ -543,7 +540,7 @@ shfl_op
     -> CodeGen PTX (Operands a)     -- value received
 shfl_op sop t mask delta val
   | Refl <- result t = do
-  dev <- liftCodeGen $ asks ptxDeviceProperties
+  _dev <- liftCodeGen $ asks ptxDeviceProperties
 
   let
       -- The CUDA __shfl* instruction take an optional final parameter

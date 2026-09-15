@@ -24,24 +24,17 @@ module Data.Array.Accelerate.LLVM.PTX.Kernel (
 
 -- accelerate
 
-import Data.Array.Accelerate.Array.Buffer
-import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Shape
-import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Exp
-import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.Schedule
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Backend
-import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Pretty.Schedule
 
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.PTX.Operation
 import Data.Array.Accelerate.LLVM.PTX.Compile.Cache
 import Data.Array.Accelerate.LLVM.PTX.CodeGen
@@ -52,19 +45,13 @@ import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Array.Accelerate.LLVM.PTX.Link
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
 import Crypto.Hash.XKCP
-import LLVM.AST.Type.Function
 import Data.ByteString.Short                                        ( ShortByteString, fromShort )
 import qualified Data.ByteString.Char8 as Char8
-import System.FilePath                                              ( FilePath, (<.>) )
 import System.IO.Unsafe
 import Control.DeepSeq
 import Control.Monad.Reader
-import Data.Typeable
-import Foreign.Ptr
 import Prettyprinter
 import Data.String
-import LLVM.AST.Type.Downcast
-import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Module
 
 data PTXKernel env where

@@ -17,6 +17,7 @@
 module Data.Array.Accelerate.LLVM.Native.CodeGen.Fold
   where
 
+{- TODO WALL: DEAD CODE
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
@@ -40,6 +41,7 @@ import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 
 import Control.Applicative
 import Prelude                                                      as P hiding ( length )
+-}
 
 {-
 -- Reduce an array along the innermost dimension. The reduction

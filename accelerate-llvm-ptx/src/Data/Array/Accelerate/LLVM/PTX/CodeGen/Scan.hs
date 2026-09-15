@@ -27,23 +27,17 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Scan (
 ) where
 
 import Data.Array.Accelerate.AST                                    ( Direction(..) )
-import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Error
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Array
-import Data.Array.Accelerate.LLVM.CodeGen.Base
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
 import Data.Array.Accelerate.LLVM.CodeGen.Default
-import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
-import Data.Array.Accelerate.LLVM.Compile.Cache
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
 import Data.Array.Accelerate.LLVM.PTX.Target
@@ -54,10 +48,10 @@ import LLVM.AST.Type.Representation
 import qualified Foreign.CUDA.Analysis                              as CUDA
 
 import Control.Applicative
-import Control.Monad                                                ( (>=>), void )
-import Control.Monad.Reader                                         ( asks )
+--import Control.Monad                                                ( (>=>), void )
+--import Control.Monad.Reader                                         ( asks )
 import Data.String                                                  ( fromString )
-import Data.Coerce                                                  as Safe
+--import Data.Coerce                                                  as Safe
 import Data.Bits                                                    as P
 import Prelude                                                      as P hiding ( last )
 
@@ -1251,15 +1245,15 @@ scanWarp
     -> Operands e                              -- ^ calling thread's input element
     -> CodeGen PTX (Operands e, Operands e)    -- ^ the scanned values and the reduced value. The latter is the same on all lanes of the warp.
 -- In an inclusive scan without a seed the first value is undefined.
-scanWarp dir ScanExclusive dev tp seed combine size value = do
-  mask <- case size of
+scanWarp dir ScanExclusive dev tp seed combine size' value = do
+  mask <- case size' of
     Nothing -> return Nothing
     Just sz -> do
       OP_Word32 mask <- A.fromIntegral TypeInt32 numType sz >>= maskTrailing TypeWord32
       return $ Just mask
 
   lane <- laneId
-  isFirst <- firstLane dir dev size >>= A.eq singleType lane
+  isFirst <- firstLane dir dev size' >>= A.eq singleType lane
 
   (value', seed') <- case seed of
     Nothing -> return (value, Nothing)
@@ -1280,7 +1274,7 @@ scanWarp dir ScanExclusive dev tp seed combine size value = do
         ( return $ OP_Pair value $ undefs tp
         )
       return (value', Just $ return seed')
-  (inclusive, reduced) <- scanWarp dir ScanInclusive dev tp Nothing combine size value'
+  (inclusive, reduced) <- scanWarp dir ScanInclusive dev tp Nothing combine size' value'
   exclusive <- __shfl (shuffleOp dir) tp mask inclusive (liftWord32 1)
   case seed' of
     Nothing ->
@@ -1292,10 +1286,10 @@ scanWarp dir ScanExclusive dev tp seed combine size value = do
       -- Change value of lane zero to the seed or identity
       result <- select tp isFirst seed''' exclusive
       return (result, reduced)
-scanWarp dir ScanInclusive dev tp (Just (False, seed)) combine size value = do
+scanWarp dir ScanInclusive dev tp (Just (False, seed)) combine size' value = do
   -- Inclusive scan with a seed, that is not the identity value.
   lane <- laneId
-  value' <- A.ifThenElse (tp, firstLane dir dev size >>= A.eq singleType lane)
+  value' <- A.ifThenElse (tp, firstLane dir dev size' >>= A.eq singleType lane)
     ( do
       seed' <- seed
       value' <- case dir of
@@ -1305,12 +1299,12 @@ scanWarp dir ScanInclusive dev tp (Just (False, seed)) combine size value = do
     )
     ( return value
     )
-  scanWarp dir ScanInclusive dev tp Nothing combine size value'
-scanWarp dir ScanInclusive dev tp (Just (True, _)) combine size value =
+  scanWarp dir ScanInclusive dev tp Nothing combine size' value'
+scanWarp dir ScanInclusive dev tp (Just (True, _)) combine size' value =
   -- An inclusive with an identity value as seed can ignore the seed.
-  scanWarp dir ScanInclusive dev tp Nothing combine size value
-scanWarp dir ScanInclusive dev tp Nothing combine size value = do
-  mask <- case size of
+  scanWarp dir ScanInclusive dev tp Nothing combine size' value
+scanWarp dir ScanInclusive dev tp Nothing combine size' value = do
+  mask <- case size' of
     Nothing -> return Nothing
     Just sz -> do
       OP_Word32 mask <- A.fromIntegral TypeInt32 numType sz >>= maskTrailing TypeWord32
@@ -1329,7 +1323,7 @@ scanWarp dir ScanInclusive dev tp Nothing combine size value = do
       | step >= steps = do
         -- x is the scanned value. Since this is an inclusive scan,
         -- the last lane has the reduced value of all inputs.
-        reduced <- lastLane dir dev size >>= A.fromIntegral TypeInt32 numType >>= __shfl_idx tp mask x
+        reduced <- lastLane dir dev size' >>= A.fromIntegral TypeInt32 numType >>= __shfl_idx tp mask x
         return (x, reduced)
       | otherwise     = do
           let offset = 1 `P.shiftL` step
@@ -1343,7 +1337,7 @@ scanWarp dir ScanInclusive dev tp Nothing combine size value = do
                 LeftToRight -> A.gte singleType lane $ liftInt32 $ P.fromIntegral $ offset
                 RightToLeft -> do
                   other <- A.add numType lane $ liftInt32 $ P.fromIntegral $ offset
-                  first <- firstLane RightToLeft dev size
+                  first <- firstLane RightToLeft dev size'
                   A.lte singleType other first
 
           -- update partial result if in range
@@ -1387,15 +1381,15 @@ scanFromSMem
     -> Operand Int32 -- Number of warps = number of used entries in shared memory
     -> TupR Operand (Distribute Ptr (Distribute SizedArray (BufferEltR e)))
     -> CodeGen PTX (Operands e)
-scanFromSMem dir dev tp identity fun maxSize size smem
+scanFromSMem dir dev tp identity fun maxSize size' smem
   | maxSize /= CUDA.warpSize dev = internalError "Expected that the maximum number of warps is equal to the warp size"
   | otherwise = do
     lane <- laneId
-    active <- A.lt singleType lane (OP_Int32 size)
+    active <- A.lt singleType lane (OP_Int32 size')
     masked tp active $ do
       ptr <- tupleArrayGep tp smem lane
       value <- tupleLoad tp ptr
-      (scanned, reduced) <- scanWarp dir ScanExclusive dev tp ((True,) <$> identity) fun (Just $ OP_Int32 size) value
+      (scanned, reduced) <- scanWarp dir ScanExclusive dev tp ((True,) <$> identity) fun (Just $ OP_Int32 size') value
       tupleStore tp ptr scanned
       return reduced
 

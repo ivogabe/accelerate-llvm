@@ -77,7 +77,6 @@ import qualified Data.ByteString.Char8 as Char8
 import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe ( unsafePerformIO )
-import Data.ByteString.Builder.Extra (flush)
 import Data.ByteString.Short ( fromShort )
 import Numeric ( readHex )
 
@@ -1509,6 +1508,7 @@ pushTwoSame (LeftHandSideSingle t1 `LeftHandSidePair` LeftHandSideWildcard _) st
   )
 pushTwoSame _ _ _ _ = internalError "Nested pair not allowed"
 
+{- TODO WALL: DEAD CODE
 -- Representation of a BaseR when stored in registers
 toPrimType :: BaseR t -> PrimType (ReprBaseR t)
 toPrimType (BaseRground (GroundRscalar tp))
@@ -1518,6 +1518,7 @@ toPrimType BaseRsignal = primType
 toPrimType BaseRsignalResolver = primType
 toPrimType (BaseRref tp) = toPrimType $ BaseRground tp
 toPrimType (BaseRrefWrite tp) = toPrimType $ BaseRground tp
+-}
 
 -- Representation of a BaseR when stored in a struct
 toStoragePrimType :: BaseR t -> PrimType (StorageBaseR t)

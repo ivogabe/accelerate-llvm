@@ -19,6 +19,7 @@
 module Data.Array.Accelerate.LLVM.Native.CodeGen.Scan
   where
 
+{- TODO WALL: DEAD CODE
 import Data.Array.Accelerate.AST                                    ( Direction(..) )
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
@@ -45,6 +46,7 @@ import Control.Monad
 import Data.String                                                  ( fromString )
 import Data.Coerce                                                  as Safe
 import Prelude                                                      as P
+-}
 
 {-
 -- 'Data.List.scanl' or 'Data.List.scanl1' style exclusive scan,

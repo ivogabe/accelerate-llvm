@@ -87,12 +87,14 @@ create' = do
         Just a  -> do message builder msg
                       return (Just a)
 
+    {- TODO WALL: DEAD CODE
     orElse :: MonadIO m => m (Maybe a) -> m (Maybe a) -> m (Maybe a)
     orElse ea eb = do
       ma <- ea
       case ma of
         Just a  -> return (Just a)
         Nothing -> eb
+    -}
 
 
 -- | Delete an event
