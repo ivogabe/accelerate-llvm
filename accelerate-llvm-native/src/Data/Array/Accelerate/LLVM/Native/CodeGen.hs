@@ -586,7 +586,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
   (\ptr envs -> do
     -- Initialize all flags to flagInit
     imapFromTo (A.liftInt 0) (A.liftInt descriptorsLength) $ \i -> do
-      (flagPtr, _) <- getDescriptorSlot memorySlotTp ptr i
+      (flagPtr, _, _) <- getDescriptorSlot memorySlotTp ptr i
       -- Initialize with 0xFF:
       -- Tag is stored in 7 most significant bits, and 0xFE is the tag
       -- before 0 (with wrap around).
@@ -598,7 +598,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
     case seed of
       Nothing -> return ()
       Just s -> do
-        (flagPtr, valuePtrs) <- getDescriptorSlot memorySlotTp ptr $ A.liftInt 0 -- $ descriptorsLength - 1
+        (flagPtr, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr $ A.liftInt 0 -- $ descriptorsLength - 1
         -- tag = 0, tag | flagPrefix = flagPrefix, so
         -- we can write flagPrefix directly.
         _ <- instr' $ Store NonVolatile flagPtr flagPrefix Nothing
@@ -614,7 +614,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
       -- In the single threaded mode, we directly do a scan over this tile,
       -- instead of the reduce, lookback and scan phases.
       (descIdx, _) <- descriptorIdxTag (envsTileIndex envs)
-      (flagPtr, valuePtrs) <- getDescriptorSlot memorySlotTp ptr descIdx
+      (flagPtr, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr descIdx
       prefix <- tupleLoad tp valuePtrs
       tupleStore tp accumVar prefix
       -- Note: on the first tile, we read an undefined value if there is no
@@ -686,13 +686,27 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
     nextTileIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
     (prevDescIdx, prevTag) <- descriptorIdxTag (envsTileIndex envs)
     (thisDescIdx, thisTag) <- descriptorIdxTag nextTileIdx
-    (prevFlagPtr, prevValuePtrs) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
-    (thisFlagPtr, thisValuePtrs) <- getDescriptorSlot memorySlotTp ptr thisDescIdx
+    (prevFlagPtr, _, prevValuePtrs) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
+    (thisFlagPtr, thisAggregatePtrs, thisPrefixPtrs) <- getDescriptorSlot memorySlotTp ptr thisDescIdx
+
+    local <- tupleLoad tp accumVar
+
     if singleThreaded then
       -- It is our turn since we are in the sequential mode,
       -- no need to wait
       return ()
     else do
+      -- Before sharing our aggregate, check if we can overwrite this value
+      -- (i.e. synchronize with previous tiles that may read from this field,
+      -- as the field may be reuse a prior slot in the cyclic buffer.)
+      -- TODO
+
+      -- Share our aggregate
+      -- In the parallel mode, 'local' is the aggregate value of this tile.
+      tupleStore tp thisAggregatePtrs local
+      OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagAggregate
+      _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
+
       -- TODO: Decoupled look-back: also check for flagAggregate
       expected <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
       _ <- Loop.while [] TupRunit
@@ -703,8 +717,6 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         (\_ -> return OP_Unit)
         OP_Unit
       return ()
-
-    local <- tupleLoad tp accumVar
 
     new <-
       if singleThreaded then
@@ -741,7 +753,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
         else
           app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
-    tupleStore tp thisValuePtrs new
+    tupleStore tp thisPrefixPtrs new
 
     OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagPrefix
     _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
@@ -756,7 +768,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
           | otherwise = internalError "envsTileSizeCount should not be empty during codegen of parallel scan"
 
     (descIdx, _) <- descriptorIdxTag tileCount
-    (_, valuePtrs) <- getDescriptorSlot memorySlotTp ptr descIdx
+    (_, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr descIdx
     value <- tupleLoad tp valuePtrs
     codeEnd envs value
   )
@@ -795,7 +807,8 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
     )
   )
   where
-    memorySlotTp = TupRsingle scalarTypeWord8 `TupRpair` tp -- TODO: For decoupled look-back, store two values of type tp
+    -- ((flag, valueAggregate), valuePrefix)
+    memorySlotTp = TupRsingle scalarTypeWord8 `TupRpair` tp `TupRpair` tp
     memoryTp = ArrayPrimType (fromIntegral descriptorsLength) $ StructPrimType False $ bufferEltsR memorySlotTp
     flagAggregate = scalar scalarTypeWord8 0
     flagPrefix = scalar scalarTypeWord8 1
@@ -841,10 +854,13 @@ descriptorIdxTag tileIdx = do
   return (descIdx, tag8)
 
 getDescriptorSlot
-  :: TupR ScalarType (Word8, value)
-  -> Operand (Ptr (Struct (SizedArray (Struct (BufferEltR (Word8, value))))))
+  :: TupR ScalarType ((Word8, value), value)
+  -> Operand (Ptr (Struct (SizedArray (Struct (BufferEltR ((Word8, value), value))))))
   -> Operands Int
-  -> CodeGen Native (Operand (Ptr Word8), TupR Operand (Distribute Ptr (BufferEltR value)))
+  -> CodeGen Native
+      ( Operand (Ptr Word8)
+      , TupR Operand (Distribute Ptr (BufferEltR value))
+      , TupR Operand (Distribute Ptr (BufferEltR value)))
 getDescriptorSlot memorySlotTp ptr (OP_Int i) = do
   slot <- instr' $ GetElementPtr $
     GEP ptr (A.num numType 0 :: Operand Int32) $
@@ -852,5 +868,5 @@ getDescriptorSlot memorySlotTp ptr (OP_Int i) = do
     GEPArray i GEPEmpty
   ptrs <- tuplePtrs memorySlotTp slot
   case ptrs of
-    TupRsingle flag `TupRpair` value -> return (flag, value)
+    TupRsingle flag `TupRpair` valueAggregate `TupRpair` valuePrefix -> return (flag, valueAggregate, valuePrefix)
     _ -> internalError "Pair impossible"
