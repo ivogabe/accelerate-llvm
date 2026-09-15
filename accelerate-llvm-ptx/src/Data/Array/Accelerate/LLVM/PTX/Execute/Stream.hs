@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns      #-}
-{-# LANGUAGE MagicHash         #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 -- |

@@ -1,9 +1,8 @@
-{-# LANGUAGE GADTs             #-}
 {-# LANGUAGE BangPatterns      #-}
+{-# LANGUAGE GADTs             #-}
 {-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE TypeFamilies      #-}
-{-# LANGUAGE TypeOperators     #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies      #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Kernel
