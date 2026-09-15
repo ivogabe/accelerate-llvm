@@ -1,4 +1,3 @@
-{-# LANGUAGE ScopedTypeVariables #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Analysis.Device
 -- Copyright   : [2008..2020] The Accelerate Team

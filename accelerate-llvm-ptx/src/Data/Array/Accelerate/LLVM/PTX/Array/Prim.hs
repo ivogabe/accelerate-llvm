@@ -1,13 +1,6 @@
-{-# LANGUAGE BangPatterns        #-}
-{-# LANGUAGE DataKinds           #-}
-{-# LANGUAGE GADTs               #-}
-{-# LANGUAGE MagicHash           #-}
-{-# LANGUAGE MagicHash           #-}
-{-# LANGUAGE RecordWildCards     #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications    #-}
-{-# LANGUAGE TypeOperators       #-}
-{-# LANGUAGE UnboxedTuples       #-}
+{-# LANGUAGE MagicHash       #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE UnboxedTuples   #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Array.Prim
 -- Copyright   : [2014..2020] The Accelerate Team

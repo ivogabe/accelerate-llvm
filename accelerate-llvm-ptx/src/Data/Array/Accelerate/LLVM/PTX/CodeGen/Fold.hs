@@ -1,5 +1,4 @@
-{-# LANGUAGE RebindableSyntax    #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RebindableSyntax #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen.Fold
 -- Copyright   : [2016..2020] The Accelerate Team

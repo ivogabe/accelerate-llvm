@@ -1,6 +1,3 @@
-{-# LANGUAGE MonoLocalBinds      #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications    #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.CodeGen.Native.Loop
 -- Copyright   : [2014..2020] The Accelerate Team

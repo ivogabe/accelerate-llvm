@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns    #-}
-{-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE MagicHash       #-}
 {-# LANGUAGE RecordWildCards #-}
 -- |

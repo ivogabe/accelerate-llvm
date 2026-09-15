@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Debug
 -- Copyright   : [2014..2020] The Accelerate Team

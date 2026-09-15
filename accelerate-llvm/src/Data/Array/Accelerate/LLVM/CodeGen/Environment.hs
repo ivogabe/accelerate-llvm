@@ -1,12 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes  #-}
-{-# LANGUAGE GADTs                #-}
 {-# LANGUAGE ImpredicativeTypes   #-}
-{-# LANGUAGE LambdaCase           #-}
-{-# LANGUAGE RankNTypes           #-}
-{-# LANGUAGE ScopedTypeVariables  #-}
-{-# LANGUAGE TypeApplications     #-}
 {-# LANGUAGE TypeFamilies         #-}
-{-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |

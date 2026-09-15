@@ -1,6 +1,3 @@
-{-# LANGUAGE GADTs               #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications    #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen.Map
 -- Copyright   : [2014..2020] The Accelerate Team

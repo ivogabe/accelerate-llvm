@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns    #-}
 {-# LANGUAGE TemplateHaskell #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.State
