@@ -1,5 +1,4 @@
 {-# LANGUAGE GADTs                 #-}
-{-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE PatternSynonyms       #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE ViewPatterns          #-}

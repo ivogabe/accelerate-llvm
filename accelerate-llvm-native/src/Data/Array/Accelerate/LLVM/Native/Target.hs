@@ -1,5 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications  #-}
+{-# LANGUAGE TypeApplications #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Target
 -- Copyright   : [2014..2020] The Accelerate Team

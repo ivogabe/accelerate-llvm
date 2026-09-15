@@ -1,8 +1,7 @@
-{-# LANGUAGE BangPatterns      #-}
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies      #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE GADTs        #-}
+{-# LANGUAGE LambdaCase   #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Kernel

@@ -1,5 +1,4 @@
-{-# LANGUAGE BangPatterns      #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BangPatterns #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Array.Table
 -- Copyright   : [2014..2020] The Accelerate Team

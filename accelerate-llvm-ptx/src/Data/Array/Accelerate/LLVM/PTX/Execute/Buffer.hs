@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Buffer
 -- Copyright   : [2014..2020] The Accelerate Team

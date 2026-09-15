@@ -2,7 +2,6 @@
 {-# LANGUAGE GADTs                #-}
 {-# LANGUAGE ImpredicativeTypes   #-}
 {-# LANGUAGE LambdaCase           #-}
-{-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE RankNTypes           #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE TypeApplications     #-}

@@ -1,5 +1,4 @@
-{-# LANGUAGE MonoLocalBinds    #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MonoLocalBinds #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute
 -- Copyright   : [2016..2020] The Accelerate Team
