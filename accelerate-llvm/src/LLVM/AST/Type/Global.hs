@@ -70,6 +70,6 @@ instance Downcast (GlobalFunctionDefinition t) LLVM.Define where
       trav (Lam t p l)
         = (linkage, LLVM.Typed (downcast t) (nameToPrettyI p) : ps, r, n, blocks)
         where (linkage, ps, r, n, blocks) = trav l
-      trav (VarLams _) = internalError "This case is not possible here"
+      trav (VarLams _) = internalError "VarArgs are not supported when defining a global function"
       --
       (linkage', args, res, nm, bs) = trav f

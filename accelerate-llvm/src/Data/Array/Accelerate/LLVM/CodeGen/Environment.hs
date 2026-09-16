@@ -217,13 +217,13 @@ envsPrjParameters (TupRsingle var) env = ir (varType var) $ envsPrjParameter var
 envsPrjParameters (TupRpair v1 v2) env = OP_Pair (envsPrjParameters v1 env) (envsPrjParameters v2 env)
 envsPrjParameters TupRunit         _   = OP_Unit
 
-envsPrjSh :: HasCallStack => ShapeR sh -> Vars s env sh -> Envs env idxEnv -> Operands sh
+envsPrjSh :: (HasCallStack, Distributes s) => ShapeR sh -> Vars s env sh -> Envs env idxEnv -> Operands sh
 envsPrjSh ShapeRz _ _ = OP_Unit
 envsPrjSh (ShapeRsnoc shr) (sh `TupRpair` TupRsingle sz) env = case prjPartial (varIdx sz) (envsGround env) of
   Nothing -> internalError "Value missing in environment"
   Just (GroundOperandParam sz') ->
     envsPrjSh shr sh env `OP_Pair` OP_Int sz'
-envsPrjSh ShapeRsnoc{} TupRsingle{} _ = error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
+envsPrjSh ShapeRsnoc{} (TupRsingle (Var tp _)) _ = pairImpossible tp
 
 envsPrjIndex :: HasCallStack => Var s idxEnv t -> Envs env idxEnv -> Operand t
 envsPrjIndex (Var _ idx) env = case prjPartial idx $ envsIdx env of
@@ -254,8 +254,7 @@ parallelIterSize shr loops = go shr $ reverse $ take (rank shr) loops
     go :: ShapeR sh -> [(Idx idxEnv Int, LoopDirection Int, Operands Int)] -> Operands sh
     go ShapeRz [] = OP_Unit
     go (ShapeRsnoc shr') ((_, _, sz) : loops') = go shr' loops' `OP_Pair` sz
-    go ShapeRz _ = error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
-    go ShapeRsnoc{} [] = error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
+    go _ _ = internalError "parallelIterSize: Mismatch in shape and list of nested loops"
 
 -- Scalar environment
 -- ==================

@@ -319,10 +319,6 @@ codegen name env cluster args
   where
     (argTp, extractEnv, workassistIndex, workPerThread, threadIndex {- or flag -}, threadCount, kernelMem', gamma) = bindHeaderEnv env
 
-    isDescending :: LoopDirection Int -> Bool
-    isDescending LoopDescending = True
-    isDescending _ = False
-
 linkage :: Maybe LP.Linkage
 linkage = Just LP.DLLExport
 

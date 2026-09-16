@@ -219,7 +219,7 @@ executeEffect env = \case
   Aassert msg cond -> do
     result <- evalExp cond $ evalArrayInstr env
     unless (result == 1) $ errorWithoutStackTrace $ "\n*** Assertion failed: " ++ Text.unpack msg
-  Atrace{} -> error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
+  Atrace{} -> internalError "TODO: Support Atrace in PTX"
 
 size' :: ShapeR sh -> Distribute Value sh -> Int
 size' ShapeRz _ = 1

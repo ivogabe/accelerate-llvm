@@ -194,7 +194,7 @@ call' f args attrs = do
       go :: GlobalFunction t -> Function Callable t
       go (Body t k l) = Body t k (CallGlobal l)
       go (Lam t x l)  = Lam t x (go l)
-      go VarLams{}    = error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
+      go (VarLams l)  = VarLams (go l)
   --
   declareExternFunc decl
   instr' (Call (go f) args)
@@ -206,7 +206,7 @@ callLocal f args _attrs = do
       go :: Function Label t -> Function Callable t
       go (Body t k l) = Body t k (CallLocal l)
       go (Lam t x l)  = Lam t x (go l)
-      go VarLams{}    = error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
+      go (VarLams l)  = VarLams (go l)
   --
   instr' (Call (go f) args)
 
