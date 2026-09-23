@@ -496,6 +496,8 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
     x <- readArray' envs input inputIdx
     accum <- tupleLoad tp accumVar
     new <-
+      -- TODO: we don't need to check for the direction here,
+      -- since 'fun' is commutative in this function.
       if envsDescending envs then
         app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
       else
@@ -551,7 +553,8 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
     ArgArray _ (ArrayR _ tp) _ _ = input
 
 parCodeGenScan
-  :: Bool -- Whether the loop is descending
+  :: forall env idxEnv sh e.
+     Bool -- Whether the loop is descending
   -- Whether this is a fold. Folds use similar code generation as scans, hence
   -- it is handled here. Commutative folds are handled separately.
   -> FoldOrScan
@@ -607,14 +610,23 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         tupleStore tp valuePtrs value
   )
   -- Initialize a thread
-  (\_ _ -> tupleAlloca tp)
+  -- State of a thread consists of:
+  -- * Accumulator within reduce or scan loop
+  -- * Index of tile in look-back
+  -- * Value (prefix/aggregate) of look-back
+  (\_ _ -> do
+    accumVar <- tupleAlloca tp
+    lookbackIndex <- hoistAlloca $ ScalarPrimType scalarTypeInt
+    lookbackValue <- tupleAlloca tp
+    return (accumVar, lookbackIndex, lookbackValue)
+  )
   -- Code before the tile loop
-  (\singleThreaded accumVar ptr envs ->
+  (\singleThreaded (accumVar, _, _) ptr envs ->
     if singleThreaded then do
       -- In the single threaded mode, we directly do a scan over this tile,
       -- instead of the reduce, lookback and scan phases.
       (descIdx, _) <- descriptorIdxTag (envsTileIndex envs)
-      (flagPtr, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr descIdx
+      (_, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr descIdx
       prefix <- tupleLoad tp valuePtrs
       tupleStore tp accumVar prefix
       -- Note: on the first tile, we read an undefined value if there is no
@@ -627,133 +639,112 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
           tupleStore tp accumVar value
   )
   -- Code within the tile loop
-  (\singleThreaded accumVar _ envs ->
+  (\singleThreaded (accumVar, _, _) _ envs ->
     if singleThreaded then do
       -- Single threaded mode. We directly perform a scan here.
       x <- readArray' envs input index
-      if isJust seed then do
-        accum <- tupleLoad tp accumVar
-        codePre envs accum
-        new <- if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-        codePost envs new
-        tupleStore tp accumVar new
-      else do
-        isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
-        new <- A.ifThenElse (tp, A.land isFirstTile $ envsIsFirst envs)
-          ( do
-            return x
-          )
-          ( do
-            accum <- tupleLoad tp accumVar
-            codePre envs accum
-            if envsDescending envs then
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-            else
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-          )
-        codePost envs new
-        tupleStore tp accumVar new
+
+      accum <- tupleLoad tp accumVar
+      codePre envs accum
+      isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
+      first <- A.land isFirstTile $ envsIsFirst envs
+      new <- combineInDirection envs seed first False accum x
+      codePost envs new
+      tupleStore tp accumVar new
     else do
       -- Parallel mode.
       -- Execute the reduce-phase of a parallel chained scan here.
       x <- readArray' envs input index
-      new <-
-        if isJust identity then do
-          accum <- tupleLoad tp accumVar
-          if envsDescending envs then
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-        else
-          A.ifThenElse' (tp, envsIsFirst envs)
-            ( do
-              return x
-            )
-            ( do
-              accum <- tupleLoad tp accumVar
-              if envsDescending envs then
-                app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-              else
-                app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-            )
+      accum <- tupleLoad tp accumVar
+      new <- combineInDirection envs identity (envsIsFirst envs) False accum x
       tupleStore tp accumVar new
   )
   -- Code after the tile loop
-  (\singleThreaded accumVar ptr envs -> do
+  (\singleThreaded (accumVar, lookbackIndex, lookbackValue) ptr envs -> do
     nextTileIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-    (prevDescIdx, prevTag) <- descriptorIdxTag (envsTileIndex envs)
     (thisDescIdx, thisTag) <- descriptorIdxTag nextTileIdx
-    (prevFlagPtr, _, prevValuePtrs) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
     (thisFlagPtr, thisAggregatePtrs, thisPrefixPtrs) <- getDescriptorSlot memorySlotTp ptr thisDescIdx
 
     local <- tupleLoad tp accumVar
 
-    if singleThreaded then
-      -- It is our turn since we are in the sequential mode,
-      -- no need to wait
-      return ()
-    else do
-      -- Before sharing our aggregate, check if we can overwrite this value
-      -- (i.e. synchronize with previous tiles that may read from this field,
-      -- as the field may be reuse a prior slot in the cyclic buffer.)
-      -- TODO
-
-      -- Share our aggregate
-      -- In the parallel mode, 'local' is the aggregate value of this tile.
-      tupleStore tp thisAggregatePtrs local
-      OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagAggregate
-      _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
-
-      -- TODO: Decoupled look-back: also check for flagAggregate
-      expected <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
-      _ <- Loop.while [] TupRunit
-        (\_ -> do
-          flag <- instr $ AtomicLoad singleType prevFlagPtr Acquire
-          A.neq singleType flag expected
-        )
-        (\_ -> return OP_Unit)
-        OP_Unit
-      return ()
-
-    new <-
+    inclusivePrefix <-
       if singleThreaded then
         -- In the single threaded mode, 'local' is already the prefix,
         -- as this loop starts with the prefix value of the previous
         -- thread. We can directly write that to kernel memory.
+        -- It is our turn since we are in the sequential mode,
+        -- no need to wait.
         return local
-      else if isNothing seed then
-        -- If there is no seed, then write the output directly in the first tiles.
-        -- The other tiles must combine their result with the given operator.
-        -- Note that the first tile should typically be handled in the sequential mode,
-        -- but this sequential mode is not always generated:
-        -- A non-commutative fold is handled as a scan without the sequential mode.
-        -- Furthermore we could decide to skip the sequential mode if it leads to
-        -- a lot of code duplication (but we don't do that yet).s
-        A.ifThenElse (tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
-          (do
-            return local
-          )
-          (do
-            prefix <- tupleLoad tp prevValuePtrs
-            tupleStore tp accumVar prefix
-            if envsDescending envs then
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
-            else
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
-          )
-      -- If there is a seed, then all tile will combine their local result with
-      -- the already available value.
       else do
-        prefix <- tupleLoad tp prevValuePtrs
-        tupleStore tp accumVar prefix
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local prefix
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) prefix local
-    tupleStore tp thisPrefixPtrs new
+        -- Before sharing our aggregate, check if we can overwrite this value
+        -- (i.e. synchronize with previous tiles that may read from this field,
+        -- as the field may be reuse a prior slot in the cyclic buffer.)
+        -- TODO
+
+        -- Share our aggregate
+        -- In the parallel mode, 'local' is the aggregate value of this tile.
+        tupleStore tp thisAggregatePtrs local
+        OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagAggregate
+        _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
+
+        -- Initialize look-back
+        _ <- instr' $ Store NonVolatile lookbackIndex (op scalarTypeInt $ envsTileIndex envs) Nothing
+        case identity of
+          Nothing -> return ()
+          Just identity' -> do
+            value <- llvmOfExp (compileArrayInstrEnvs envs) identity'
+            tupleStore tp lookbackValue value
+
+        -- Decoupled look-back
+        _ <- Loop.while [] TupRunit
+          (\_ -> do
+            idx <- instr $ Load NonVolatile lookbackIndex Nothing
+            (prevDescIdx, prevTag) <- descriptorIdxTag idx
+            (prevFlagPtr, prevAggregatePtrs, prevPrefixPtrs) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
+
+            flag <- instr $ AtomicLoad singleType prevFlagPtr Acquire
+
+            flagAggregate' <- A.bor TypeWord8 prevTag $ OP_Word8 flagAggregate
+            flagPrefix' <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
+
+            -- TODO: Should we limit the length of the look-back to prevent cyclic buffer wrap around?
+            hasAggregate <- A.eq singleType flag flagAggregate'
+            hasPrefix <- A.eq singleType flag flagPrefix'
+            
+            _ <- A.ifThenElse (TupRunit, A.lor hasAggregate hasPrefix)
+              (do
+                value <- A.ifThenElse (tp, return hasPrefix)
+                  (tupleLoad tp prevPrefixPtrs) (tupleLoad tp prevAggregatePtrs)
+                current <- tupleLoad tp lookbackValue
+
+                isFirst <- A.eq singleType idx $ envsTileIndex envs
+
+                new <- combineInDirection envs identity isFirst True current value
+                tupleStore tp lookbackValue new
+
+                -- Increment lookbackIndex
+                -- Note that this will only be used when hasAggregate = true;
+                -- when hasPrefix = true the loop will exit and this value will
+                -- not be used.
+                OP_Int idx' <- A.sub numType idx $ A.liftInt 1
+                instr $ Store NonVolatile lookbackIndex idx' Nothing
+
+                return OP_Unit
+              )
+              ( return OP_Unit ) -- TODO: sleep?
+
+            A.lnot hasPrefix
+          )
+          (\_ -> return OP_Unit)
+          OP_Unit
+        exclusivePrefix <- tupleLoad tp lookbackValue
+        tupleStore tp accumVar exclusivePrefix -- Used in second tile loop (only in parallel mode)
+
+        isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
+        -- Add local value to exclusive prefix to compute inclusive prefix
+        combineInDirection envs seed isFirstTile False exclusivePrefix local
+
+    tupleStore tp thisPrefixPtrs inclusivePrefix
 
     OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagPrefix
     _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
@@ -777,33 +768,14 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
   -- and we thus should do loop peeling there.
   -- Not executed when this tile is executed in the sequential mode.
   (if foldOrScan == IsFold then Nothing else
-    Just (CPULoopAnalysis $ isNothing seed, \accumVar _ envs -> do
+    Just (CPULoopAnalysis $ isNothing seed, \(accumVar, _, _) _ envs -> do
       x <- readArray' envs input index
-      if isJust seed then do
-        accum <- tupleLoad tp accumVar
-        codePre envs accum
-        new <- if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-        codePost envs new
-        tupleStore tp accumVar new
-      else do
-        isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
-        new <- A.ifThenElse (tp, A.land isFirstTile $ envsIsFirst envs)
-          ( do
-            return x
-          )
-          ( do
-            accum <- tupleLoad tp accumVar
-            codePre envs accum
-            if envsDescending envs then
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-            else
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
-          )
-        codePost envs new
-        tupleStore tp accumVar new
+      accum <- tupleLoad tp accumVar
+      codePre envs accum
+      isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
+      new <- combineInDirection envs seed isFirstTile False accum x
+      codePost envs new
+      tupleStore tp accumVar new
     )
   )
   where
@@ -821,6 +793,30 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
       = Just $ mkConstant tp v
       | otherwise
       = Nothing
+
+    -- initial: the initial value of the accumulator ('a'). This function
+    --   checks whether this is Just or Nothing to know whether the variable
+    --   was initialized or not.
+    -- isFirst: whether this is the first iteration. When isFirst is true and
+    --   initial Nothing, this function will not use the value in 'a' and
+    --   directly return 'b'. Otherwise it will combine 'a' and 'b'.
+    -- reversed: whether the direction should be reversed (ie fun should be flipped)
+    combineInDirection :: Envs env idxEnv -> Maybe a -> Operands Bool -> Bool -> Operands e -> Operands e -> CodeGen Native (Operands e)
+    combineInDirection envs initial isFirst reversed a b
+      | isJust initial = do
+        if envsDescending envs /= reversed then
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) b a
+        else
+          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) a b
+      | otherwise =
+        A.ifThenElse' (tp, isFirst)
+          ( return b )
+          ( do
+            if envsDescending envs /= reversed then
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) b a
+            else
+              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) a b
+          )
 
 -- Checks if the cluster has a permute.
 hasNPermute :: FlatCluster NativeOp env -> Bool
