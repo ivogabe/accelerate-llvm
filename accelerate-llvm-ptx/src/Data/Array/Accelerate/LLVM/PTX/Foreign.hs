@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Foreign
 -- Copyright   : [2016..2020] The Accelerate Team

@@ -1,7 +1,6 @@
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
-{-# OPTIONS_GHC -fno-warn-orphans   #-}
 
 module Data.Array.Accelerate.LLVM.Native.Link.Schedule (
   linkSchedule, NativeProgram(..), unsafeGetPtrFromLifetimeFunPtr

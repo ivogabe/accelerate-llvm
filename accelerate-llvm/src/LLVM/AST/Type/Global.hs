@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.Global

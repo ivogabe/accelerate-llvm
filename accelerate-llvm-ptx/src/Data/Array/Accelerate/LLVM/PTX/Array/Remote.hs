@@ -1,7 +1,7 @@
 {-# LANGUAGE MagicHash       #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies    #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Array.Remote
 -- Copyright   : [2014..2020] The Accelerate Team

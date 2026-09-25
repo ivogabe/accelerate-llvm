@@ -1,6 +1,5 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
-{-# OPTIONS_GHC -fno-warn-orphans   #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.CodeGen

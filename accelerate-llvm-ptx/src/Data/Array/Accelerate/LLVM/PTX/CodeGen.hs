@@ -1,5 +1,5 @@
 {-# LANGUAGE MultiWayIf #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen
 -- Copyright   : [2014..2020] The Accelerate Team

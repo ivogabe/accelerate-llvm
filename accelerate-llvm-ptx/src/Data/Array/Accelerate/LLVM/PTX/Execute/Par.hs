@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Par
 -- Copyright   : [2014..2020] The Accelerate Team

@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP             #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# OPTIONS_GHC -fno-warn-unused-imports   #-}
-{-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
+{-# OPTIONS_GHC -Wno-unused-imports   #-}
+{-# OPTIONS_GHC -Wno-unused-top-binds #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Plugin
 -- Copyright   : [2017..2020] The Accelerate Team
