@@ -17,6 +17,9 @@ extra-deps:
 - MIP-0.2.0.0
 - hashtables-1.4.2
 
+# newer versions required to parse modern CUDA headers
+- c2hs-0.28.8@rev:3
+- language-c-0.10.2
 
 # for llvm-pretty:
 - monadLib-3.10.3
