@@ -1,9 +1,4 @@
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE GADTs                 #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeSynonymInstances  #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# OPTIONS_GHC -fno-warn-orphans  #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.Global
@@ -46,11 +41,11 @@ instance Downcast (GlobalFunction t) LLVM.Declare where
     , LLVM.decAttrs = []
     , LLVM.decComdat = Nothing }
     where
-      trav :: GlobalFunction t -> ([LLVM.Type], Bool, LLVM.Type, LLVM.Symbol)
+      trav :: GlobalFunction t' -> ([LLVM.Type], Bool, LLVM.Type, LLVM.Symbol)
       trav (Body t _ n) = ([], False, downcast t, labelToPrettyS n)
       trav (Lam a _ l)  = let (as, b, r, n) = trav l
                           in  (downcast a : as, b, r, n)
-      trav (VarLams f)  = let (as, _, r, n) = trav f
+      trav (VarLams f') = let (as, _, r, n) = trav f'
                           in  (as, True, r, n)
       --
       (args, varArgs, res, nm) = trav f
@@ -70,11 +65,11 @@ instance Downcast (GlobalFunctionDefinition t) LLVM.Define where
     , LLVM.defMetadata = Map.empty
     , LLVM.defComdat = Nothing }
     where
-      trav :: GlobalFunctionDefinition t -> ((Maybe LLVM.Linkage), [LLVM.Typed LLVM.Ident], LLVM.Type, LLVM.Symbol, [LLVM.BasicBlock])
+      trav :: GlobalFunctionDefinition t' -> ((Maybe LLVM.Linkage), [LLVM.Typed LLVM.Ident], LLVM.Type, LLVM.Symbol, [LLVM.BasicBlock])
       trav (Body t _ (GlobalFunctionBody linkage n blocks)) = (linkage, [], downcast t, labelToPrettyS n, blocks)
       trav (Lam t p l)
         = (linkage, LLVM.Typed (downcast t) (nameToPrettyI p) : ps, r, n, blocks)
         where (linkage, ps, r, n, blocks) = trav l
-      trav (VarLams _) = internalError "This case is not possible here"
+      trav (VarLams _) = internalError "VarArgs are not supported when defining a global function"
       --
       (linkage', args, res, nm, bs) = trav f

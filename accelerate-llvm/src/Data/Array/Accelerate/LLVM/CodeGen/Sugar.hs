@@ -1,9 +1,4 @@
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
-{-# LANGUAGE RoleAnnotations   #-}
-{-# LANGUAGE TypeFamilies      #-}
-{-# LANGUAGE TypeOperators     #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.CodeGen.Sugar
@@ -28,7 +23,6 @@ module Data.Array.Accelerate.LLVM.CodeGen.Sugar (
 
 ) where
 
-import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Representation.Type
 import Data.Primitive.Vec
 import Data.Typeable                                                ( (:~:)(..) )
@@ -37,8 +31,6 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Metadata
-
-import Data.Array.Accelerate.Representation.Array
 
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad

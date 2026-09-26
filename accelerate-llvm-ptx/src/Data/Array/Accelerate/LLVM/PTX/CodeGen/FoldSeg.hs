@@ -1,11 +1,6 @@
-{-# LANGUAGE GADTs               #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE RebindableSyntax    #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell     #-}
-{-# LANGUAGE TypeApplications    #-}
-{-# LANGUAGE TypeOperators       #-}
-{-# LANGUAGE ViewPatterns        #-}
+{-# LANGUAGE RebindableSyntax #-}
+{-# LANGUAGE TemplateHaskell  #-}
+{-# LANGUAGE ViewPatterns     #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen.FoldSeg
 -- Copyright   : [2016..2020] The Accelerate Team

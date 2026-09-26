@@ -1,14 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes  #-}
-{-# LANGUAGE GADTs                #-}
 {-# LANGUAGE ImpredicativeTypes   #-}
-{-# LANGUAGE LambdaCase           #-}
-{-# LANGUAGE OverloadedStrings    #-}
-{-# LANGUAGE PatternSynonyms      #-}
-{-# LANGUAGE RankNTypes           #-}
-{-# LANGUAGE ScopedTypeVariables  #-}
-{-# LANGUAGE TypeApplications     #-}
 {-# LANGUAGE TypeFamilies         #-}
-{-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
@@ -45,7 +37,7 @@ import Data.String
 
 import Data.Array.Accelerate.AST.Environment                    hiding ( Val, prj )
 import Data.Array.Accelerate.AST.Operation
-import Data.Array.Accelerate.AST.Partitioned                    hiding ( Label )
+import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.AST.Idx                            ( Idx )
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.Error                              ( internalError )
@@ -65,7 +57,6 @@ import Data.Array.Accelerate.LLVM.CodeGen.Constant
 
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function                                   as LLVM
-import LLVM.AST.Type.Global
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Metadata
@@ -74,7 +65,6 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
 import GHC.Stack
-import Data.Bits
 import Data.Typeable
 import Data.Foldable
 import Control.Monad
@@ -230,12 +220,13 @@ envsPrjParameters (TupRsingle var) env = ir (varType var) $ envsPrjParameter var
 envsPrjParameters (TupRpair v1 v2) env = OP_Pair (envsPrjParameters v1 env) (envsPrjParameters v2 env)
 envsPrjParameters TupRunit         _   = OP_Unit
 
-envsPrjSh :: HasCallStack => ShapeR sh -> Vars s env sh -> Envs env idxEnv -> Operands sh
+envsPrjSh :: (HasCallStack, Distributes s) => ShapeR sh -> Vars s env sh -> Envs env idxEnv -> Operands sh
 envsPrjSh ShapeRz _ _ = OP_Unit
 envsPrjSh (ShapeRsnoc shr) (sh `TupRpair` TupRsingle sz) env = case prjPartial (varIdx sz) (envsGround env) of
   Nothing -> internalError "Value missing in environment"
   Just (GroundOperandParam sz') ->
     envsPrjSh shr sh env `OP_Pair` OP_Int sz'
+envsPrjSh ShapeRsnoc{} (TupRsingle (Var tp _)) _ = pairImpossible tp
 
 envsPrjIndex :: HasCallStack => Var s idxEnv t -> Envs env idxEnv -> Operand t
 envsPrjIndex (Var _ idx) env = case prjPartial idx $ envsIdx env of
@@ -266,6 +257,7 @@ parallelIterSize shr loops = go shr $ reverse $ take (rank shr) loops
     go :: ShapeR sh -> [(Idx idxEnv Int, LoopDirection Int, Operands Int)] -> Operands sh
     go ShapeRz [] = OP_Unit
     go (ShapeRsnoc shr') ((_, _, sz) : loops') = go shr' loops' `OP_Pair` sz
+    go _ _ = internalError "parallelIterSize: Mismatch in shape and list of nested loops"
 
 -- Scalar environment
 -- ==================
@@ -590,8 +582,8 @@ sizeOfEnv = sizeOfEnv' 0
 
 sizeOfEnv' :: Int -> OpenKernelFun kernel env f -> Int
 sizeOfEnv' cursor (KernelFunLam argR fun)
-  | (align, size) <- alignmentAndSizeOfArgument argR
-  = sizeOfEnv' (makeIntAligned cursor align + size) fun
+  | (align, size') <- alignmentAndSizeOfArgument argR
+  = sizeOfEnv' (makeIntAligned cursor align + size') fun
 sizeOfEnv' cursor (KernelFunBody _) = cursor
 
 alignmentAndSizeOfArgument :: forall s t. KernelArgR s t -> (Int, Int)
@@ -601,8 +593,8 @@ alignmentAndSizeOfArgument = \case
     | SingleDict <- singleDict tp -> go @t
   KernelArgRscalar (VectorScalarType (VectorType n (tp :: SingleType u)))
     | SingleDict <- singleDict tp
-    , (align, size) <- go @u
-    -> (align, n * size)
+    , (align, size') <- go @u
+    -> (align, n * size')
   where
     go :: forall a. Storable a => (Int, Int)
     go = (alignment (undefined :: a), sizeOf (undefined :: a))
@@ -612,9 +604,11 @@ makeIntAligned cursor align = cursor + m
   where
     m = (-cursor) `mod` align
 
+{- TODO WALL: DEAD CODE
 -- Rounds a number up to the next power of 2
 nextPowerOfTwo :: Int -> Int
 nextPowerOfTwo x = 1 `shiftL` (finiteBitSize (0 :: Int) - countLeadingZeros (x - 1))
+-}
 
 marshalScalarArg :: ScalarType t -> (t, BufferEltR t) :~: (MarshalArg t, MarshalStorageArg t)
 -- Pattern match to prove that 't' is not a buffer

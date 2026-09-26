@@ -1,6 +1,3 @@
-{-# LANGUAGE GADTs               #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen.Generate
 -- Copyright   : [2014..2020] The Accelerate Team

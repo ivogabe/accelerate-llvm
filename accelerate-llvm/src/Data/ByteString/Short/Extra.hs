@@ -1,8 +1,5 @@
-{-# LANGUAGE BangPatterns    #-}
-{-# LANGUAGE CPP             #-}
-{-# LANGUAGE MagicHash       #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE UnboxedTuples   #-}
+{-# LANGUAGE CPP                   #-}
+{-# LANGUAGE TemplateHaskellQuotes #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.ByteString.Short.Extra

@@ -1,17 +1,6 @@
-{-# LANGUAGE BangPatterns      #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE InstanceSigs      #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell   #-}
-{-# LANGUAGE TypeFamilies      #-}
-{-# LANGUAGE TypeOperators     #-}
-{-# LANGUAGE ViewPatterns      #-}
-{-# LANGUAGE TupleSections     #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies    #-}
+{-# LANGUAGE ViewPatterns    #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Accelerate
@@ -31,42 +20,32 @@ module Data.Array.Accelerate.LLVM.PTX.Operation
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Operation
 import Data.Array.Accelerate.AST.Partitioned
-import Data.Array.Accelerate.AST.Var
 import Data.Array.Accelerate.Analysis.Hash.Exp
 import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
-import Data.Array.Accelerate.Error
 
 
-import qualified Data.Set as Set
-import Data.Array.Accelerate.AST.Environment (weakenId, weakenEmpty, weakenSucc' )
+import Data.Array.Accelerate.AST.Environment (weakenId)
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Var (DeclareVars(..), declareVars)
 import Data.Array.Accelerate.Representation.Ground (buffersR)
 import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Trafo.Operation.Bounds
-import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken, LHS (..), mkLHS)
+import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken)
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Analysis.Match
-import Data.Maybe (isJust)
-import Data.Array.Accelerate.Interpreter (InOut (..))
-import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph as Graph
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver hiding ( c )
-import qualified Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver as ILP
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
 import Lens.Micro
 import Lens.Micro.Mtl
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Array.Accelerate.Trafo.Exp.Substitution
-
-import Data.Array.Accelerate.AST.Idx (Idx(..))
-import Data.Array.Accelerate.Pretty.Operation (prettyFun)
-import Data.Array.Accelerate.Pretty.Exp (Val (Push))
-import Unsafe.Coerce (unsafeCoerce)
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
 
 import Control.Monad.State.Strict
 
@@ -147,26 +126,26 @@ instance LowerAcc PTXOp where
   mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec PTXBackpermute (a :>: b :>: c :>:       ArgsNil)
   mkGenerate    a b     = Exec PTXGenerate    (a :>: b :>:             ArgsNil)
-  mkScan dir f (Just seed) i@(ArgArray In (ArrayR shr ty) sh buf) o
+  mkScan dir f (Just seed) i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o
     = Exec (PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
-  mkScan dir f Nothing i@(ArgArray In (ArrayR shr ty) sh buf) o
+  mkScan dir f Nothing i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o
     = Exec (PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
-  mkScan' dir f seed i@(ArgArray In (ArrayR shr ty) sh buf) o1 o2
+  mkScan' dir f seed i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o1 o2
     = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
   mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
     | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord32
-    = aletUnique lhs 
+    = aletUnique lhs
         (Alloc shr scalarTypeWord32 $ groundToExpVar (shapeType shr) sh)
         $ alet LeftHandSideUnit
           (Exec PTXGenerate ( -- TODO: The old pipeline used a 'memset 0' instead, which sounds faster...
                 ArgFun (Lam (LeftHandSideWildcard (shapeType shr)) $ Body $ Const scalarTypeWord32 0)
-            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId) 
+            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId)
             :>: ArgsNil))
           (Exec PTXPermute (
-                weaken w a 
-            :>: weaken w b 
-            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId) 
-            :>: weaken w c 
+                weaken w a
+            :>: weaken w b
+            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId)
+            :>: weaken w c
             :>: ArgsNil))
   mkPermute Nothing a b = Exec PTXPermute' (a :>: b :>: ArgsNil)
   {-mkFold a (Just seed) b c = Exec PTXFold (a :>: seed :>: b :>: c :>: ArgsNil)
@@ -261,31 +240,30 @@ instance SetOpIndices PTXOp where
         | otherwise = Nothing
 
   getOpLoopDirections (PTXScan dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections (PTXScan1 dir) _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections (PTXScan' dir) _ (_ :>: _ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, dir')]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', dir')]
     where
       dir' = case dir of
         LeftToRight -> LoopAscending
         RightToLeft -> LoopDescending
   getOpLoopDirections PTXFold _ (_ :>: _ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', LoopMonotone)]
   getOpLoopDirections PTXFold1 _ (_ :>: IdxArgIdx _ i :>: _)
-    | _ `TupRpair` TupRsingle var <- i = [(varIdx var, LoopMonotone)]
+    | _ `TupRpair` TupRsingle var' <- i = [(varIdx var', LoopMonotone)]
   getOpLoopDirections _ _ _ = []
 
 instance MakesILP PTXOp where
-  type BackendVar PTXOp = ()
   type BackendArg PTXOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
   defaultBA = 0
   data BackendClusterArg PTXOp a = BCAN
@@ -294,21 +272,21 @@ instance MakesILP PTXOp where
           -> PTXOp args
           -> LabelledArgs env args
           -> State (BackendGraphState PTXOp env) ()
-  mkGraph c@(Node i _) PTXBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
+  mkGraph c@(Node _i _) PTXBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
     let bsIn  = getLabelArrDeps lIn
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
-      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
-      <> allEqual ([ILP.int i] <>  readDirs (S.map (,c) bsIn))
-      <> allEqual (               writeDirs (S.map (c,) bsOut)))
+        <> [SameFoldSize c]
+        <> [SameFoldSizeIfFused w c | w <- S.toList wsIn]
+        <> [PinnedDirection c (S.toList $ S.map (,c) bsIn) []]
+        <> [SameDirection [] (S.toList $ S.map (c,) bsOut)])
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Different order, so no in-place paths.
 
   mkGraph c PTXGenerate (_fun :>: L _ lOut :>: ArgsNil) = do
     let bsOut = getLabelArrDeps lOut
-    fusionILP.constraints %= (<> allEqual (writeDirs (S.map (c,) bsOut)))
+    fusionILP.constraints %= (<> [SameDirection [] (S.toList $ S.map (c,) bsOut)])
     fusionILP.bounds %= (<> defaultBounds mempty c bsOut)
     -- No input, so no in-place paths.
 
@@ -317,9 +295,9 @@ instance MakesILP PTXOp where
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
-      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c)
-      <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
+        <> [SameFoldSize c]
+        <> [SameFoldSizeIfFused w c | w <- S.toList wsIn]
+        <> [SameDirection (S.toList $ S.map (,c) bsIn) (S.toList $ S.map (c,) bsOut)])
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     fusionILP.inplacePaths %= case isIdentity fun of
       Just Refl -> (<> mkUnitInplacePaths (Number nComps * Number nComps) c lIn lOut)
@@ -344,8 +322,7 @@ instance MakesILP PTXOp where
     wsLocks   <- use $ allWriters bsLocks
     wsIn      <- use $ allWriters bsIn
     fusionILP %= (wsTargets <> wsLocks <> wsIn) `allBefore` c
-    fusionILP.constraints %= (
-      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+    fusionILP.constraints %= (<> [SameFoldSize c])
     fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsLocks <> bsIn)
                          <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsLocks <> bsIn))
 
@@ -356,8 +333,8 @@ instance MakesILP PTXOp where
     wsIn      <- use $ allWriters bsIn
     fusionILP %= wsTargets `allBefore` c
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
-      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+      <> [SameFoldSize c]
+      <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
     fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
                          <> foldMap (equal (-3) . WriteDir c) bsTargets)
 
@@ -366,8 +343,8 @@ instance MakesILP PTXOp where
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
-      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+        <> [SameFoldSize c]
+        <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
     fusionILP.bounds %= (<> foldMap (equal dir  . (`ReadDir` c)) bsIn
                          <> foldMap (equal (-3) . WriteDir c) bsOut)
     -- Output size is one larger, so no in-place paths.
@@ -377,8 +354,8 @@ instance MakesILP PTXOp where
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
-      <> ILP.var (InFoldSize c) .==. ILP.var (OutFoldSize c))
+        <> [SameFoldSize c]
+        <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
     fusionILP.bounds %= (<> foldMap (equal dir . (`ReadDir` c)) bsIn
                          <> foldMap (equal dir . WriteDir c) bsOut)
     fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut)
@@ -389,8 +366,8 @@ instance MakesILP PTXOp where
     let bsOut2 = getLabelArrDeps lOut2
     wsIn <- use $ allWriters $ getLabelArrDeps lIn
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
-      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId))
+        <> [NewFoldSize c]
+        <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
     fusionILP.bounds %= (<> foldMap (equal dir . (`ReadDir` c)) bsIn
                          <> foldMap (equal dir . WriteDir c) (bsOut1 <> bsOut2))
     fusionILP.inplacePaths %= (<> mkUnitInplacePaths 1 c lIn lOut1)
@@ -400,9 +377,9 @@ instance MakesILP PTXOp where
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
-      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId)
-      <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
+        <> [NewFoldSize c]
+        <> [SameFoldSizeIfFused w c | w <- S.toList wsIn]
+        <> [SameDirection (S.toList $ S.map (,c) bsIn) (S.toList $ S.map (c,) bsOut)])
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
 
@@ -411,13 +388,13 @@ instance MakesILP PTXOp where
     let bsOut = getLabelArrDeps lOut
     wsIn <- use $ allWriters bsIn
     fusionILP.constraints %= (
-      <> inputConstraints c wsIn
-      <> ILP.var (OutFoldSize c) .==. ILP.int (c^.nodeId)
-      <> allEqual (readDirs (S.map (,c) bsIn) <> writeDirs (S.map (c,) bsOut)))
+        <> [NewFoldSize c]
+        <> [SameFoldSizeIfFused w c | w <- S.toList wsIn]
+        <> [SameDirection (S.toList $ S.map (,c) bsIn) (S.toList $ S.map (c,) bsOut)])
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
 
-  labelLabelledArg :: M.Map (Graph.Var PTXOp) Int -> Node Comp -> LabelledArg env a -> LabelledArgOp PTXOp env a
+  labelLabelledArg :: Solution -> Node Comp -> LabelledArg env a -> LabelledArgOp PTXOp env a
   labelLabelledArg vars c (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! ReadDir  (getLabelArrDep y) c)
   labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
   labelLabelledArg _ _ (L x y) = LOp x y 0
@@ -425,16 +402,14 @@ instance MakesILP PTXOp where
   getClusterArg :: LabelledArgOp PTXOp env a -> BackendClusterArg PTXOp a
   getClusterArg (LOp _ _ _) = BCAN
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
-  finalize g = foldMap (\(w,b) -> timesN (manifest b) .>. ILP.var (WriteDir w b)) (g^.writeEdges)
+  finalize :: FusionGraph -> [Constraint]
+  finalize g = map NegativeDirIfManifest $ S.toList $ g^.writeEdges
 
   encodeBackendClusterArg (BCAN) = intHost $(hashQ ("BCAN" :: String))
 
-inputConstraints :: Node Comp -> Nodes Comp -> Constraint PTXOp
-inputConstraints c = foldMap $ \wIn ->
-                timesN (fused (wIn, c)) .>=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
-    <> (-1) .*. timesN (fused (wIn, c)) .<=. ILP.var (InFoldSize c) .-. ILP.var (OutFoldSize wIn)
+  combineBackendClusterArg = error "TODO WALL: NO EXPLICIT IMPLEMENTATION"
 
-defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds PTXOp
+defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
 

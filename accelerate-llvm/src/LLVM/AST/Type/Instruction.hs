@@ -1,12 +1,4 @@
-{-# LANGUAGE DataKinds             #-}
-{-# LANGUAGE FlexibleContexts      #-}
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE GADTs                 #-}
-{-# LANGUAGE LambdaCase            #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE RankNTypes            #-}
-{-# LANGUAGE ViewPatterns          #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.Instruction
@@ -25,7 +17,6 @@ import LLVM.AST.Type.Constant                             ( Constant(ScalarConst
 import LLVM.AST.Type.Downcast
 import LLVM.AST.Type.Function
 import LLVM.AST.Type.GetElementPtr
-import LLVM.AST.Type.InlineAssembly
 import LLVM.AST.Type.Name
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
@@ -37,8 +28,6 @@ import LLVM.AST.Type.Instruction.Volatile                 ( Volatility(..) )
 
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
-import Data.Array.Accelerate.AST                          ( PrimBool )
-import Data.Array.Accelerate.AST.Idx
 import qualified Data.Array.Accelerate.Debug.Internal     as Debug
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Elt
@@ -468,8 +457,10 @@ instance Downcast (Instruction a) LP.Instr where
       atomicity :: Maybe LP.AtomicOrdering
       atomicity = Nothing
 
+      {- TODO WALL: DEAD CODE
       alignment :: Maybe LP.Align
       alignment = Nothing  -- was: 0
+      -}
 
       -- fmf :: LLVM.FastMathFlags
       -- fmf = LLVM.FastMathFlags
@@ -482,30 +473,30 @@ instance Downcast (Instruction a) LP.Instr where
       --         , LLVM.approxFunc      = True
       --         }
 
-      constantTyped :: IsScalar a => a -> LP.Typed LP.Value
+      constantTyped :: IsScalar a' => a' -> LP.Typed LP.Value
       constantTyped x = downcast (ConstantOperand (ScalarConstant scalarType x))
 
-      constant :: IsScalar a => a -> LP.Value
+      constant :: IsScalar a' => a' -> LP.Value
       constant = LP.typedValue . constantTyped
 
-      add :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      add :: NumType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       add IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Add nsw nuw) x y
       add FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FAdd fmf)    x y
 
-      sub :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      sub :: NumType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       sub IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Sub nsw nuw) x y
       sub FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FSub fmf)    x y
 
-      mul :: NumType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      mul :: NumType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       mul IntegralNumType{} x (LP.Typed _ y) = LP.Arith (LP.Mul nsw nuw) x y
       mul FloatingNumType{} x (LP.Typed _ y) = LP.Arith (LP.FMul fmf)    x y
 
-      quot :: IntegralType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      quot :: IntegralType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       quot t x (LP.Typed _ y)
         | signed t  = LP.Arith (LP.SDiv exact) x y
         | otherwise = LP.Arith (LP.UDiv exact) x y
 
-      rem :: IntegralType a -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      rem :: IntegralType a' -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       rem t x (LP.Typed _ y)
         | signed t  = LP.Arith LP.SRem x y
         | otherwise = LP.Arith LP.URem x y
@@ -517,7 +508,7 @@ instance Downcast (Instruction a) LP.Instr where
             PrimType (StructPrimType _ tuple) -> tupleIdxToInt tuple ix
             _ -> internalError "Struct impossible"
 
-      ext :: BoundedType a -> BoundedType b -> LP.Typed LP.Value -> LP.Instr
+      ext :: BoundedType a' -> BoundedType b -> LP.Typed LP.Value -> LP.Instr
       ext a (downcast -> b) x
         | signed a  = LP.Conv LP.SExt x b
         | otherwise = LP.Conv (LP.ZExt False) x b
@@ -527,7 +518,7 @@ instance Downcast (Instruction a) LP.Instr where
         | signed t  = LP.Conv LP.FpToSi x t'
         | otherwise = LP.Conv LP.FpToUi x t'
 
-      int2float :: IntegralType a -> FloatingType b -> LP.Typed LP.Value -> LP.Instr
+      int2float :: IntegralType a' -> FloatingType b -> LP.Typed LP.Value -> LP.Instr
       int2float a (downcast -> b) x
         | signed a  = LP.Conv LP.SiToFp x b
         | otherwise = LP.Conv (LP.UiToFp False) x b
@@ -535,7 +526,7 @@ instance Downcast (Instruction a) LP.Instr where
       isNaN :: LP.Typed LP.Value -> LP.Instr
       isNaN x = LP.FCmp fmf LP.Funo x (LP.typedValue x)
 
-      cmp :: SingleType a -> Ordering -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
+      cmp :: SingleType a' -> Ordering -> LP.Typed LP.Value -> LP.Typed LP.Value -> LP.Instr
       cmp t p x (LP.Typed _ y) =
         case t of
           NumSingleType FloatingNumType{} -> LP.FCmp fastmathFlags (fp p) x y
@@ -579,7 +570,7 @@ instance Downcast (Instruction a) LP.Instr where
                   )
           trav (Body u k o) =
             case o of
-              CallAssembly asm ->
+              CallAssembly _asm ->
                 internalError
                   "Inline assembly should not be used as llvm-pretty does not \
                   \support it. For a workaround, see the solution for nanosleep \
@@ -590,13 +581,13 @@ instance Downcast (Instruction a) LP.Instr where
           trav (Lam t _ l)  =
             let (ts, va, k, r, fm, n) = trav l
             in  (downcast t : ts, va, k, r, fm, n)
-          trav (VarLams f) = 
-            let (ts, _, k, r, fm, n) = trav f
+          trav (VarLams f') = 
+            let (ts, _, k, r, fm, n) = trav f'
             in  (ts, True, k, r, fm, n)
 
           travArgs :: Arguments t -> [LP.Typed LP.Value]
           -- TODO: Place the attrs on the argument, when llvm-pretty supports that
-          travArgs (ArgumentsCons operand attrs args') = downcast operand : travArgs args'
+          travArgs (ArgumentsCons operand _attrs args') = downcast operand : travArgs args'
           travArgs ArgumentsNil = []
 
           (argt, varArgs, tail, ret, fmFlags, target) = trav f

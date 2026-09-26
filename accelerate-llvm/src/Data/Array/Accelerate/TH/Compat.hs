@@ -1,8 +1,4 @@
-{-# LANGUAGE CPP                 #-}
-{-# LANGUAGE KindSignatures      #-}
-{-# LANGUAGE PolyKinds           #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE CPP #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.TH.Compat

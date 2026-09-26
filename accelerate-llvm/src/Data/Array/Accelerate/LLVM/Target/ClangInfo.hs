@@ -1,4 +1,3 @@
-{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_HADDOCK hide #-}
 module Data.Array.Accelerate.LLVM.Target.ClangInfo where
 

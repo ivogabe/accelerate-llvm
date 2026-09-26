@@ -1,8 +1,5 @@
-{-# LANGUAGE BangPatterns      #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE MagicHash         #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE MagicHash       #-}
+{-# LANGUAGE RecordWildCards #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Context
 -- Copyright   : [2014..2020] The Accelerate Team

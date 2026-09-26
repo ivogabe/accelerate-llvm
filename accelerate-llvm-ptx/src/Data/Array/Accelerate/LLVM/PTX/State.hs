@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.State
 -- Copyright   : [2014..2020] The Accelerate Team

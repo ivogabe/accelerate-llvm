@@ -1,11 +1,3 @@
-{-# LANGUAGE FlexibleInstances          #-}
-{-# LANGUAGE GADTs                      #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase                 #-}
-{-# LANGUAGE MultiParamTypeClasses      #-}
-{-# LANGUAGE OverloadedStrings          #-}
-{-# LANGUAGE TypeFamilies               #-}
-{-# LANGUAGE TypeSynonymInstances       #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Par
@@ -40,6 +32,7 @@ import Foreign.ForeignPtr
 
 import Control.Monad.Reader
 import Control.Monad.State
+--import Control.Monad (forM_, void)
 import Control.Concurrent
 
 newtype Par a = Par { runPar :: ReaderT Stream (StateT [CleanUp] (LLVM PTX)) a }

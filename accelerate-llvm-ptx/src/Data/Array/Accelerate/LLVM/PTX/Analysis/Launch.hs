@@ -1,4 +1,3 @@
-{-# LANGUAGE QuasiQuotes     #-}
 {-# LANGUAGE TemplateHaskell #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Analysis.Launch

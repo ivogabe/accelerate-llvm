@@ -82,13 +82,13 @@ loopSelfScheduled counter size doWork = do
     return ()
   __syncthreads
 
-  index <- instr' $ Load Volatile index Nothing
+  index'' <- instr' $ Load Volatile index Nothing
 
-  condition <- lt singleType (OP_Word64 index) (OP_Word64 size)
+  condition <- lt singleType (OP_Word64 index'') (OP_Word64 size)
   _ <- cbr condition work exit
 
   _ <- setBlock work
-  doWork index
+  doWork index''
   _ <- br claim
 
   _ <- setBlock exit

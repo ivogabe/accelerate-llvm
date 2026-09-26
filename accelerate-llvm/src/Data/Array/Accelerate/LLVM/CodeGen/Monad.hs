@@ -1,10 +1,4 @@
-{-# LANGUAGE GADTs                      #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE OverloadedStrings          #-}
-{-# LANGUAGE RecordWildCards            #-}
-{-# LANGUAGE ScopedTypeVariables        #-}
-{-# LANGUAGE TemplateHaskell            #-}
-{-# LANGUAGE TypeApplications           #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.CodeGen.Monad
@@ -51,10 +45,8 @@ import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.State                             ( LLVM, getLLVMVer )
 import Data.Array.Accelerate.LLVM.Target
-import Data.Array.Accelerate.Representation.Tag
 import Data.Array.Accelerate.Representation.Type
 import qualified Data.Array.Accelerate.Debug.Internal               as Debug
-import Data.Array.Accelerate.LLVM.Compile.Cache                     ( UID )
 
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Downcast
@@ -86,10 +78,8 @@ import Formatting
 import Prelude
 import qualified Data.Foldable                                      as F
 import qualified Data.HashMap.Strict                                as HashMap
-import qualified Data.Map.Strict                                    as Map
 import qualified Data.Sequence                                      as Seq
 import qualified Data.ByteString.Short                              as B
-import qualified Debug.Trace
 
 
 -- Code generation

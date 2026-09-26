@@ -1,8 +1,3 @@
-{-# LANGUAGE GADTs               #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell     #-}
-{-# LANGUAGE TypeApplications    #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.CodeGen.Stencil
 -- Copyright   : [2018..2020] The Accelerate Team
@@ -20,6 +15,7 @@ module Data.Array.Accelerate.LLVM.Native.CodeGen.Stencil (
 
 ) where
 
+{- TODO WALL: DEAD CODE
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Stencil
@@ -45,6 +41,7 @@ import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LP
 
 import Control.Monad
+-}
 
 {-
 

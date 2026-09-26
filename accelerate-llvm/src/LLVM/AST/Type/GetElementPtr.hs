@@ -1,9 +1,6 @@
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE PatternSynonyms       #-}
 {-# LANGUAGE QuantifiedConstraints #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE ViewPatterns          #-}
 {-# OPTIONS_HADDOCK hide #-}
 module LLVM.AST.Type.GetElementPtr where
 

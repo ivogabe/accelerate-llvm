@@ -1,9 +1,4 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
-{-# LANGUAGE TemplateHaskell   #-}
-{-# LANGUAGE TypeFamilies      #-}
-{-# OPTIONS_GHC -Wno-orphans   #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Compile
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -40,12 +35,10 @@ import qualified Foreign.CUDA.Analysis                              as CUDA
 
 import qualified LLVM.AST.Type.Name                                 as LLVM
 
-import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LP
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.PP  as LP
 import qualified Text.PrettyPrint                                   as Pretty
 
 import Control.DeepSeq
-import Control.Monad                                                ( when )
 import Control.Monad.Reader
 import Data.ByteString.Short                                        ( ShortByteString )
 import Data.List                                                    ( intercalate )

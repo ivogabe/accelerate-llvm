@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns      #-}
-{-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Stream.Reservoir
 -- Copyright   : [2016..2020] The Accelerate Team

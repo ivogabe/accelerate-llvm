@@ -1,17 +1,4 @@
-{-# LANGUAGE BangPatterns             #-}
-{-# LANGUAGE FlexibleContexts         #-}
-{-# LANGUAGE ForeignFunctionInterface #-}
-{-# LANGUAGE GADTs                    #-}
-{-# LANGUAGE LambdaCase               #-}
-{-# LANGUAGE MultiParamTypeClasses    #-}
-{-# LANGUAGE OverloadedStrings        #-}
-{-# LANGUAGE RecordWildCards          #-}
-{-# LANGUAGE ScopedTypeVariables      #-}
-{-# LANGUAGE TemplateHaskell          #-}
-{-# LANGUAGE TypeApplications         #-}
-{-# LANGUAGE TypeFamilies             #-}
-{-# LANGUAGE TypeOperators            #-}
-{-# LANGUAGE ViewPatterns             #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Execute
@@ -29,7 +16,6 @@ module Data.Array.Accelerate.LLVM.Native.Execute (
 
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Representation.Elt
-import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Ground
 import Data.Array.Accelerate.AST.Execute
 import Data.Array.Accelerate.AST.LeftHandSide

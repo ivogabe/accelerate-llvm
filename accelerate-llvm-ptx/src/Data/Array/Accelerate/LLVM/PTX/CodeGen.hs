@@ -1,10 +1,5 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.CodeGen
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -26,7 +21,7 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen (
 -- accelerate
 
 import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Shape (shapeRFromRank, shapeType, rank)
+import Data.Array.Accelerate.Representation.Shape (shapeRFromRank, rank)
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Exp
@@ -58,7 +53,6 @@ import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
-import LLVM.AST.Type.Instruction.RMW
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -73,7 +67,6 @@ import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant as Const
-import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
 data PTXCode env = PTXCode
   { ptxCodeElements :: [Idx env Int] -- The product of these variables divided by ptxCodeElementsPerThread is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
@@ -114,7 +107,7 @@ codegen name env cluster args
 -- not checked in this function)
 --
 codegenIndependent
-  :: forall env args.
+  :: forall env.
      LLVM.Result (MarshalFun env) ~ ()
   => String
   -> Env AccessGroundR env
@@ -154,7 +147,7 @@ codegenIndependent name env flatCluster parallelDepth
       Nothing -- No need to finalize kernel memory
 
 codegenDim1
-  :: forall env args.
+  :: forall env.
      LLVM.Result (MarshalFun env) ~ ()
   => String
   -> Env AccessGroundR env
@@ -171,7 +164,7 @@ codegenDim1 name env flatCluster
     (l:ls) -> (l, ls)
   -- Get the code of the individual operations in this kernel
   , Just (Exists parCodes) <- parCodeGens (parCodeGen $ isDescending direction) 0 $ opCodeGens opCodeGen flatOps
-  , hasScan <- parCodeGenHasMultipleTileLoops parCodes
+  , _hasScan <- parCodeGenHasMultipleTileLoops parCodes
   -- TODO: Better heuristic, possibly using hasScan and/or other information on register usage of the operations in this kernel
   , elementsPerThread <- if rank shr > 1 then 1 else 4
   , envs1 <- envs{
@@ -229,9 +222,9 @@ codegenDim1 name env flatCluster
 
         -- Compute the number of warps that are active
         (OP_Int32 groupCount, OP_Int32 activeWarps) <- do
-          size <- A.sub numType (OP_Int upper) (OP_Int lower)
-          -- ceil(size/warpSize) = (size + warpSize - 1) / warpSize
-          a <- A.sub numType size (OP_Int $ integral TypeInt 1) >>= A.fromIntegral TypeInt numType
+          size' <- A.sub numType (OP_Int upper) (OP_Int lower)
+          -- ceil(size'/warpSize) = (size' + warpSize - 1) / warpSize
+          a <- A.sub numType size' (OP_Int $ integral TypeInt 1) >>= A.fromIntegral TypeInt numType
           warpSz <- warpSize
           b <- A.add numType a warpSz
           count1 <- A.quot TypeInt32 b warpSz
@@ -306,7 +299,7 @@ makeKernel name env =
     kernelDataRawType = PtrPrimType (ArrayPrimType 0 primType) defaultAddrSpace
 
 opCodeGen :: FlatOp PTXOp env idxEnv -> (LoopDepth, OpCodeGen PTX PTXOp env idxEnv)
-opCodeGen flatOp@(FlatOp op args idxArgs) = case op of
+opCodeGen flatOp@(FlatOp op' args idxArgs) = case op' of
   PTXGenerate -> defaultCodeGenGenerate args idxArgs
   PTXMap -> defaultCodeGenMap args idxArgs
   PTXBackpermute -> defaultCodeGenBackpermute args idxArgs

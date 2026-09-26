@@ -1,22 +1,6 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE InstanceSigs #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+{-# OPTIONS_GHC -fno-warn-orphans   #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.CodeGen
@@ -100,7 +84,9 @@ codegen name env cluster args
     finishBlock <- newBlock "finish" -- Finish function from the work assisting paper
     workBlock <- newBlock "work"
     _ <- switch (OP_Word32 threadIndex) workBlock [(0xFFFFFFFF, initBlock), (0xFFFFFFFE, finishBlock)]
+    {- TODO WALL: DEAD CODE
     let hasPermute = hasNPermute flat
+    -}
 
     if parallelDepth == 0 && rank shr /= 0 then do
       let (envs, loops) = initEnv gamma shr idxLHS sizes dirs localR localLHS
@@ -337,10 +323,6 @@ codegen name env cluster args
       pure 0
   where
     (argTp, extractEnv, workassistIndex, workPerThread, threadIndex {- or flag -}, threadCount, kernelMem', gamma) = bindHeaderEnv env
-
-    isDescending :: LoopDirection Int -> Bool
-    isDescending LoopDescending = True
-    isDescending _ = False
 
 linkage :: Maybe LP.Linkage
 linkage = Just LP.DLLExport
@@ -818,6 +800,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
               app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) a b
           )
 
+{- TODO WALL: DEAD CODE
 -- Checks if the cluster has a permute.
 hasNPermute :: FlatCluster NativeOp env -> Bool
 hasNPermute (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
@@ -828,6 +811,7 @@ hasNPermute (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
     go (FlatOpsOp (FlatOp NPermute _ _) _) = True
     go (FlatOpsOp (FlatOp NPermute' _ _) _) = True
     go (FlatOpsOp _ ops) = go ops
+-}
 
 maxLookbackLength :: Int
 maxLookbackLength = 512

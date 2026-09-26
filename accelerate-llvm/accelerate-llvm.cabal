@@ -165,7 +165,29 @@ Library
         src
 
   default-language:
-        Haskell2010
+        GHC2021
+
+  -- Note OverloadedStrings is enabled by default to ensure that every module
+  -- is compatible with it, as many people configure GHCi to use it.
+  default-extensions:
+        GADTs
+        LambdaCase
+        OverloadedStrings
+        RoleAnnotations
+
+  other-extensions:
+        AllowAmbiguousTypes
+        CPP
+        ImpredicativeTypes
+        MagicHash
+        PatternSynonyms
+        QuantifiedConstraints
+        RebindableSyntax
+        RecordWildCards
+        TemplateHaskellQuotes
+        TypeFamilies
+        UndecidableInstances
+        ViewPatterns
 
   ghc-options:
         -O2

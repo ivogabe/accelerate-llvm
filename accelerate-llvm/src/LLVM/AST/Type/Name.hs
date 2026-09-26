@@ -1,8 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable    #-}
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE RoleAnnotations       #-}
-{-# LANGUAGE TypeSynonymInstances  #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.Name

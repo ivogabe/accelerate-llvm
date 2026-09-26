@@ -1,7 +1,3 @@
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE GADTs                 #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.Operand

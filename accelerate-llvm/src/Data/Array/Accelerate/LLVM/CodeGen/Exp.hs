@@ -1,13 +1,3 @@
-{-# LANGUAGE EmptyCase           #-}
-{-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE RankNTypes          #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections       #-}
-{-# LANGUAGE TypeApplications    #-}
-{-# LANGUAGE TypeFamilies        #-}
-{-# LANGUAGE TypeOperators       #-}
-{-# LANGUAGE ViewPatterns        #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.CodeGen.Exp
@@ -29,7 +19,6 @@ import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
-import Data.Array.Accelerate.Representation.Slice
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Representation.Vec
 import Data.Array.Accelerate.Type
@@ -46,6 +35,7 @@ import Data.Array.Accelerate.LLVM.Foreign
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic      as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop            as L
 
+import qualified Data.Kind
 import Data.Primitive.Vec
 import Data.Text                                                    ( Text )
 
@@ -57,10 +47,9 @@ import Control.Monad
 import Prelude                                                      hiding ( exp, any )
 
 import GHC.TypeNats
-import Data.Primitive (Ptr(Ptr))
-import Data.Array.Accelerate.LLVM.CodeGen.Base (call, call')
+import Data.Array.Accelerate.LLVM.CodeGen.Base (call')
 import qualified LLVM.AST.Type.Function as F
-import LLVM.AST.Type.Representation (IsPrim(primType), Type(..))
+import LLVM.AST.Type.Representation (Type(..))
 import LLVM.AST.Type.Name (Label(Label))
 
 
@@ -87,7 +76,7 @@ llvmOfFun2 arrayInstr (Lam lhs1 (Lam lhs2 (Body body)))
   = IRFun2 $ \x y -> llvmOfOpenExp arrayInstr body (Empty `pushE` (lhs1, x) `pushE` (lhs2, y))
 llvmOfFun2 _ _ = internalError "impossible evaluation"
 
-type CompileArrayInstr arch arr = forall env s t. arr (s -> t) -> Operands s -> IROpenExp arch env t
+type CompileArrayInstr arch arr = forall (env :: Data.Kind.Type) s t. arr (s -> t) -> Operands s -> IROpenExp arch env t
 
 compileArrayInstrGamma :: forall arch genv. Gamma genv -> CompileArrayInstr arch (ArrayInstr genv)
 compileArrayInstrGamma genv arr arg = case arr of

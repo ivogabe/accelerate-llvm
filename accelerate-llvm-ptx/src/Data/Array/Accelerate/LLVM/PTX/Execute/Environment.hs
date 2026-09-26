@@ -1,6 +1,3 @@
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Execute.Environment
 -- Copyright   : [2014..2020] The Accelerate Team

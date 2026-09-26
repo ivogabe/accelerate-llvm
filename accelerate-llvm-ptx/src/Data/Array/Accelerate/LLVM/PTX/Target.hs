@@ -1,7 +1,3 @@
-{-# LANGUAGE EmptyDataDecls    #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications  #-}
-{-# LANGUAGE TypeFamilies      #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Target
 -- Copyright   : [2014..2020] The Accelerate Team

@@ -18,7 +18,6 @@ module Data.Array.Accelerate.LLVM.Compile.Cache (
 
 ) where
 
-import Data.Array.Accelerate.AST
 import Data.Array.Accelerate.Analysis.Hash
 import Data.Array.Accelerate.Debug.Internal
 

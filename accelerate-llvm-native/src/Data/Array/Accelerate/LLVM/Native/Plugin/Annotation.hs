@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Plugin.Annotation
 -- Copyright   : [2017..2020] The Accelerate Team

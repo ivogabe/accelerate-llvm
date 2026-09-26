@@ -1,16 +1,5 @@
-{-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE GADTs               #-}
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE RecordWildCards     #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell     #-}
-{-# LANGUAGE TypeApplications    #-}
-{-# LANGUAGE TypeFamilies        #-}
-{-# LANGUAGE TypeOperators       #-}
-{-# LANGUAGE ViewPatterns        #-}
-{-# OPTIONS_GHC -Wno-orphans     #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.PTX.Execute
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -35,13 +24,13 @@ import Data.Array.Accelerate.AST.Schedule
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Lifetime
-import Data.Array.Accelerate.Representation.Array
+--import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Interpreter                            ( evalExp, EvalArrayInstr(..) )
 
-import Data.Array.Accelerate.LLVM.State
+--import Data.Array.Accelerate.LLVM.State
 
 import Data.Array.Accelerate.LLVM.PTX.Execute.Buffer
 import Data.Array.Accelerate.LLVM.PTX.Execute.Environment
@@ -53,7 +42,7 @@ import Data.Array.Accelerate.LLVM.PTX.Link.Object
 
 -- import Data.Array.Accelerate.LLVM.Execute
 
-import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch               ( multipleOf )
+--import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch               ( multipleOf )
 -- import Data.Array.Accelerate.LLVM.PTX.Array.Data
 -- import Data.Array.Accelerate.LLVM.PTX.Array.Prim                    ( memsetArrayAsync )
 -- import Data.Array.Accelerate.LLVM.PTX.Execute.Async
@@ -61,13 +50,13 @@ import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch               ( multipleOf
 -- import Data.Array.Accelerate.LLVM.PTX.Execute.Marshal
 -- import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
 -- import Data.Array.Accelerate.LLVM.PTX.Link
-import Data.Array.Accelerate.LLVM.PTX.Target
+--import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Array.Accelerate.LLVM.PTX.State
 -- import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
 -- import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Event       as Event
 
 import qualified Foreign.CUDA.Driver                                as CUDA
-import qualified Foreign.CUDA.Driver.Stream                         as CUDA
+--import qualified Foreign.CUDA.Driver.Stream                         as CUDA
 
 import Control.Monad                                                ( forM_, when, unless )
 import Control.Monad.Reader                                         ( asks )
@@ -230,6 +219,7 @@ executeEffect env = \case
   Aassert msg cond -> do
     result <- evalExp cond $ evalArrayInstr env
     unless (result == 1) $ errorWithoutStackTrace $ "\n*** Assertion failed: " ++ Text.unpack msg
+  Atrace{} -> internalError "TODO: Support Atrace in PTX"
 
 size' :: ShapeR sh -> Distribute Value sh -> Int
 size' ShapeRz _ = 1

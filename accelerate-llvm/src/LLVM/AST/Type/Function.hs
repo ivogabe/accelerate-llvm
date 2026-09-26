@@ -1,11 +1,4 @@
-{-# LANGUAGE LambdaCase            #-}
-{-# LANGUAGE DataKinds             #-}
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE GADTs                 #-}
-{-# LANGUAGE KindSignatures        #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies          #-}
-{-# LANGUAGE TypeOperators         #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.Function
@@ -155,3 +148,4 @@ data Arguments f where
 functionBody :: Function kind t -> kind
 functionBody (Lam _ _ f) = functionBody f
 functionBody (Body _ _ b) = b
+functionBody (VarLams f) = functionBody f

@@ -1,6 +1,3 @@
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications    #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.CodeGen.Transform
 -- Copyright   : [2014..2020] The Accelerate Team
@@ -14,6 +11,7 @@
 module Data.Array.Accelerate.LLVM.Native.CodeGen.Transform
   where
 
+{- TODO WALL: DEAD CODE
 -- accelerate
 import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Type
@@ -29,6 +27,7 @@ import Data.Array.Accelerate.LLVM.Compile.Cache
 import Data.Array.Accelerate.LLVM.Native.Target                     ( Native )
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Loop
+-}
 
 {-
 

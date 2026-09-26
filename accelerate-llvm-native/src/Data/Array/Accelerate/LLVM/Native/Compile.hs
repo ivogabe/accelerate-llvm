@@ -1,6 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell   #-}
-{-# LANGUAGE TypeFamilies      #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Compile
@@ -17,12 +14,10 @@ module Data.Array.Accelerate.LLVM.Native.Compile (
   compile
 ) where
 
-import Data.Array.Accelerate.AST                                    ( PreOpenAcc )
 import Data.Array.Accelerate.Error
 
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.Target.ClangInfo                  ( hostLLVMVersion, llvmverFromTuple, clangExePath )
-import Data.Array.Accelerate.LLVM.CodeGen.Environment               ( Gamma )
 
 import Data.Array.Accelerate.LLVM.Native.Compile.Cache
 import Data.Array.Accelerate.LLVM.Native.Target
@@ -30,10 +25,6 @@ import qualified Data.Array.Accelerate.LLVM.Native.Debug            as Debug
 
 import LLVM.AST.Type.Module                                         ( Module(..) )
 import LLVM.AST.Type.Downcast
-import LLVM.AST.Type.Function
-import LLVM.AST.Type.Global
-import LLVM.AST.Type.Name
-import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as P
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.PP  as P
 import qualified Text.PrettyPrint                                   as P ( render )
 
@@ -51,7 +42,6 @@ import qualified System.Info                                        as Info
 import System.IO.Unsafe
 import System.Process
 import qualified Data.ByteString.Short.Char8                        as SBS8
-import qualified Data.Map.Strict                                    as Map
 
 data ObjectR f = ObjectR
   { objId         :: {-# UNPACK #-} !UID
