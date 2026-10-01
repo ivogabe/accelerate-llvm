@@ -1,4 +1,4 @@
-cabal-version:          2.2
+cabal-version:          3.0
 
 name:                   accelerate-llvm-ptx
 version:                1.4.0.0
@@ -11,15 +11,15 @@ description:
     generates LLVM IR targeting CUDA capable GPUs. For further information,
     refer to the main <http://hackage.haskell.org/package/accelerate accelerate>
     package.
-    .
+
     [/Dependencies/]
-    .
+
     Haskell dependencies are available from Hackage. The following external
     dependencies are also required:
-    .
+
     * <https://clang.llvm.org/ clang> (not used to compile C code, but to compile generated LLVM IR via a mostly LLVM-version-independent interface)
     * <https://developer.nvidia.com/cuda-downloads CUDA>
-    .
+
     For installation instructions, see the <https://github.com/AccelerateHS/accelerate-llvm#readme README>.
 
 license:                BSD-3-Clause
