@@ -60,11 +60,15 @@ common lang
     OverloadedStrings
     RoleAnnotations
 
+  -- With @-Wunused-packages@, the @llvm-pretty-accfork@ mixin causes a false
+  -- positive warning about package @accelerate-llvm@.  This warning can be
+  -- ignored.
   ghc-options:
     -Wall
     -Wcompat
     -Widentities
     -Wno-unticked-promoted-constructors
+    -Wunused-packages
 
 Library
   import:               lang
@@ -131,10 +135,7 @@ Library
         , bytestring                    >= 0.10.4
         , constraints                   >= 0.9
         , containers                    >= 0.5 && < 0.9
-        , data-default-class            >= 0.0.1
-        , deepseq                       >= 1.3
         , directory                     >= 1.2.3
-        , dlist                         >= 0.6
         , exceptions                    >= 0.6
         , filepath                      >= 1.0
         , formatting                    >= 7.0
@@ -148,7 +149,6 @@ Library
         , template-haskell
         , text                          >= 1.2
         , unordered-containers          >= 0.2
-        , vector                        >= 0.10
 
   -- Expose the modules from the (forked and edited) llvm-pretty here under a
   -- namespace prefix. We need these modules in accelerate-llvm-native and
