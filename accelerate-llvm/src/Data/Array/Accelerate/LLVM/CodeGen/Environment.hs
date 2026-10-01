@@ -410,7 +410,7 @@ bindEnvArgs environment =
         -- SEE: [Alias metadata]
         alias
           | In <- m = Just (3, 4)
-          | otherwise = Just ( fromIntegral mutOutCount' * 3 + 6,  fromIntegral mutOutCount' * 3 + 7)
+          | otherwise = Just (mutOutCount' * 3 + 6, mutOutCount' * 3 + 7)
 
         annotation :: CodeGen arch ()
         annotation
@@ -454,7 +454,7 @@ declareAliasScopes mutOutCount = do
   -- 7 + 3 * k is the list containing all other scopes,
   --   i.e. the noalias list of the kth Out or Mut buffer
   
-  let allScopes = [ 2 + 3 * fromIntegral k | k <- [0 .. mutOutCount + 1] ]
+  let allScopes = [ 2 + 3 * k | k <- [0 .. mutOutCount + 1] ]
   _ <- addMetadata (\_ -> map (Just . MetadataNodeOperand . MetadataNodeReference) allScopes)
   forM_ allScopes $ \scope -> do
     -- scope
@@ -556,7 +556,7 @@ bindEnvFromStruct environment =
 
         alias
           | In <- m = Just (3, 4)
-          | otherwise = Just ( fromIntegral mutOutCount' * 3 + 6,  fromIntegral mutOutCount' * 3 + 7)
+          | otherwise = Just (mutOutCount' * 3 + 6, mutOutCount' * 3 + 7)
 
         annotation :: CodeGen arch ()
         annotation

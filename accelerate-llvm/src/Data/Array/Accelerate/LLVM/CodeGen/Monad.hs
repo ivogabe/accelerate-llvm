@@ -513,7 +513,7 @@ addNamedMetadata key val =
 addMetadata :: (MetadataNodeID -> [Maybe Metadata]) -> CodeGen arch MetadataNodeID
 addMetadata val =
   state $ \s ->
-    let index = fromIntegral $ Seq.length $ metadataTable s
+    let index = Seq.length $ metadataTable s
     in (index, s{ metadataTable = metadataTable s Seq.:|> val index })
 
 

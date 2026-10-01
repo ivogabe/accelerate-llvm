@@ -53,6 +53,9 @@ common lang
 
   ghc-options:
     -Wall
+    -Wcompat
+    -Widentities
+    -Wno-unticked-promoted-constructors
 
 Library
   import:               lang

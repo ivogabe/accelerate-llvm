@@ -24,7 +24,7 @@ import Data.Array.Accelerate.LLVM.Native.Plugin.BuildInfo
 
 import Control.Monad
 import Data.IORef
-import Data.List
+import Data.List                                                    ( nub )
 import qualified Data.Map                                           as Map
 
 #if __GLASGOW_HASKELL__ >= 902

@@ -212,7 +212,7 @@ codegenDim1 name env flatCluster
       tileLoops <- genParallel kernelMem envs1 (TupleIdxRight TupleIdxSelf) parCodes
 
       -- Declare fused away arrays
-      envs2 <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 (fromIntegral elementsPerThread) envs1
+      envs2 <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 elementsPerThread envs1
 
       -- Loop to claim tile
       OP_Word64 tileCount' <- A.fromIntegral TypeInt numType (OP_Int tileCount)
