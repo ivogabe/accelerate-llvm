@@ -583,7 +583,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
     case seed of
       Nothing -> return ()
       Just s -> do
-        (flagPtr, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr $ A.liftInt 0 -- $ descriptorsLength - 1
+        (flagPtr, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr $ A.liftInt 0
         -- tag = 0, tag | flagPrefix = flagPrefix, so
         -- we can write flagPrefix directly.
         _ <- instr' $ Store NonVolatile flagPtr flagPrefix Nothing
@@ -658,10 +658,90 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         -- no need to wait.
         return local
       else do
-        -- Before sharing our aggregate, check if we can overwrite this value
-        -- (i.e. synchronize with previous tiles that may read from this field,
-        -- as the field may be reuse a prior slot in the cyclic buffer.)
-        -- TODO
+        -- Before sharing our aggregate, check if we can already write to this
+        -- slot in the cyclic buffer in 'ptr'.
+        --
+        -- To ensure overwrites of values that are still needed, we let tile i
+        -- synchronize with tile i - S, where
+        -- S = max(buffer_length - 2*max_threads + 1, 1)
+        -- (assuming buffer_length >= 2)
+        -- Tile i must wait with sharing its aggregate until tile i - S has
+        -- flag 'prefix available'.
+        --
+        -- For the correctness of this protocol, we need the following lemma:
+        -- The look-back of tile k goes no further than tile k - max_threads.
+        -- Sketch of proof: each time the thread of tile k finds flag
+        -- 'aggregate available', it goes to the previous tile. Since the look-
+        -- back and the threads producing the aggregates go in different
+        -- directions, the thread of tile k sees at most one 'aggregate
+        -- available' per other thread, thus at most max_threads-1 in total.
+        -- The look-back will thus not go further back than tile
+        -- k - max_threads.
+        --
+        -- We demonstrate the correctness of this protocol separately for S>1
+        -- and S=1. First, assume S > 1.
+        -- By the definition of S, S = buffer_length - 2 * max_threads + 1
+        -- Assume tile k is not ready yet. Tiles k - max_threads to k must not
+        -- be overwritten yet in the cyclic buffer, i.e. tile indices
+        -- k - max_threads + buffer_length and larger may not write yet.
+        -- This protocol blocks tile k + S from writing at this point,
+        -- but later tiles (eg k + S + 1) can already share their aggregate.
+        -- Since two threads are blocked at this point (the thread handling
+        -- tile k and the thread for tile k + S), at most max_threads-2 threads
+        -- may write an aggregate to tiles k+S+1 to k+S+max_threads-2
+        -- (inclusive). Tiles whose index is at least k+S+max_threads-1 will
+        -- not start yet, when tile k is not ready.
+        -- We thus have to ensure that:
+        -- k + S + max_threads - 1 <= k - max_threads + buffer_length
+        -- We know S = buffer_length - 2 * max_threads + 1,
+        -- and by adding 'k + max_threads - 1' to both sides and rearranging,
+        -- we get:
+        -- k + S + max_threads - 1 <= k - max_threads + buffer_length
+        --
+        -- Now assume S = 1.
+        -- The scan now essentially behaves like a regular chained scan,
+        -- without decoupled look-back: the "look-back" of tile i only starts
+        -- when tile i-1 is completed, and the look-back will thus directly
+        -- succeed.
+        --
+        -- Note that we get no benefits of the decoupled look-back when S=1,
+        -- but we can this way still have a correct scan when the program runs
+        -- on more threads than anticipated. The buffer_length should be chosen
+        -- to be at least 3 times the expected maximum number of threads.
+        -- However, since this is set at compile-time and the number of threads
+        -- follows at run-time, we have to make an estimation here. By the
+        -- design of this protocol, the estimation will not influence
+        -- correctness, but will only influence the performance.
+        
+        -- Compute the 'S' from above
+        syncDistance <- do
+          threads <- getThreadCount
+          threads' <- A.fromIntegral TypeWord32 numType $ OP_Word32 threads
+          threads2 <- A.mul numType threads' $ A.liftInt 2
+          sub <- A.sub numType (A.liftInt descriptorsLength) threads2
+          plusOne <- A.add numType sub $ A.liftInt 1
+          A.max singleType plusOne $ A.liftInt 1
+
+        -- Synchronize with previous tile by waiting on its prefix
+        syncIndex <-
+          A.sub numType (envsTileIndex envs) syncDistance
+            >>= A.add numType (A.liftInt 1)
+        A.when (A.gte singleType syncIndex $ A.liftInt 0) $ do
+          _ <- Loop.while [] TupRunit
+            (\_ -> do
+              (prevDescIdx, prevTag) <- descriptorIdxTag syncIndex
+              (prevFlagPtr, _, _) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
+
+              flag <- instr $ AtomicLoad singleType prevFlagPtr Acquire
+              flagPrefix' <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
+              -- Block while this tile has no prefix
+              A.neq singleType flag flagPrefix'
+            )
+            (\_ -> return OP_Unit)
+            OP_Unit
+          return ()
+
+        -- Perform regular work for look-back
 
         -- Share our aggregate
         -- In the parallel mode, 'local' is the aggregate value of this tile.
@@ -689,7 +769,6 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
             flagAggregate' <- A.bor TypeWord8 prevTag $ OP_Word8 flagAggregate
             flagPrefix' <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
 
-            -- TODO: Should we limit the length of the look-back to prevent cyclic buffer wrap around?
             hasAggregate <- A.eq singleType flag flagAggregate'
             hasPrefix <- A.eq singleType flag flagPrefix'
             
@@ -709,7 +788,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
                 -- when hasPrefix = true the loop will exit and this value will
                 -- not be used.
                 OP_Int idx' <- A.sub numType idx $ A.liftInt 1
-                instr $ Store NonVolatile lookbackIndex idx' Nothing
+                _ <- instr $ Store NonVolatile lookbackIndex idx' Nothing
 
                 return OP_Unit
               )
@@ -813,18 +892,16 @@ hasNPermute (FlatCluster _ _ _ _ _ _ flatOps) = go flatOps
     go (FlatOpsOp _ ops) = go ops
 -}
 
-maxLookbackLength :: Int
-maxLookbackLength = 512
-
+-- Ideally, this should be at least three times the number of threads.
+-- When this is set lower (or from the other perspective, there are too many
+-- threads), scans will still function correctly, but have more
+-- synchronisations. This will essentially convert the chained scan *with
+-- decoupled look-back* to a regular chained scan.
+--
+-- This should be at least 2 (but preferably a lot larger, as noted above)
+--
 descriptorsLength :: Int
-descriptorsLength = maxLookbackLength * 2
-
-nextDescriptor :: Operands Int -> CodeGen Native (Operands Int)
-nextDescriptor i = do
-  OP_Int j <- A.add numType i (A.liftInt 1)
-  OP_Bool overflow <- A.gte singleType (OP_Int j) (A.liftInt descriptorsLength)
-  OP_Int sub <- A.sub numType (OP_Int j) (A.liftInt descriptorsLength)
-  instr $ LLVM.Select overflow sub j
+descriptorsLength = 1024
 
 descriptorIdxTag :: Operands Int -> CodeGen Native (Operands Int, Operands Word8)
 descriptorIdxTag tileIdx = do
