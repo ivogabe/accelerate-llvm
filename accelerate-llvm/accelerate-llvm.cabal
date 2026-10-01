@@ -46,7 +46,26 @@ extra-doc-files:
 -- Build configuration
 -- -------------------
 
+common lang
+  build-depends:        base >= 4.10 && < 5
+
+  default-language:     GHC2021
+
+  -- Used extensions that are in GHC2024 but not GHC2021 are enabled by default.
+  -- In addition, OverloadedStrings is enabled by default to ensure that every
+  -- module is compatible with it, to support use of GHCi with it enabled.
+  default-extensions:
+    GADTs
+    LambdaCase
+    OverloadedStrings
+    RoleAnnotations
+
+  ghc-options:
+    -Wall
+
 Library
+  import:               lang
+
   exposed-modules:
     -- Accelerate-LLVM middle-end
     Data.Array.Accelerate.LLVM.CodeGen.Arithmetic
@@ -105,7 +124,6 @@ Library
     Paths_accelerate_llvm
 
   build-depends:
-          base                          >= 4.10 && < 5
         , accelerate                    == 1.4.*
         , bytestring                    >= 0.10.4
         , constraints                   >= 0.9
@@ -164,17 +182,6 @@ Library
   hs-source-dirs:
         src
 
-  default-language:
-        GHC2021
-
-  -- Note OverloadedStrings is enabled by default to ensure that every module
-  -- is compatible with it, as many people configure GHCi to use it.
-  default-extensions:
-        GADTs
-        LambdaCase
-        OverloadedStrings
-        RoleAnnotations
-
   other-extensions:
         AllowAmbiguousTypes
         CPP
@@ -191,7 +198,6 @@ Library
 
   ghc-options:
         -O2
-        -Wall
         -fwarn-tabs
 
 -- Abridged from llvm-pretty.cabal

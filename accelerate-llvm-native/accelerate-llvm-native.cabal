@@ -49,7 +49,25 @@ custom-setup
 -- Build configuration
 -- -------------------
 
+common lang
+  build-depends:        base >= 4.10 && < 5
+
+  default-language:     GHC2021
+
+  -- Used extensions that are in GHC2024 but not GHC2021 are enabled by default.
+  -- In addition, OverloadedStrings is enabled by default to ensure that every
+  -- module is compatible with it, to support use of GHCi with it enabled.
+  default-extensions:
+    GADTs
+    LambdaCase
+    OverloadedStrings
+
+  ghc-options:
+    -Wall
+
 Library
+  import:               lang
+
   exposed-modules:
     Data.Array.Accelerate.LLVM.Native
     Data.Array.Accelerate.LLVM.Native.Plugin
@@ -98,7 +116,6 @@ Library
     Paths_accelerate_llvm_native
 
   build-depends:
-          base                          >= 4.10 && < 5
         , accelerate                    == 1.4.*
         , accelerate-llvm               == 1.4.*
         , bytestring                    >= 0.10.4
@@ -135,16 +152,6 @@ Library
   hs-source-dirs:
         src
 
-  default-language:
-        GHC2021
-
-  -- Note OverloadedStrings is enabled by default to ensure that every module
-  -- is compatible with it, as many people configure GHCi to use it.
-  default-extensions:
-        GADTs
-        LambdaCase
-        OverloadedStrings
-
   other-extensions:
         CPP
         MagicHash
@@ -157,7 +164,6 @@ Library
 
   ghc-options:
         -O2
-        -Wall
         -fwarn-tabs
 
   if os(windows)
