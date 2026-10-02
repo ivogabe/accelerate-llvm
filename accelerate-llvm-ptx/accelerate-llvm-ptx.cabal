@@ -142,6 +142,7 @@ Library
         , prettyprinter                 >= 1.7
         , primitive                     >= 0.7
         , process                       >= 1.6.18
+        , template-haskell              >= 2.19
         , text                          >= 2.0.2
         , unordered-containers          >= 0.2
 

@@ -15,7 +15,6 @@ module Data.Array.Accelerate.LLVM.Native.Embed (
 
 {-
 import Data.ByteString.Short.Char8                                  as S8
-import Data.ByteString.Short.Extra                                  as BS
 
 import Data.Array.Accelerate.Lifetime
 
@@ -30,12 +29,12 @@ import Control.Concurrent.Unique
 import Control.Monad
 import Data.Hashable
 import Foreign.Ptr
-import Data.Array.Accelerate.TH.Compat                              ( Q, CodeQ )
+import Language.Haskell.TH                                          ( Q, CodeQ )
+import qualified Language.Haskell.TH                                as TH
+import qualified Language.Haskell.TH.Syntax                         as TH
 import Numeric
 import System.FilePath                                              ( (<.>) )
 import System.IO.Unsafe
-import qualified Data.Array.Accelerate.TH.Compat                    as TH
-import qualified Language.Haskell.TH.Syntax                         as TH
 
 import Data.Maybe
 import qualified Data.Set                                           as Set
@@ -56,7 +55,7 @@ embed target (ObjectR uid nms !_ _) =
     listE xs = TH.unsafeCodeCoerce (TH.listE (map TH.unTypeCode xs))
 
     makeTable :: FilePath -> [ShortByteString] -> [CodeQ (ShortByteString, FunPtr ())]
-    makeTable objFile = map (\fn -> [|| ( $$(liftSBS fn), $$(makeFFI fn objFile) ) ||])
+    makeTable objFile = map (\fn -> [|| ( $$(TH.liftTyped fn), $$(makeFFI fn objFile) ) ||])
 
     makeFFI :: ShortByteString -> FilePath -> CodeQ (FunPtr ())
     makeFFI (S8.unpack -> fn) objFile = TH.bindCode go (TH.unsafeCodeCoerce . return)
@@ -82,12 +81,10 @@ embed target (ObjectR uid nms !_ _) =
     getObjectFile = do
       cachePath  <- TH.runIO (evalNative target (cacheOfUID uid))
       let objFile = cachePath <.> staticObjExt
-#if __GLASGOW_HASKELL__ >= 806
       objSet     <- fromMaybe Set.empty <$> TH.getQ
       unless (Set.member objFile objSet) $ do
         TH.addForeignFilePath TH.RawObject objFile
         TH.putQ (Set.insert objFile objSet)
-#endif
       return objFile
 
 -- The file extension for static libraries

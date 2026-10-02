@@ -37,7 +37,7 @@ import Control.Monad.Reader
 import Data.ByteString.Short.Char8                                  ( ShortByteString, unpack )
 import Formatting
 import Foreign.Ptr
-import Data.Array.Accelerate.TH.Compat
+import Language.Haskell.TH
 import qualified Data.ByteString                                    as B
 import qualified Data.ByteString.Unsafe                             as B
 import Prelude                                                      as P hiding ( lookup )

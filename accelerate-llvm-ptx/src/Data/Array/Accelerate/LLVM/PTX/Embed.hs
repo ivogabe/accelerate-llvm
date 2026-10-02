@@ -17,8 +17,6 @@ module Data.Array.Accelerate.LLVM.PTX.Embed (
 
 ) where
 
-import Data.ByteString.Short.Extra                                  as BS
-
 import Data.Array.Accelerate.Lifetime
 
 -- import Data.Array.Accelerate.LLVM.Compile
@@ -34,11 +32,12 @@ import qualified Foreign.CUDA.Driver                                as CUDA
 import Control.Monad.IO.Class                                       ( liftIO )
 import Foreign.Ptr
 import GHC.Ptr                                                      ( Ptr(..) )
-import Data.Array.Accelerate.TH.Compat                              ( CodeQ )
+import Language.Haskell.TH                                          ( CodeQ )
+import qualified Language.Haskell.TH                                as TH
+import qualified Language.Haskell.TH.Syntax                         as TH
 import System.IO.Unsafe
 import qualified Data.ByteString                                    as B
 import qualified Data.ByteString.Unsafe                             as B
-import qualified Data.Array.Accelerate.TH.Compat                    as TH
 
 
 instance Embed PTX where
@@ -74,8 +73,8 @@ embed target (ObjectR _ cfg objFname) = do
     linkQ :: TH.Name -> (Kernel, CodeQ (Int -> Int)) -> CodeQ Kernel
     linkQ jit (Kernel name _ dsmem cta _, grid) =
       [|| unsafePerformIO $ do
-            f <- CUDA.getFun (CUDA.jitModule $$(TH.unsafeCodeCoerce (TH.varE jit))) $$(liftSBS name)
-            return $ Kernel $$(liftSBS name) f dsmem cta $$grid
+            f <- CUDA.getFun (CUDA.jitModule $$(TH.unsafeCodeCoerce (TH.varE jit))) $$(TH.liftTyped name)
+            return $ Kernel $$(TH.liftTyped name) f dsmem cta $$grid
        ||]
 
     listE :: [CodeQ a] -> CodeQ [a]

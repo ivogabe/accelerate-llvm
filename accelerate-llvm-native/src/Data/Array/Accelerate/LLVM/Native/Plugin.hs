@@ -27,7 +27,6 @@ import Data.IORef
 import Data.List                                                    ( nub )
 import qualified Data.Map                                           as Map
 
-#if __GLASGOW_HASKELL__ >= 902
 import GHC.Driver.Backend
 #if __GLASGOW_HASKELL__ < 910
 import GHC.Linker
@@ -35,14 +34,6 @@ import GHC.Linker
 import GHC.Linker.Loader                                            ( loadCmdLineLibs )
 import GHC.Plugins
 import GHC.Runtime.Interpreter
-#elif __GLASGOW_HASKELL__ >= 900
-import GHC.Plugins
-import GHC.Runtime.Linker
-#else
-import GhcPlugins
-import Linker
-import SysTools
-#endif
 
 
 -- | This GHC plugin is required to support ahead-of-time compilation for the
@@ -62,9 +53,7 @@ import SysTools
 plugin :: Plugin
 plugin = defaultPlugin
   { installCoreToDos = install
-#if __GLASGOW_HASKELL__ >= 806
   , pluginRecompile  = purePlugin
-#endif
   }
 
 install :: HasCallStack => [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
@@ -94,71 +83,22 @@ pass guts = do
   hscEnv   <- getHscEnv
   dynFlags <- getDynFlags
 
-#if __GLASGOW_HASKELL__ >= 902
   let target = backend dynFlags
-#else
-  let target = hscTarget dynFlags
-#endif
 
   when (backendGeneratesCode target) $
     if backendWritesFiles target
-      then do
+      then
         -- The compiler will write files (interface files and object code). This
         -- is true of "real" backends, i.e. not the interpreter.
-#if __GLASGOW_HASKELL__ < 806
-        -- Because of separate compilation, we will only encounter the annotation
-        -- pragmas on files which have changed between invocations. This applies to
-        -- both @ghc --make@ as well as the separate compile/link phases of building
-        -- with @cabal@ (and @stack@). Note that whenever _any_ file is updated we
-        -- must make sure that the linker options contains the complete list of
-        -- objects required to build the entire project.
-        --
-
-        -- Read the object file index and update (we may have added or removed
-        -- objects for the given module)
-        --
-        let buildInfo = mkBuildInfoFileName (objectMapPath dynFlags)
-        abi <- readBuildInfo buildInfo
-        --
-        let abi'      = if null paths
-                          then Map.delete this       abi
-                          else Map.insert this paths abi
-            allPaths  = nub (concat (Map.elems abi'))
-            allObjs   = map optionOfPath allPaths
-        --
-        writeBuildInfo buildInfo abi'
-
-        -- Make sure the linker flags are up-to-date.
-        --
-        unless (isNoLink (ghcLink dynFlags)) $ do
-          linker_info <- getLinkerInfo dynFlags
-          writeIORef (rtldInfo dynFlags)
-            $ Just
-            $ case linker_info of
-                GnuLD     opts -> GnuLD     (nub (opts ++ allObjs))
-                GnuGold   opts -> GnuGold   (nub (opts ++ allObjs))
-                DarwinLD  opts -> DarwinLD  (nub (opts ++ allObjs))
-                SolarisLD opts -> SolarisLD (nub (opts ++ allObjs))
-                AixLD     opts -> AixLD     (nub (opts ++ allObjs))
-                LlvmLLD   opts -> LlvmLLD   (nub (opts ++ allObjs))
-                UnknownLD      -> UnknownLD  -- no linking performed?
-#endif
         return ()
 
       else
         -- We are in interactive mode (ghci)
-        --
         unless (null paths) . liftIO $ do
           let opts  = ldInputs dynFlags
               objs  = map optionOfPath paths
-          --
-#if __GLASGOW_HASKELL__ >= 902
           loadCmdLineLibs (hscInterp hscEnv)
                  $ hscEnv { hsc_dflags = dynFlags { ldInputs = opts ++ objs }}
-#else
-          linkCmdLineLibs
-                 $ hscEnv { hsc_dflags = dynFlags { ldInputs = opts ++ objs }}
-#endif
   return guts
 
 #if __GLASGOW_HASKELL__ < 906
@@ -178,11 +118,7 @@ objectPaths guts (Rec bs)     = concat <$> mapM (objectAnns guts . fst) bs
 objectAnns :: ModGuts -> CoreBndr -> CoreM [FilePath]
 objectAnns guts bndr = do
   anns  <- getAnnotations deserializeWithData guts
-#if __GLASGOW_HASKELL__ >= 900
   return [ path | Object path <- lookupWithDefaultUFM (snd anns) [] (varName bndr) ]
-#else
-  return [ path | Object path <- lookupWithDefaultUFM anns       [] (varUnique bndr) ]
-#endif
 
 objectMapPath :: DynFlags -> FilePath
 objectMapPath DynFlags{..}

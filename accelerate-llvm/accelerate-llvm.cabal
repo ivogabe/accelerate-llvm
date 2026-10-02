@@ -120,9 +120,7 @@ Library
     LLVM.AST.Type.Terminator
 
     -- Extras
-    Data.Array.Accelerate.TH.Compat
     Data.ByteString.Short.Char8
-    Data.ByteString.Short.Extra
 
   other-modules:
     Paths_accelerate_llvm
@@ -146,7 +144,6 @@ Library
         , mtl                           >= 2.2.2
         , primitive                     >= 0.6.4
         , process                       >= 1.6.18
-        , template-haskell              >= 2.19
         , text                          >= 2.0.2
         , unordered-containers          >= 0.2
 
