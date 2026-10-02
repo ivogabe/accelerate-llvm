@@ -1,8 +1,8 @@
-cabal-version:          2.2
+cabal-version:          3.0
 
 name:                   accelerate-llvm-ptx
 version:                1.4.0.0
-tested-with:            GHC >= 9.4
+tested-with:            GHC >= 9.4.8
 build-type:             Simple
 
 synopsis:               Accelerate backend for NVIDIA GPUs
@@ -11,15 +11,15 @@ description:
     generates LLVM IR targeting CUDA capable GPUs. For further information,
     refer to the main <http://hackage.haskell.org/package/accelerate accelerate>
     package.
-    .
+
     [/Dependencies/]
-    .
+
     Haskell dependencies are available from Hackage. The following external
     dependencies are also required:
-    .
+
     * <https://clang.llvm.org/ clang> (not used to compile C code, but to compile generated LLVM IR via a mostly LLVM-version-independent interface)
     * <https://developer.nvidia.com/cuda-downloads CUDA>
-    .
+
     For installation instructions, see the <https://github.com/AccelerateHS/accelerate-llvm#readme README>.
 
 license:                BSD-3-Clause
@@ -37,7 +37,30 @@ extra-doc-files:
 -- Build configuration
 -- -------------------
 
+common lang
+  build-depends:        base >= 4.17.2.1 && < 5
+
+  default-language:     GHC2021
+
+  -- Used extensions that are in GHC2024 but not GHC2021 are enabled by default.
+  -- In addition, OverloadedStrings is enabled by default to ensure that every
+  -- module is compatible with it, to support use of GHCi with it enabled.
+  default-extensions:
+    DataKinds
+    GADTs
+    LambdaCase
+    OverloadedStrings
+
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wno-unticked-promoted-constructors
+    -Wunused-packages
+
 Library
+  import:               lang
+
   exposed-modules:
     Data.Array.Accelerate.LLVM.PTX
     Data.Array.Accelerate.LLVM.PTX.Foreign
@@ -98,53 +121,33 @@ Library
     Paths_accelerate_llvm_ptx
 
   build-depends:
-          base                          >= 4.10 && < 5
         , accelerate                    == 1.4.*
         , accelerate-llvm               == 1.4.*
-        , bytestring                    >= 0.10.4
-        , containers                    >= 0.5 && < 0.9
+        , bytestring                    >= 0.11.5.3
+        , containers                    >= 0.6.7 && < 0.9
         , cuda                          >= 0.10
-        , deepseq                       >= 1.3
-        , directory                     >= 1.0
-        , dlist                         >= 0.6
-        , file-embed                    >= 0.0.8
-        , filepath                      >= 1.0
+        , deepseq                       >= 1.4.8
+        , directory                     >= 1.3.7.1
+        -- , dlist                         >= 0.6
+        , filepath                      >= 1.4.2.2
         , formatting                    >= 7.0
+        -- , ghc-heap
         , hashable                      >= 1.2
         -- , llvm-pretty                   >= 0.12
         , microlens                     >= 0.4
         , microlens-mtl                 >= 0.2
-        , mtl                           >= 2.2.1
+        , mtl                           >= 2.2.2
           -- only used to render llvm-pretty output
-        , pretty
+        , pretty                        >= 1.1.3.6
         , prettyprinter                 >= 1.7
         , primitive                     >= 0.7
-        , process                       >= 1.4.3
-        , template-haskell
-        , text                          >= 1.2
+        , process                       >= 1.6.18
+        , template-haskell              >= 2.19
+        , text                          >= 2.0.2
         , unordered-containers          >= 0.2
-
-  if impl(ghc >= 8.6)
-    build-depends:
-          ghc-heap
-  else
-    build-depends:
-          ghc
-        , ghci
 
   hs-source-dirs:
         src
-
-  default-language:
-        GHC2021
-
-  -- Note OverloadedStrings is enabled by default to ensure that every module
-  -- is compatible with it, as many people configure GHCi to use it.
-  default-extensions:
-        DataKinds
-        GADTs
-        LambdaCase
-        OverloadedStrings
 
   other-extensions:
         MagicHash
@@ -157,7 +160,6 @@ Library
 
   ghc-options:
         -O2
-        -Wall
         -fwarn-tabs
 
 
@@ -169,7 +171,7 @@ test-suite nofib-llvm-ptx
     Data.Array.Accelerate.LLVM.PTX.NoFib.RunQ
 
   build-depends:
-          base                          >= 4.10
+          base                          >= 4.17.2.1
         , accelerate
         , accelerate-llvm-ptx
         , tasty

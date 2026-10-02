@@ -12,7 +12,7 @@
 module Data.Array.Accelerate.LLVM.Native.Link.Object
   where
 
-import Data.List
+import Data.List                                                    ( intercalate )
 import Foreign.Ptr
 import Formatting
 

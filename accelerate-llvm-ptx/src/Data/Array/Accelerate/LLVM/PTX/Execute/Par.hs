@@ -29,9 +29,10 @@ import qualified Foreign.CUDA.Driver                                as CUDA
 
 import Foreign.ForeignPtr
 
+import Control.Monad (forM_, void)
 import Control.Monad.Reader
-import Control.Monad.State
---import Control.Monad (forM_, void)
+import Control.Monad.State (MonadState, StateT)
+import qualified Control.Monad.State as State
 import Control.Concurrent
 
 newtype Par a = Par { runPar :: ReaderT Stream (StateT [CleanUp] (LLVM PTX)) a }
@@ -49,7 +50,7 @@ data CleanUp where
 evalPar :: Par a -> LLVM PTX a
 evalPar p = do
   stream <- Stream.create
-  result <- evalStateT (runReaderT (runPar (p <* block)) stream) []
+  result <- State.evalStateT (runReaderT (runPar (p <* block)) stream) []
   Stream.destroy stream
   return result
 
@@ -72,20 +73,20 @@ spawnPar spawned = do
 
 cleanUpTouchLifetime :: Lifetime t -> Par ()
 cleanUpTouchLifetime lifetime =
-  modify' (TouchLifetime lifetime :)
+  State.modify' (TouchLifetime lifetime :)
 
 cleanUpTouchForeignPtr :: ForeignPtr t -> Par ()
 cleanUpTouchForeignPtr ptr =
-  modify' (TouchForeignPtr ptr :)
+  State.modify' (TouchForeignPtr ptr :)
 
 cleanUpUnregisterHostPtr :: CUDA.HostPtr t -> Par ()
 cleanUpUnregisterHostPtr hostPtr =
-  modify' (Unregister hostPtr :)
+  State.modify' (Unregister hostPtr :)
 
 runCleanUp :: Par ()
 runCleanUp = do
-  list <- get
-  put []
+  list <- State.get
+  State.put []
   -- Run oldest clean up instruction first
   liftIO $ forM_ (reverse list) $ \case
     TouchLifetime lifetime -> touchLifetime lifetime
