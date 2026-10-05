@@ -320,6 +320,7 @@ struct Workers* accelerate_start_workers(uint64_t thread_count) {
     perror("Accelerate runtime: could not initialize pthread cond var.");                                        
     exit(1);                                                                    
   }
+  atomic_store_explicit(&workers->scheduler.parker.any_sleeping, 0, memory_order_relaxed);
 
   workers->scheduler.activities = calloc(thread_count, sizeof(uintptr_t));
 
