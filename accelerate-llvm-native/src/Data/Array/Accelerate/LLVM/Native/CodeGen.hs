@@ -534,6 +534,30 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
     memoryTp = TupRsingle scalarTypeWord8 `TupRpair` tp
     ArgArray _ (ArrayR _ tp) _ _ = input
 
+-- Implements the single-pass chained scan with decoupled-lookback
+-- (https://research.nvidia.com/sites/default/files/publications/nvr-2016-002.pdf)
+-- Compared to the paper, we made two major changes:
+-- 1. The scan is modified to work on CPUs, and features a specialized
+--    single-threaded mode that is active as long as only one thread works on
+--    the scan. It switches to the parallel mode dynamically.
+--    (https://dl.acm.org/doi/pdf/10.1145/3649169.3649248)
+-- 2. The array of descriptors (state per tile) is stored as a circular buffer.
+--    This required additional synchronisations, as detailed below.
+--
+-- We want to make the following further improvements to these scans:
+-- 1. Interleave multiple tiles on a single thread,
+--    to hide the latency of blocking in the look-back.
+--    Note that syncDistance (see below in the code) needs to be updated when
+--    implementing this.
+--    (https://studenttheses.uu.nl/items/3ef19878-f012-49c9-a86d-df79e1bd7c2d)
+-- 2. (Need to re-evaluate if this is beneficial after implementing interleaved
+--    scans): Optimize look-back for segmented scans, by using the boundaries
+--    of segments
+--    (https://studenttheses.uu.nl/server/api/core/bitstreams/c0289d3a-da20-4e79-bc90-f37b462f36cd/content)
+-- 3. SIMD vectorization (general improvement for code generation)
+-- 4. Reduce number of tile loops when scans are horizontally fused.
+--    Fused scans add additional tile loops, but this is only necessary when
+--    they are vertically or diagonally fused.
 parCodeGenScan
   :: forall env idxEnv sh e.
      Bool -- Whether the loop is descending
@@ -580,6 +604,8 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
       _ <- instr' $ Store NonVolatile flagPtr (integral TypeWord8 0xFF) Nothing
       return ()
 
+    -- Tile i starts look-back at index i, and writes result to index i+1.
+    -- When available, the seed is thus written to index 0 here.
     case seed of
       Nothing -> return ()
       Just s -> do
@@ -726,7 +752,12 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         syncIndex <-
           A.sub numType (envsTileIndex envs) syncDistance
             >>= A.add numType (A.liftInt 1)
-        A.when (A.gte singleType syncIndex $ A.liftInt 0) $ do
+        -- Note: we check for 'greater than zero' instead of 'greater than or
+        -- equal to zero'.
+        -- Index zero is initialized with the seed (if a seed is available),
+        -- and ignored otherwise. The first tile writes to index 1, since tile
+        -- i writes to descriptor i+1 (and starts look-back at index i).
+        A.when (A.gt singleType syncIndex $ A.liftInt 0) $ do
           _ <- Loop.while [] TupRunit
             (\_ -> do
               (prevDescIdx, prevTag) <- descriptorIdxTag syncIndex
