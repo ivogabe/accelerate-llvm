@@ -32,7 +32,7 @@ import LLVM.AST.Type.Name
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LLVM
 import Data.Array.Accelerate.LLVM.Internal.LLVMPretty               ( AddrSpace(..), defaultAddrSpace )
 
-import Data.List
+import Data.List                                                    ( intercalate )
 import Data.Text.Lazy.Builder
 import Foreign.Ptr
 import Foreign.Storable

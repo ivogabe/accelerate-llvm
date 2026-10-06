@@ -637,7 +637,7 @@ staticSharedMem tp n = do
         , LP.gaConstant = False }
     , LP.globalType = downcast arrayTp
     , LP.globalValue = Just LP.ValUndef
-    , LP.globalAlign = Just (4 `P.max` P.fromIntegral (P.snd $ primSizeAlignment tp'))
+    , LP.globalAlign = Just (4 `P.max` P.snd (primSizeAlignment tp'))
     , LP.globalMetadata = mempty
     }
 

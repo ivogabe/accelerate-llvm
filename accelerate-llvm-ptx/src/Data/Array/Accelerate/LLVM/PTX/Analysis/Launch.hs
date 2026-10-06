@@ -18,7 +18,7 @@ module Data.Array.Accelerate.LLVM.PTX.Analysis.Launch (
 ) where
 
 import Foreign.CUDA.Analysis                            as CUDA
-import Data.Array.Accelerate.TH.Compat
+import Language.Haskell.TH
 
 
 -- | Given information about the resource usage of the compiled kernel,

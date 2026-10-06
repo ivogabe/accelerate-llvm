@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Plugin.BuildInfo
@@ -13,13 +12,8 @@
 module Data.Array.Accelerate.LLVM.Native.Plugin.BuildInfo
   where
 
-#if __GLASGOW_HASKELL__ >= 900
 import GHC.Unit
 import GHC.Utils.Binary
-#else
-import Binary
-import Module
-#endif
 
 import Data.Map                                                     ( Map )
 import System.Directory

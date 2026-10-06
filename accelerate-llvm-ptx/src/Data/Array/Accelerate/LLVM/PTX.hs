@@ -131,8 +131,8 @@ import Control.Exception
 import Control.Monad.Trans
 import Data.Maybe
 import Formatting                                                   ( shown )
+import qualified Language.Haskell.TH                                as TH
 import System.IO.Unsafe
-import qualified Data.Array.Accelerate.TH.Compat                    as TH
 
 
 -- Accelerate: LLVM backend for NVIDIA GPUs

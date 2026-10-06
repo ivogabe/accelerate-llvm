@@ -88,7 +88,7 @@ import Data.Array.Accelerate.LLVM.Native.Debug                      as Debug
 
 import Control.Monad.Trans
 import System.IO.Unsafe
-import qualified Data.Array.Accelerate.TH.Compat                    as TH
+import qualified Language.Haskell.TH                                as TH
 import qualified Language.Haskell.TH.Syntax                         as TH
 
 import GHC.Stack
@@ -394,10 +394,8 @@ runQAsyncWith f =
 
 runQ' :: forall f. (Afunction f, HasCallStack) => TH.ExpQ -> TH.ExpQ -> f -> TH.ExpQ
 runQ' using target f = do
-#if MIN_VERSION_template_haskell(2,13,0)
   -- The plugin ensures that objects are loaded correctly into GHCi
   TH.addCorePlugin "Data.Array.Accelerate.LLVM.Native.Plugin"
-#endif
 
   afun  <- let acc = convertAfun f
             in TH.runIO $ do

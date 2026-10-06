@@ -13,7 +13,7 @@ module Data.Array.Accelerate.LLVM.PTX.Analysis.Device
 
 import Control.Exception
 import Data.Function
-import Data.List
+import Data.List                                                    ( sortBy )
 import Data.Ord
 import Foreign.CUDA.Analysis.Device
 import Foreign.CUDA.Driver.Context                                  ( Context )

@@ -39,7 +39,9 @@ import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty.PP  as LP
 import qualified Text.PrettyPrint                                   as Pretty
 
 import Control.DeepSeq
-import Control.Monad.Reader
+import Control.Monad                                                ( when )
+import Control.Monad.IO.Class                                       ( MonadIO(liftIO) )
+import Control.Monad.Reader                                         ( asks )
 import Data.ByteString.Short                                        ( ShortByteString )
 import Data.List                                                    ( intercalate )
 import qualified Data.List.NonEmpty                                 as NE

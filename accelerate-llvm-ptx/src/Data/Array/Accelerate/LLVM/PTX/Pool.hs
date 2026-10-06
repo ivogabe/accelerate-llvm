@@ -179,14 +179,5 @@ put (Pool ref) a =
     case it of
       Just (b :| bs) -> putMVar ref (a :| b : bs)
       Nothing        -> putMVar ref (a :| [])
-
-
-#if __GLASGOW_HASKELL__ < 800
--- | Non-empty (and non-strict) list type.
---
-infixr 5 :|
-data NonEmpty a = a :| [a]
-  deriving ( Eq, Ord, Show, Read )
-#endif
 --}
 
