@@ -59,14 +59,16 @@ bool accelerate_queue_enqueue(Queue *queue, struct Task task);
 struct Task accelerate_queue_dequeue(Queue *queue);
 
 struct ThreadParker {
-  // The lock to take before letting a thread wait, or waking all threads.
-  pthread_mutex_t lock;
-  pthread_cond_t cond_var;
-  // Should be modified with atomic instructions.
-  // Contains 0 (false) or 1 (true).
-  // Denotes whether any thread might be sleeping.
-  _Atomic unsigned int any_sleeping;
+  // See parker.cpp
+  _Atomic uint64_t state;
+  _Atomic uint64_t any_sleeping;
+  _Atomic uint64_t count_sleeping;
 };
+// Defined in parker.h
+uint64_t accelerate_parker_maybe_park(struct ThreadParker *parker);
+void accelerate_parker_confirm_park(struct ThreadParker *parker, uint64_t value);
+void accelerate_parker_cancel_park(struct ThreadParker *parker);
+void accelerate_parker_wake_one(struct ThreadParker *parker);
 void accelerate_parker_wake_all(struct ThreadParker *parker);
 
 struct Scheduler {

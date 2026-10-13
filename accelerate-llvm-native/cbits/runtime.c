@@ -23,36 +23,6 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .hs_try_putmvar = hs_try_putmvar
 };
 
-static void accelerate_parker_maybe_park(struct ThreadParker *parker) {
-  pthread_mutex_lock(&parker->lock);
-  atomic_store_explicit(&parker->any_sleeping, 1, memory_order_release);
-}
-static void accelerate_parker_confirm_park(struct ThreadParker *parker) {
-  pthread_cond_wait(&parker->cond_var, &parker->lock);
-  // Note that spurious wakes may happen, but that's not a big problem.
-  // We'll just check the queue a few times then, and then park again.
-  pthread_mutex_unlock(&parker->lock);
-}
-static void accelerate_parker_cancel_park(struct ThreadParker *parker) {
-  pthread_mutex_unlock(&parker->lock);
-  // Note: we cannot change parker->any_sleeping here, as that may prevent other threads from waking up.
-}
-void accelerate_parker_wake_all(struct ThreadParker *parker) {
-  pthread_mutex_lock(&parker->lock);
-  // TODO: We need to perform this check inside the critical section to avoid
-  // a race condition. However, this does increase lock contention, so ideally
-  // we should find a better solution for this. For now, this at least makes it
-  // sound.
-  if (atomic_load_explicit(&parker->any_sleeping, memory_order_acquire) == 0) {
-    // No thread is sleeping
-    pthread_mutex_unlock(&parker->lock);
-    return;
-  }
-  atomic_store_explicit(&parker->any_sleeping, 0, memory_order_release);
-  pthread_cond_broadcast(&parker->cond_var);
-  pthread_mutex_unlock(&parker->lock);
-}
-
 // Claims an entry from Workers.work_per_thread_array.
 // Note that this claims one array, to be used for scheduling within a kernel.
 // It does not claim the actual work within that kernel.
@@ -120,9 +90,10 @@ void* accelerate_worker(void *data_packed) {
   struct Task task;
   task.program = NULL;
   task.location = 0;
+  uint64_t park_value = 0;
   while (true) {
     if (attempts_remaining == 0) {
-      accelerate_parker_maybe_park(&workers->scheduler.parker);
+      park_value = accelerate_parker_maybe_park(&workers->scheduler.parker);
     }
     if (task.program == NULL) {
       task = accelerate_dequeue(workers);
@@ -297,7 +268,7 @@ void* accelerate_worker(void *data_packed) {
 
     // No task or data-parallel activity available.
     if (attempts_remaining == 0) {
-      accelerate_parker_confirm_park(&workers->scheduler.parker);
+      accelerate_parker_confirm_park(&workers->scheduler.parker, park_value);
       attempts_remaining = ATTEMPTS;
     } else {
       if (attempts_remaining < ATTEMPTS / 2) {
@@ -312,15 +283,9 @@ struct Workers* accelerate_start_workers(uint64_t thread_count) {
   struct Workers *workers = malloc(sizeof(struct Workers));
 
   workers->scheduler.queue = accelerate_queue_new();
-  if (pthread_mutex_init(&workers->scheduler.parker.lock, NULL) != 0) {
-    perror("Accelerate runtime: could not initialize mutex.");                                        
-    exit(1);      
-  }
-  if (pthread_cond_init(&workers->scheduler.parker.cond_var, NULL) != 0) {                                    
-    perror("Accelerate runtime: could not initialize pthread cond var.");                                        
-    exit(1);                                                                    
-  }
+  atomic_store_explicit(&workers->scheduler.parker.state, 0, memory_order_relaxed);
   atomic_store_explicit(&workers->scheduler.parker.any_sleeping, 0, memory_order_relaxed);
+  atomic_store_explicit(&workers->scheduler.parker.count_sleeping, 0, memory_order_relaxed);
 
   workers->scheduler.activities = calloc(thread_count, sizeof(uintptr_t));
 

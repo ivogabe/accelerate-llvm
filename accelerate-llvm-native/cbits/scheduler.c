@@ -13,6 +13,8 @@ void accelerate_schedule_after(struct Workers *workers, struct Program *program,
 // this function will schedule this program after the given signal
 // and retain (increment the reference count of) the program.
 char accelerate_schedule_after_or(struct Workers *workers, struct Program *program, uint32_t location, struct Signal *signal, struct SignalWaiter *waiter) {
+  (void)workers; // This argument is currently unused, but might be needed in the future if we change the exact scheduling strategies.
+
   // Check if signal is already resolved.
   size_t current = atomic_load_explicit(&signal->state, memory_order_acquire);
   if (current == 1) {
@@ -64,7 +66,7 @@ void accelerate_schedule_owned(struct Workers *workers, struct Program *program,
   if (!accelerate_queue_enqueue(workers->scheduler.queue, task)) {
     printf("Scheduling a task failed. Out of memory?\n");
   }
-  accelerate_parker_wake_all(&workers->scheduler.parker);
+  accelerate_parker_wake_one(&workers->scheduler.parker);
 }
 // Schedules a program at a given location for execution.
 void accelerate_schedule(struct Workers *workers, struct Program *program, uint32_t location) {

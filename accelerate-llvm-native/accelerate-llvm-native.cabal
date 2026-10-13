@@ -181,9 +181,10 @@ Library
 
   cxx-sources:
     cbits/queue.cpp
+    cbits/parker.cpp
 
   cc-options: -O2 -Wall -Wextra
-  cxx-options: -O2 -Wall -Wextra -std=c++14
+  cxx-options: -O2 -Wall -Wextra -std=c++20
 
 test-suite nofib-llvm-native
   type:                 exitcode-stdio-1.0
