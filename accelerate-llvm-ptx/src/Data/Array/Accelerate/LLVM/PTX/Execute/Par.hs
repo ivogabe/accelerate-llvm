@@ -29,10 +29,13 @@ import qualified Foreign.CUDA.Driver                                as CUDA
 
 import Foreign.ForeignPtr
 
-import Control.Monad (forM_, void)
-import Control.Monad.Reader
-import Control.Monad.State (MonadState, StateT)
-import qualified Control.Monad.State as State
+import Control.Monad                                                ( forM_, void )
+import Control.Monad.IO.Class                                       ( MonadIO(liftIO) )
+import Control.Monad.Reader                                         ( MonadReader, ReaderT )
+import qualified Control.Monad.Reader                               as Reader
+import Control.Monad.State                                          ( MonadState, StateT )
+import qualified Control.Monad.State                                as State
+import Control.Monad.Trans                                          ( MonadTrans(lift) )
 import Control.Concurrent
 
 newtype Par a = Par { runPar :: ReaderT Stream (StateT [CleanUp] (LLVM PTX)) a }
@@ -50,7 +53,7 @@ data CleanUp where
 evalPar :: Par a -> LLVM PTX a
 evalPar p = do
   stream <- Stream.create
-  result <- State.evalStateT (runReaderT (runPar (p <* block)) stream) []
+  result <- State.evalStateT (Reader.runReaderT (runPar (p <* block)) stream) []
   Stream.destroy stream
   return result
 
@@ -62,11 +65,11 @@ liftPar = Par . lift . lift
 
 spawnPar :: Par () -> Par ()
 spawnPar spawned = do
-  target <- liftPar $ asks llvmTarget
-  stream <- asks ptxStream
+  target <- liftPar $ Reader.asks llvmTarget
+  stream <- Reader.asks ptxStream
   event <- liftPar $ Event.waypoint stream
   _ <- liftIO $ forkIO $ evalPTX target $ evalPar $ do
-    spawnedStream <- asks ptxStream
+    spawnedStream <- Reader.asks ptxStream
     liftIO $ Event.after event spawnedStream
     spawned
   return ()
@@ -97,7 +100,7 @@ runCleanUp = do
 -- operations submitted to the GPU, from this Par instance, have been completed.
 block :: Par ()
 block = do
-  stream <- ask
+  stream <- Reader.ask
   liftIO $ CUDA.block stream
   runCleanUp
 
