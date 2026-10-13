@@ -1993,7 +1993,9 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shr sh buffer) = do
       printString "]\n"
     ShapeRsnoc ShapeRz -> do
       printString "(Z :. "
-      putInt $ head sizes
+      putInt $ case sizes of
+        s:_ -> s
+        []  -> error "TODO WALL: NON-EXHAUSTIVE PATTERN MATCH"
       printString ") ["
 
       A.when (A.neq singleType sz (A.liftInt 0)) $ do

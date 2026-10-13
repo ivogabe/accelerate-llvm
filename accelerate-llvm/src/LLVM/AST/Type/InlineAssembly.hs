@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : LLVM.AST.Type.InlineAssembly
@@ -33,7 +34,11 @@ import Data.Data
 data Dialect
   = ATTDialect
   | IntelDialect
-  deriving (Eq, Read, Show, Typeable, Data)
+  deriving (Eq, Read, Show, Data)
+
+#if __GLASGOW_HASKELL__ < 912
+deriving instance Typeable Dialect
+#endif
 
 -- | The 'call' instruction might be a label or inline assembly
 --

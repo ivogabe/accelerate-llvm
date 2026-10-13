@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Foreign
@@ -73,6 +74,7 @@ data ForeignExp f where
              -> IRFun1 Native (x -> y)
              -> ForeignExp (x -> y)
 
+#if __GLASGOW_HASKELL__ < 912
 deriving instance Typeable ForeignAcc
 deriving instance Typeable ForeignExp
-
+#endif
