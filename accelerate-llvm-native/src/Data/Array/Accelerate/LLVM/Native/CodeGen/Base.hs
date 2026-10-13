@@ -104,3 +104,5 @@ bindHeaderEnv env =
     kernelMemTp = ArrayPrimType 0 primType
     arg = LocalReference (PrimType argTp) "arg"
 
+getThreadCount :: CodeGen Native (Operand Word32)
+getThreadCount = return $ LocalReference type' "thread.count"

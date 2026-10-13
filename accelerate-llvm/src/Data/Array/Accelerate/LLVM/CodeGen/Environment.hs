@@ -75,6 +75,8 @@ data Envs env idxEnv = Envs
   { envsLoopDepth :: LoopDepth
   -- The number of nested loops
   , envsLoopCount :: LoopDepth
+  -- For each loop nest that uses tiling, the tile size and number of tiles at that depth.
+  , envsTileSizeCount :: [(Int, Operands Int)]
   -- The valuation of the ground environment.
   -- This is a partial environment as some local (fused away) buffers are only
   -- available in deeper loop depths.
@@ -145,6 +147,7 @@ initEnv gamma shr idxLHS iterSize iterDir localsR localLHS
     ( Envs
       { envsLoopDepth = 0
       , envsLoopCount = rank shr
+      , envsTileSizeCount = []
       , envsGround = partialEnvSkipLHS localLHS $ envToPartial gamma
       , envsLocal = partialEnvToList $ partialEnvPushLHS localLHS localsR PEnd
       , envsIdx = PEnd
