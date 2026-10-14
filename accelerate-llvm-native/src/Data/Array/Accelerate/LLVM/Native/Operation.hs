@@ -299,7 +299,7 @@ instance MakesILP NativeOp where
     let bsIn      = getLabelArrDeps lIn
     wsTargets <- use $ allWriters bsTargets
     wsIn      <- use $ allWriters bsIn
-    fusionILP %= (wsTargets <> wsIn) `allBefore` c
+    fusionILP %= wsTargets `allBefore` c
     fusionILP.constraints %= (<> [SameFoldSize c])
     fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
                          <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsIn))

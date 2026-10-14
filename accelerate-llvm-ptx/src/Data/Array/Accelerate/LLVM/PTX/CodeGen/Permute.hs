@@ -9,16 +9,12 @@
 --
 
 module Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (
-  atomically
+  lockArraySize, atomically
 ) where
 
-import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Representation.Type
-import Data.Array.Accelerate.AST.Operation (Mut, Arg (ArgArray), Modifier (Mut))
-
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Constant
-import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
@@ -34,9 +30,6 @@ import LLVM.AST.Type.GetElementPtr
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
-import Foreign.CUDA.Analysis
-
-import Control.Monad.Reader                                         ( asks )
 import Prelude
 
 {-
@@ -239,26 +232,9 @@ mkPermute_mutex uid aenv (ArrayR shr tp) shr' combine project marr =
     return_
 -}
 
--- Atomically execute the critical section only when the lock at the given
--- array indexed is obtained.
---
-atomically
-  :: Envs env idxEnv
-  -> Arg env (Mut sh' Word32)
-  -> Operands Int
-  -> CodeGen PTX ()
-  -> CodeGen PTX ()
-atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
-  | (IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
-  = do
-    dev <- liftCodeGen $ asks ptxDeviceProperties
-    if computeCapability dev >= Compute 7 0
-      then atomically_thread bufptr i action
-      else atomically_warp   bufptr i action
-      -- TODO: We should remove atomically_warp as we now require compute capability >= 7.0.
-      -- Keeping the code for now as we should use it as inspiration for new backends, that
-      -- do still execute in lockstep.
-  | otherwise = internalError "Expected IRBufferScopeArray"
+-- Number of locks in the array of locks.
+lockArraySize :: Int
+lockArraySize = 64 * 1024 * 8
 
 -- Atomically execute the critical section only when the lock at the given
 -- array index is obtained. The thread spins waiting for the lock to be
@@ -274,18 +250,25 @@ atomically envs (ArgArray Mut _ _ (TupRsingle bufferVar)) i action
 -- > }
 --
 -- Requires independent thread scheduling features of SM7+.
+-- Previous versions of Accelerate also had a variant for older GPUs.
+-- These older GPUs use lockstep execution
+-- and the current implementation of atomically would cause deadlocks if
+-- multiple threads in the same warp try to acquire the same lock. We do not
+-- support these GPUs (for other reasons).
 --
-atomically_thread
-    :: Operand (Ptr Word32)
-    -> Operands Int
+atomically
+    :: Operands Word64
     -> CodeGen PTX a
     -> CodeGen PTX a
-atomically_thread barriers i action = do
+atomically idx action = do
+  byteIdx <- A.quot TypeWord64 idx $ A.liftWord64 8
+  bitIdx <- A.rem TypeWord64 idx $ A.liftWord64 8
+  bitIdx' <- A.fromIntegral TypeWord64 (IntegralNumType TypeInt) bitIdx
+
   let
-      lock    = integral integralType 1
-      unlock  = integral integralType 0
-      unlock' = ir TypeWord32 unlock
-      i32     = TupRsingle scalarTypeInt32
+      i32 = TupRsingle scalarTypeInt32
+      bufptr = LocalReference (PrimType (PtrPrimType (primType @Word8) defaultAddrSpace)) "locks_array"
+
   --
   entry <- newBlock "spinlock.entry"
   sleep <- newBlock "spinlock.backoff"
@@ -295,15 +278,22 @@ atomically_thread barriers i action = do
   exit  <- newBlock "spinlock.exit"
   ns    <- fresh i32
 
-  addr  <- instr' $ GetElementPtr $ GEP1 barriers (op integralType i)
+  addr  <- instr' $ GetElementPtr $ GEP1 bufptr $ op integralType byteIdx
   top   <- br entry
+
+  OP_Word64 mask' <- A.shiftL TypeWord64 (A.liftWord64 1) bitIdx'
+  mask <- instr' $ Trunc (IntegralBoundedType TypeWord64) (IntegralBoundedType TypeWord8) mask'
 
   -- Loop until this thread has completed its critical section. If the slot
   -- was unlocked we just acquired the lock and the thread can perform its
   -- critical section, otherwise sleep the thread and try again later.
   setBlock entry
-  old   <- instr $ AtomicRMW numType NonVolatile Exchange addr lock (CrossThread, Acquire)
-  ok    <- A.eq singleType old unlock'
+  -- Using atomic_fetch_or, acquire the lock on the computed bit.
+  old  <- instrMD (AtomicRMW numType NonVolatile Or addr mask (CrossThread, Acquire)) (bufferMetadata' Nothing)
+  -- Check if the bit was zero before our atomic_fetch_or.
+  check <- A.band TypeWord8 old (OP_Word8 mask)
+  -- If it is zero, we acquired the lock
+  ok   <- A.eq singleType check $ A.liftWord8 0
   _     <- cbr ok start sleep
 
   -- We did not acquire the lock. Sleep the thread for a small amount of
@@ -325,102 +315,12 @@ atomically_thread barriers i action = do
   _     <- br end
 
   setBlock end
-  _     <- instr $ AtomicRMW numType NonVolatile Exchange addr unlock (CrossThread, AcquireRelease)
+  OP_Word8 maskComplement <- A.complement TypeWord8 (OP_Word8 mask)
+  _     <- instrMD (AtomicRMW numType NonVolatile And addr maskComplement (CrossThread, Release)) (bufferMetadata' Nothing)
   _     <- __threadfence_grid   -- TODO: why is this required?
   _     <- br exit
 
   setBlock exit
   return r
 
-
--- Atomically execute the critical section only when the lock at the given array
--- index is obtained. The thread spins waiting for the lock to be released and
--- there is no backoff strategy in case the lock is contended.
---
--- The canonical implementation of a spin-lock looks like this:
---
--- > do {
--- >   old = atomic_exchange(&lock[i], 1);
--- > } while (old == 1);
--- >
--- > /* critical section */
--- >
--- > atomic_exchange(&lock[i], 0);
---
--- The initial loop repeatedly attempts to take the lock by writing a 1 (locked)
--- into the lock slot. Once the 'old' state of the lock returns 0 (unlocked),
--- then we just acquired the lock and the atomic section can be computed.
--- Finally, the lock is released by writing 0 back to the lock slot.
---
--- However, there is a complication with CUDA devices because all threads in
--- a warp must execute in lockstep (with predicated execution). In the above
--- setup, once a thread acquires a lock, then it will be disabled and stop
--- participating in the loop, waiting for all other threads (to acquire their
--- locks) before continuing program execution. If two threads in the same warp
--- attempt to acquire the same lock, then once the lock is acquired by one
--- thread then it will sit idle waiting while the second thread spins attempting
--- to grab a lock that will never be released because the first thread (which
--- holds the lock) can not make progress. DEADLOCK.
---
--- To prevent this situation we must invert the algorithm so that threads can
--- always make progress, until each warp in the thread has committed their
--- result.
---
--- > done = 0;
--- > do {
--- >   if ( atomic_exchange(&lock[i], 1) == 0 ) {
--- >
--- >     /* critical section */
--- >
--- >     done = 1;
--- >     atomic_exchange(&lock[i], 0);
--- >   }
--- > } while ( done == 0 );
---
-atomically_warp
-    :: Operand (Ptr Word32)
-    -> Operands Int
-    -> CodeGen PTX a
-    -> CodeGen PTX a
-atomically_warp barriers i action = do
-  let
-      lock    = integral integralType 1
-      unlock  = integral integralType 0
-      unlock' = ir TypeWord32 unlock
-  --
-  entry <- newBlock "spinlock.entry"
-  start <- newBlock "spinlock.critical-start"
-  end   <- newBlock "spinlock.critical-end"
-  exit  <- newBlock "spinlock.exit"
-
-  addr <- instr' $ GetElementPtr $ GEP1 barriers (op integralType i)
-  _    <- br entry
-
-  -- Loop until this thread has completed its critical section. If the slot was
-  -- unlocked then we just acquired the lock and the thread can perform the
-  -- critical section, otherwise skip to the bottom of the critical section.
-  setBlock entry
-  old  <- instr $ AtomicRMW numType NonVolatile Exchange addr lock   (CrossThread, Acquire)
-  ok   <- A.eq singleType old unlock'
-  no   <- cbr ok start end
-
-  -- If we just acquired the lock, execute the critical section
-  setBlock start
-  r    <- action
-  _    <- instr $ AtomicRMW numType NonVolatile Exchange addr unlock (CrossThread, AcquireRelease)
-  yes  <- br end
-
-  -- At the base of the critical section, threads participate in a memory fence
-  -- to ensure the lock state is committed to memory. Depending on which
-  -- incoming edge the thread arrived at this block from determines whether they
-  -- have completed their critical section.
-  setBlock end
-  res  <- freshLocalName
-  done <- phi1 end res [(boolean True, yes), (boolean False, no)]
-
-  __syncthreads
-  _    <- cbr (OP_Bool done) exit entry
-
-  setBlock exit
-  return r
 

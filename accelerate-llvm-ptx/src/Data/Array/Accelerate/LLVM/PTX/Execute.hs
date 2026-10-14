@@ -50,7 +50,7 @@ import Data.Array.Accelerate.LLVM.PTX.Link.Object
 -- import Data.Array.Accelerate.LLVM.PTX.Execute.Marshal
 -- import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
 -- import Data.Array.Accelerate.LLVM.PTX.Link
---import Data.Array.Accelerate.LLVM.PTX.Target
+import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Array.Accelerate.LLVM.PTX.State
 -- import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
 -- import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Event       as Event
@@ -172,9 +172,11 @@ executeEffect env = \case
             $ kernelElements kernel
       let maxGridSize = (n + kernelElementsPerThread kernel - 1) `div` kernelElementsPerThread kernel
 
+      locks <- unsafeGetValue <$> liftPar (asks ptxLocks)
+
       case kernelInit kernel of
         Just p -> do
-          liftIO $ launch p stream 1 kernelMemoryPtr args'
+          liftIO $ launch p stream 1 kernelMemoryPtr locks args'
           -- Ensure 'touchLifetime' is called when we next synchronise.
           cleanUpTouchLifetime $ kernelPhaseLinked p
         Nothing -> return ()
@@ -185,14 +187,14 @@ executeEffect env = \case
       -- To simplify things, we could also always launch the latter number of
       -- threads and ignore the input size (the code in the kernel works with
       -- any grid size).
-      when (maxGridSize /= 0) $ liftIO $ launch (kernelMain kernel) stream maxGridSize kernelMemoryPtr args'
+      when (maxGridSize /= 0) $ liftIO $ launch (kernelMain kernel) stream maxGridSize kernelMemoryPtr locks args'
 
       -- Ensure 'touchLifetime' is called when we next synchronise.
       cleanUpTouchLifetime $ kernelPhaseLinked $ kernelMain kernel
 
       case kernelFinish kernel of
         Just p -> do
-          liftIO $ launch p stream 1 kernelMemoryPtr args'
+          liftIO $ launch p stream 1 kernelMemoryPtr locks args'
           -- Ensure 'touchLifetime' is called when we next synchronise.
           cleanUpTouchLifetime $ kernelPhaseLinked p
         Nothing -> return ()
@@ -200,6 +202,7 @@ executeEffect env = \case
       case kernelMemoryLifetime of
         Just l -> cleanUpTouchLifetime l
         Nothing -> return ()
+      liftPar (asks ptxLocks) >>= cleanUpTouchLifetime
   SignalAwait signals -> do
     stream <- asks ptxStream
     forM_ signals $ \signal -> case prj' signal env of
@@ -230,13 +233,13 @@ size' (ShapeRsnoc shr) (sh, ValueScalar _ sz)
 -- Execute a device function with the given thread configuration and function
 -- parameters.
 --
-launch :: HasCallStack => PTXKernelPhase f -> Stream -> Int -> CUDA.DevicePtr Word8 -> [CUDA.FunParam] -> IO ()
-launch kernel stream n kernelMemory args = do
+launch :: HasCallStack => PTXKernelPhase f -> Stream -> Int -> CUDA.DevicePtr Word8 -> CUDA.DevicePtr Word8 -> [CUDA.FunParam] -> IO ()
+launch kernel stream n kernelMemory locks args = do
   let obj = unsafeGetValue $ kernelPhaseLinked kernel
   let cta = (kernelObjThreadBlockSize obj, 1, 1)
   let grid = (kernelObjThreadBlocks obj n, 1, 1)
   let smem = kernelObjSharedMemBytes obj
-  CUDA.launchKernel (kernelObjFun obj) grid cta smem (Just stream) (CUDA.VArg kernelMemory : reverse args)
+  CUDA.launchKernel (kernelObjFun obj) grid cta smem (Just stream) (CUDA.VArg kernelMemory : CUDA.VArg locks : reverse args)
 
 kernelArgs :: Gamma env -> SArgs env f -> ([Exists Lifetime], [Maybe Int], [CUDA.FunParam])
 kernelArgs _ ArgsNil = ([], [], [])

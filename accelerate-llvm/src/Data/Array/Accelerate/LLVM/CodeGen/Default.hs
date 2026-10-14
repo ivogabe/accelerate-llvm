@@ -73,9 +73,27 @@ defaultCodeGenBackpermute _ _ = internalError "Missing index for argument of bac
 
 defaultCodeGenPermute
   :: (CompileForeignExp target, Intrinsic target, f ~ (Fun' (e -> e -> e) -> Mut sh' e -> In sh (PrimMaybe (sh', e)) -> ()))
-  => (Envs env idxEnv -> Operand Int -> Operands sh' -> CodeGen target () -> CodeGen target ())
+  => Int
+  -> (Operands Word64 -> CodeGen target () -> CodeGen target ())
   -> Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
-defaultCodeGenPermute atomically (ArgFun combineFun :>: output :>: source :>: _) (_ :>: _ :>: IdxArgIdx depth sourceIdx :>: _) =
+defaultCodeGenPermute lockArraySize atomically (ArgFun combineFun :>: output :>: source :>: _) (_ :>: _ :>: IdxArgIdx depth sourceIdx :>: _) =
+  -- To perform atomic updates to the values in output, we use locks. Instead
+  -- of having one lock per entry in output, we use a fixed-size array of
+  -- locks, with size lockArraySize. We map an index in values to the index of
+  -- a lock using a hash function. We use the pointer of the first array in
+  -- output as a seed in the hash function, to make conflicts between multiple
+  -- permute operations (that execute concurrently) less likely.
+  --
+  -- We use the pointer of the first output buffer
+  -- together with the index of the hash function,
+  -- as:
+  -- hash(ptr + i)
+  -- This reduces the chance of collisions between multiple concurrent
+  -- permutes, as each permute will have a different ptr, as they cannot write
+  -- to the same buffer concurrently.
+  -- Note that we use ptr + i instead of ptr + i * sizeof(..) for simplicity.
+  -- Given that ptr + i * sizeof(..) will not overlap between concurrent
+  -- permutes, ptr + i will also not overlap as sizeof(..) >= 1.
   ( depth
   , OpCodeGenSingle $ \envs -> do
     -- project element onto the destination array and (atomically) update
@@ -85,15 +103,26 @@ defaultCodeGenPermute atomically (ArgFun combineFun :>: output :>: source :>: _)
       let idx = A.fst idxx
       let x = A.snd idxx
       let sh' = envsPrjParameters (shapeExpVars shr sh) envs
-      OP_Int j <- intOfIndex shr sh' idx
-      atomically envs j idx $ do
-        y <- readArray TypeInt envs output (OP_Int j)
+      j <- intOfIndex shr sh' idx
+
+      -- Convert 'j' to the index of the lock.
+      -- As commented above, we compute the hash of ptr + j,
+      -- where ptr is the pointer of the first buffer in the output, bitcasted to an int,
+      -- and j is the index in the array (where the permute is writing to).
+      seed <- firstArrayPtr envs output
+      i <- A.add numType seed j
+      i' <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) i
+      h <- A.hash i'
+      lockIdx <- A.rem TypeWord64 h $ A.liftWord64 $ Prelude.fromIntegral lockArraySize
+
+      atomically lockIdx $ do
+        y <- readArray TypeInt envs output j
         r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combineFun) x y
-        writeArray TypeInt envs output (OP_Int j) r
+        writeArray TypeInt envs output j r
   )
   where
     ArgArray _ (ArrayR shr _) sh _ = output
-defaultCodeGenPermute _ _ _ = internalError "Missing index for argument of permute"
+defaultCodeGenPermute _ _ _ _ = internalError "Missing index for argument of permute"
 
 defaultCodeGenPermuteUnique
   :: CG (Mut sh' e -> In sh (PrimMaybe (sh', e)) -> ())

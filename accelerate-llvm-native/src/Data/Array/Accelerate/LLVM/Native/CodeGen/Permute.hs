@@ -8,8 +8,9 @@
 -- Portability : non-portable (GHC extensions)
 --
 
-module Data.Array.Accelerate.LLVM.Native.CodeGen.Permute
-  where
+module Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (
+  lockArraySize, atomically
+) where
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -279,38 +280,12 @@ reprLock = ArrayR (ShapeRsnoc ShapeRz) $ TupRsingle scalarTypeWord8
 lockArraySize :: Int
 lockArraySize = 16 * 1024 * 8
 
-atomically 
-  :: Envs env idxEnv
-  -- The output (mut) argument of the permute.
-  -- This array is not mutated by this function,
-  -- instead it is only used to compute a lock index.
-  -- We use the pointer of the first output buffer
-  -- together with the index of the hash function,
-  -- as:
-  -- hash(ptr + i)
-  -- This reduces the chance of collisions between multiple concurrent
-  -- permutes, as each permute will have a different ptr, as they cannot write
-  -- to the same buffer concurrently.
-  -- Note that we use ptr + i instead of ptr + i * sizeof(..) for simplicity.
-  -- Given that ptr + i * sizeof(..) will not overlap between concurrent
-  -- permutes, ptr + i will also not overlap as sizeof(..) >= 1.
-  --
-  -> Arg env (Mut sh e)
-  -> Operands Int
+atomically
+  :: Operands Word64
   -> CodeGen Native ()
   -> CodeGen Native ()
-atomically envs mutArray i action
-  -- | irbuffer@(IRBuffer bufptr _ _ IRBufferScopeArray _) <- envsPrjBuffer bufferVar envs
+atomically idx action
   = do
-      -- As commented above, compute the hash of ptr + i,
-      -- where ptr is the pointer of the first buffer in the output, bitcasted to an int,
-      -- and i is the index in the array (where the permute is writing to).
-      seed <- firstArrayPtr envs mutArray
-      i' <- A.add numType seed i
-      i'' <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) i'
-      h <- hash i''
-      idx <- A.rem TypeWord64 h $ A.liftWord64 $ Prelude.fromIntegral lockArraySize
-
       spin <- newBlock "spinlock.entry"
       crit <- newBlock "spinlock.critical-section"
       exit <- newBlock "spinlock.exit"
@@ -324,12 +299,13 @@ atomically envs mutArray i action
       addr <- instr' $ GetElementPtr $ GEP1 bufptr $ op integralType byteIdx
       _    <- br spin
 
+      OP_Word64 mask' <- A.shiftL TypeWord64 (A.liftWord64 1) bitIdx'
+      mask <- instr' $ Trunc (IntegralBoundedType TypeWord64) (IntegralBoundedType TypeWord8) mask'
+
       -- Atomically (attempt to) set the lock slot to the locked state. If the slot
       -- was unlocked we just acquired it, otherwise the state remains unchanged and
       -- we spin until it becomes available.
       setBlock spin
-      OP_Word64 mask' <- A.shiftL TypeWord64 (A.liftWord64 1) bitIdx'
-      mask <- instr' $ Trunc (IntegralBoundedType TypeWord64) (IntegralBoundedType TypeWord8) mask'
       -- Using atomic_fetch_or, acquire the lock on the computed bit.
       old  <- instrMD (AtomicRMW numType NonVolatile Or addr mask (CrossThread, Acquire)) (bufferMetadata' Nothing)
       -- Check if the bit was zero before our atomic_fetch_or.

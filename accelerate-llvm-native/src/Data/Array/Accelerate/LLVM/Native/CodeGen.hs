@@ -53,7 +53,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically)
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically, lockArraySize)
 import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists))
 import Control.Monad
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
@@ -331,9 +331,7 @@ opCodeGen flatOp@(FlatOp op args idxArgs) = case op of
   NGenerate -> defaultCodeGenGenerate args idxArgs
   NMap -> defaultCodeGenMap args idxArgs
   NBackpermute -> defaultCodeGenBackpermute args idxArgs
-  NPermute
-    | (_ :>: output :>: _ :>: _) <- args ->
-      defaultCodeGenPermute (\envs j _ -> atomically envs output $ OP_Int j) args idxArgs
+  NPermute -> defaultCodeGenPermute lockArraySize atomically args idxArgs
   NPermute' -> defaultCodeGenPermuteUnique args idxArgs
   NFold -> defaultCodeGenFold flatOp args idxArgs
   NFold1 -> defaultCodeGenFold1 flatOp args idxArgs

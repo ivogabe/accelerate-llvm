@@ -17,6 +17,7 @@ module Data.Array.Accelerate.LLVM.PTX.Target (
 
 -- accelerate
 import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.Lifetime
 
 import Data.Array.Accelerate.LLVM.Extra
 import Data.Array.Accelerate.LLVM.Target
@@ -28,10 +29,12 @@ import Data.Array.Accelerate.LLVM.PTX.Link.Cache                    ( KernelTabl
 
 -- CUDA
 import Foreign.CUDA.Analysis.Device                                 ( DeviceProperties )
+import qualified Foreign.CUDA.Ptr                                   as CUDA
 
 -- standard library
 import Data.ByteString.Short                                        ( ShortByteString )
 import Data.Primitive.ByteArray
+import Data.Word
 import Foreign.C.String
 import Foreign.Ptr
 
@@ -50,6 +53,7 @@ data PTX = PTX {
   -- , ptxMemoryTable              :: {-# UNPACK #-} !MemoryTable
   , ptxKernelTable              :: {-# UNPACK #-} !KernelTable
   , ptxStreamReservoir          :: {-# UNPACK #-} !Reservoir
+  , ptxLocks                    :: !(Lifetime (CUDA.DevicePtr Word8))
   }
 
 instance Target PTX where

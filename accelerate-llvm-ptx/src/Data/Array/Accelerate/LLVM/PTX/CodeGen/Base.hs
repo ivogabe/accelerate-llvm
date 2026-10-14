@@ -821,4 +821,10 @@ codeGenKernel name args body =
     declare :: GlobalFunction f
     declare = args $ Body VoidType (Just Tail) (fromString name)
 
-type KernelType env = Ptr (SizedArray Word) -> MarshalFun env
+type KernelType env
+  -- Kernel memory
+  = Ptr (SizedArray Word)
+  -- Array of locks
+  -> Ptr Word8
+  -- Arguments for all variables from the environment
+  -> MarshalFun env
