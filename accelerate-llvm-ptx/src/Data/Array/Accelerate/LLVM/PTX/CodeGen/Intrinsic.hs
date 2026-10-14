@@ -27,6 +27,9 @@ import Prelude                                                      as P
 instance Intrinsic PTX where
   intrinsicForTarget = libdeviceIndex
 
+  -- TODO: When we have 128-bit integers, check which GPUs support 128-bit CAS
+  supportsAtomicCAS size = return $ size <= 64
+
 -- The list of functions implemented by libdevice. These are all more-or-less
 -- named consistently based on the standard mathematical functions they
 -- implement, with the "__nv_" prefix stripped.

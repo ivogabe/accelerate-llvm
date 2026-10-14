@@ -208,8 +208,8 @@ data Instruction a where
                   -> Maybe Align
                   -> Instruction a
   
-  AtomicLoad      :: SingleType a
-                  -> Operand (Ptr a)
+  AtomicLoad      :: ScalarType a -- If this is a Vector type, the size should be a power of two
+                  -> Operand (Ptr a) -- Must be aligned to the size of the ScalarType
                   -> MemoryOrdering
                   -> Instruction a
 
@@ -221,8 +221,8 @@ data Instruction a where
                   -> Maybe Align
                   -> Instruction ()
 
-  AtomicStore     :: SingleType a
-                  -> Operand (Ptr a)
+  AtomicStore     :: ScalarType a -- If this is a Vector type, the size should be a power of two
+                  -> Operand (Ptr a) -- Must be aligned to the size of the ScalarType
                   -> Operand a
                   -> MemoryOrdering
                   -> Instruction ()
@@ -410,8 +410,8 @@ instance Downcast (Instruction a) LP.Instr where
     Alloca tp             -> LP.Alloca (downcast tp) Nothing Nothing
     Store vol p x align   -> LP.Store (downcast vol) (downcast x) (downcast p) atomicity align
     Load vol p align      -> LP.Load (downcast vol) (downcast $ pointeeType $ typeOf p) (downcast p) atomicity align
-    AtomicStore tp p x m  -> LP.Store False (downcast x) (downcast p) (Just $ downcast m) (Just $ singleTypeSize tp)
-    AtomicLoad tp p m     -> LP.Load False (downcast tp) (downcast p) (Just $ downcast m) (Just $ singleTypeSize tp)
+    AtomicStore tp p x m  -> LP.Store False (downcast x) (downcast p) (Just $ downcast m) (Just $ scalarTypeSize tp)
+    AtomicLoad tp p m     -> LP.Load False (downcast tp) (downcast p) (Just $ downcast m) (Just $ scalarTypeSize tp)
     GetElementPtr (GEP n i1 path) -> case typeOf n of
       PrimType (PtrPrimType t _) ->
         LP.GEP inbounds (downcast t) (downcast n) (downcast i1 : downcastGEPIndex constantTyped path t)
@@ -602,6 +602,10 @@ pointeeType :: Type (Ptr t) -> PrimType t
 pointeeType (PrimType (PtrPrimType tp _)) = tp
 pointeeType _ = internalError "Ptr impossible"
 
+pointerAddrSpace :: Type (Ptr t) -> AddrSpace
+pointerAddrSpace (PrimType (PtrPrimType _ addr)) = addr
+pointerAddrSpace _ = internalError "Ptr impossible"
+
 instance TypeOf Instruction where
   typeOf = \case
     Add _ x _             -> typeOf x
@@ -625,7 +629,7 @@ instance TypeOf Instruction where
     Alloca t              -> PrimType $ PtrPrimType t defaultAddrSpace
     Load _ ptr _          -> PrimType $ pointeeType $ typeOf ptr
     Store{}               -> VoidType
-    AtomicLoad t _ _      -> PrimType $ ScalarPrimType $ SingleScalarType t
+    AtomicLoad t _ _      -> PrimType $ ScalarPrimType t
     AtomicStore{}         -> VoidType
     GetElementPtr gep     -> typeOf gep
     Fence{}               -> VoidType

@@ -13,8 +13,6 @@ module Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (
 ) where
 
 import Data.Array.Accelerate.LLVM.CodeGen.Arithmetic                as A
-import Data.Array.Accelerate.LLVM.CodeGen.Array
-import Data.Array.Accelerate.LLVM.CodeGen.Environment
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
@@ -28,8 +26,6 @@ import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW                                as RMW
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Representation
-
-import Data.Array.Accelerate.AST.Operation (Mut, Arg)
 
 {-
 -- Forward permutation specified by an indexing mapping. The resulting array is

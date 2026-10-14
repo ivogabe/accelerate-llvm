@@ -514,7 +514,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
         tupleStore tp valuePtrs new
 
         -- Release the lock
-        _ <- instr' $ AtomicStore singleType lock (scalar scalarTypeWord8 0) Release
+        _ <- instr' $ AtomicStore scalarType lock (scalar scalarTypeWord8 0) Release
         return ()
   )
   -- Code after the loop
@@ -760,7 +760,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
               (prevDescIdx, prevTag) <- descriptorIdxTag syncIndex
               (prevFlagPtr, _, _) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
 
-              flag <- instr $ AtomicLoad singleType prevFlagPtr Acquire
+              flag <- instr $ AtomicLoad scalarType prevFlagPtr Acquire
               flagPrefix' <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
               -- Block while this tile has no prefix
               A.neq singleType flag flagPrefix'
@@ -775,7 +775,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         -- In the parallel mode, 'local' is the aggregate value of this tile.
         tupleStore tp thisAggregatePtrs local
         OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagAggregate
-        _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
+        _ <- instr' $ AtomicStore scalarType thisFlagPtr newFlag Release
 
         -- Initialize look-back
         _ <- instr' $ Store NonVolatile lookbackIndex (op scalarTypeInt $ envsTileIndex envs) Nothing
@@ -792,7 +792,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
             (prevDescIdx, prevTag) <- descriptorIdxTag idx
             (prevFlagPtr, prevAggregatePtrs, prevPrefixPtrs) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
 
-            flag <- instr $ AtomicLoad singleType prevFlagPtr Acquire
+            flag <- instr $ AtomicLoad scalarType prevFlagPtr Acquire
 
             flagAggregate' <- A.bor TypeWord8 prevTag $ OP_Word8 flagAggregate
             flagPrefix' <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
@@ -836,7 +836,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
     tupleStore tp thisPrefixPtrs inclusivePrefix
 
     OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagPrefix
-    _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
+    _ <- instr' $ AtomicStore scalarType thisFlagPtr newFlag Release
     return ()
   )
   (\_ _ _ -> return ())
