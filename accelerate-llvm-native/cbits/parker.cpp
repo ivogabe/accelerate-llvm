@@ -21,19 +21,22 @@ struct ThreadParker {
 
 extern "C" {
   std::uint64_t accelerate_parker_maybe_park(ThreadParker *parker) {
-    parker->any_sleeping.store(1, std::memory_order_release);
-    parker->count_sleeping.fetch_add(1, std::memory_order_acq_rel);
-    return parker->state.load(std::memory_order_acquire);
+    parker->count_sleeping.fetch_add(1, std::memory_order_relaxed);
+    parker->any_sleeping.store(1, std::memory_order_relaxed);
+    std::uint64_t value = parker->state.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return value;
   }
   void accelerate_parker_confirm_park(ThreadParker *parker, std::uint64_t value) {
     parker->state.wait(value, std::memory_order_acquire);
-    parker->count_sleeping.fetch_sub(1, std::memory_order_acq_rel);
+    parker->count_sleeping.fetch_sub(1, std::memory_order_relaxed);
   }
   void accelerate_parker_cancel_park(ThreadParker *parker) {
-    parker->count_sleeping.fetch_sub(1, std::memory_order_acq_rel);
+    parker->count_sleeping.fetch_sub(1, std::memory_order_relaxed);
   }
   void accelerate_parker_wake_one(ThreadParker *parker) {
-    if (parker->any_sleeping.load(std::memory_order_acquire) == 0 || parker->count_sleeping.load(std::memory_order_acquire) == 0) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (parker->any_sleeping.load(std::memory_order_relaxed) == 0 || parker->count_sleeping.load(std::memory_order_relaxed) == 0) {
       // No sleeping threads, no need to wake any threads
       return;
     }
@@ -43,13 +46,14 @@ extern "C" {
     parker->state.notify_one();
   }
   void accelerate_parker_wake_all(ThreadParker *parker) {
-    if (parker->any_sleeping.load(std::memory_order_acquire) == 0 || parker->count_sleeping.load(std::memory_order_acquire) == 0) {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (parker->any_sleeping.load(std::memory_order_relaxed) == 0 || parker->count_sleeping.load(std::memory_order_relaxed) == 0) {
       // No sleeping threads, no need to wake any threads
       return;
     }
-    parker->any_sleeping.store(0, std::memory_order_release);
     // Update state, so .wait can unblock
     parker->state.fetch_add(1, std::memory_order_release);
+    parker->any_sleeping.store(0, std::memory_order_relaxed);
     // Notify all waiting threads
     parker->state.notify_all();
   }
