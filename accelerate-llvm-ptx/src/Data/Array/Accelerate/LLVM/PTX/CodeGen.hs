@@ -393,7 +393,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0) Nothing
+        _ <- instrMD' (Store NonVolatile intPtr (scalar scalarTypeInt 0) Nothing) (bufferMetadata' Nothing)
         case seed of
           Nothing -> return ()
           Just s -> do
@@ -474,8 +474,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           -- Wait on our turn
           _ <- Loop.while [] TupRunit
             (\_ -> do
-              -- TODO: Change to atomic load?
-              idx <- instr $ Load Volatile idxPtr Nothing
+              idx <- instrMD (AtomicLoad scalarTypeInt idxPtr Acquire) (bufferMetadata' Nothing)
               A.neq singleType idx (envsTileIndex envs)
             )
             (\_ -> return OP_Unit) -- TODO: Maybe add nanosleep here
@@ -514,8 +513,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
 
           _ <- instr' $ LLVM.Fence (CrossThread, Release)
           OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-          -- TODO: Change to atomic store?
-          _ <- instr' $ Store Volatile idxPtr nextIdx Nothing
+          _ <- instrMD' (AtomicStore scalarTypeInt idxPtr nextIdx Release) (bufferMetadata' Nothing)
           return exclusive
     
     when (foldOrScan == IsScan) $ do

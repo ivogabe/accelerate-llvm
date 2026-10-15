@@ -339,9 +339,9 @@ singleArrayPtr
     -> Arg genv (m sh e)
     -> Operands int
     -> CodeGen arch (Operand (Ptr (BufferEltR e)), Maybe (MetadataNodeID, MetadataNodeID))
-singleArrayPtr int tp envs (ArgArray _ _ _ (TupRsingle buffer)) (op int -> ix)
+singleArrayPtr int tp envs (ArgArray _ _ _ (TupRsingle irBuffer)) (op int -> ix)
   | Refl <- reprIsSingle @ScalarType @e @Buffer tp
-  , IRBuffer buffer _ v scope alias <- envsPrjBuffer buffer envs
+  , IRBuffer buffer _ _ scope alias <- envsPrjBuffer irBuffer envs
   = case scope of
       IRBufferScopeArray -> do
         p <- instr' $ GetElementPtr $ GEP1 buffer ix

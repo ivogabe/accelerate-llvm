@@ -300,7 +300,9 @@ instance MakesILP NativeOp where
     wsTargets <- use $ allWriters bsTargets
     wsIn      <- use $ allWriters bsIn
     fusionILP %= wsTargets `allBefore` c
-    fusionILP.constraints %= (<> [SameFoldSize c])
+    fusionILP.constraints %= (
+        <> [SameFoldSize c]
+        <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
     fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
                          <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsIn))
     -- No output, so no in-place paths.
