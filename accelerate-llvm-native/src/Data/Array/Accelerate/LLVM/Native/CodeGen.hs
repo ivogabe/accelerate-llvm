@@ -53,7 +53,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Constant as A
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
-import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically)
+import Data.Array.Accelerate.LLVM.Native.CodeGen.Permute (atomically, lockArraySize)
 import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists))
 import Control.Monad
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
@@ -331,9 +331,7 @@ opCodeGen flatOp@(FlatOp op args idxArgs) = case op of
   NGenerate -> defaultCodeGenGenerate args idxArgs
   NMap -> defaultCodeGenMap args idxArgs
   NBackpermute -> defaultCodeGenBackpermute args idxArgs
-  NPermute
-    | (_ :>: output :>: _ :>: _) <- args ->
-      defaultCodeGenPermute (\envs j _ -> atomically envs output $ OP_Int j) args idxArgs
+  NPermute -> defaultCodeGenPermute lockArraySize atomically args idxArgs
   NPermute' -> defaultCodeGenPermuteUnique args idxArgs
   NFold -> defaultCodeGenFold flatOp args idxArgs
   NFold1 -> defaultCodeGenFold1 flatOp args idxArgs
@@ -459,7 +457,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeWord8 0) Nothing -- unlocked
+        _ <- instrMD' (Store NonVolatile intPtr (scalar scalarTypeWord8 0) Nothing) (bufferMetadata' Nothing) -- unlocked
         value <- llvmOfExp (compileArrayInstrEnvs envs) seed
         tupleStore tp valuePtrs value
   )
@@ -499,7 +497,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
         _ <- Loop.while [] TupRunit
           (\_ -> do
             -- While the lock is taken
-            old <- instr $ AtomicRMW numType NonVolatile Exchange lock (scalar scalarTypeWord8 1) (CrossThread, Acquire)
+            old <- instrMD (AtomicRMW numType NonVolatile Exchange lock (scalar scalarTypeWord8 1) (CrossThread, Acquire)) (bufferMetadata' Nothing)
             A.neq singleType old (A.liftWord8 0)
           )
           (\_ -> return OP_Unit)
@@ -516,7 +514,7 @@ parCodeGenFoldCommutative _ fun seed identity input output inputIdx outputIdx = 
         tupleStore tp valuePtrs new
 
         -- Release the lock
-        _ <- instr' $ AtomicStore singleType lock (scalar scalarTypeWord8 0) Release
+        _ <- instrMD' (AtomicStore scalarType lock (scalar scalarTypeWord8 0) Release) (bufferMetadata' Nothing)
         return ()
   )
   -- Code after the loop
@@ -592,26 +590,29 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
   (TupRsingle memoryTp)
   -- Initialize kernel memory
   (\ptr envs -> do
-    -- Initialize all flags to flagInit
-    imapFromTo (A.liftInt 0) (A.liftInt descriptorsLength) $ \i -> do
+    -- Initialize all flags (but the first) to flagInit
+    imapFromTo (A.liftInt 1) (A.liftInt descriptorsLength) $ \i -> do
       (flagPtr, _, _) <- getDescriptorSlot memorySlotTp ptr i
       -- Initialize with 0xFF:
       -- Tag is stored in 7 most significant bits, and 0xFE is the tag
       -- before 0 (with wrap around).
       -- The state is stored in the least significant bit, and 1 denotes
       -- that that tile is finished (flagPrefix).
-      _ <- instr' $ Store NonVolatile flagPtr (integral TypeWord8 0xFF) Nothing
+      _ <- instrMD' (Store NonVolatile flagPtr (integral TypeWord8 0xFF) Nothing) (bufferMetadata' Nothing)
       return ()
 
     -- Tile i starts look-back at index i, and writes result to index i+1.
     -- When available, the seed is thus written to index 0 here.
+    -- Always set first flag to 'prefix available', to let look-back of first
+    -- tile succeed (with garbage value; that value is not used since
+    -- combineInDirection checks whether a seed is given.)
+    (flagPtr, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr $ A.liftInt 0
+    _ <- instrMD' (Store NonVolatile flagPtr flagPrefix Nothing) (bufferMetadata' Nothing)
     case seed of
       Nothing -> return ()
       Just s -> do
-        (flagPtr, _, valuePtrs) <- getDescriptorSlot memorySlotTp ptr $ A.liftInt 0
         -- tag = 0, tag | flagPrefix = flagPrefix, so
         -- we can write flagPrefix directly.
-        _ <- instr' $ Store NonVolatile flagPtr flagPrefix Nothing
         value <- llvmOfExp (compileArrayInstrEnvs envs) s
         codeSeed envs value
         tupleStore tp valuePtrs value
@@ -762,7 +763,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
               (prevDescIdx, prevTag) <- descriptorIdxTag syncIndex
               (prevFlagPtr, _, _) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
 
-              flag <- instr $ AtomicLoad singleType prevFlagPtr Acquire
+              flag <- instrMD (AtomicLoad scalarType prevFlagPtr Acquire) (bufferMetadata' Nothing)
               flagPrefix' <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
               -- Block while this tile has no prefix
               A.neq singleType flag flagPrefix'
@@ -777,7 +778,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
         -- In the parallel mode, 'local' is the aggregate value of this tile.
         tupleStore tp thisAggregatePtrs local
         OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagAggregate
-        _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
+        _ <- instrMD' (AtomicStore scalarType thisFlagPtr newFlag Release) (bufferMetadata' Nothing)
 
         -- Initialize look-back
         _ <- instr' $ Store NonVolatile lookbackIndex (op scalarTypeInt $ envsTileIndex envs) Nothing
@@ -794,7 +795,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
             (prevDescIdx, prevTag) <- descriptorIdxTag idx
             (prevFlagPtr, prevAggregatePtrs, prevPrefixPtrs) <- getDescriptorSlot memorySlotTp ptr prevDescIdx
 
-            flag <- instr $ AtomicLoad singleType prevFlagPtr Acquire
+            flag <- instrMD (AtomicLoad scalarType prevFlagPtr Acquire) (bufferMetadata' Nothing)
 
             flagAggregate' <- A.bor TypeWord8 prevTag $ OP_Word8 flagAggregate
             flagPrefix' <- A.bor TypeWord8 prevTag $ OP_Word8 flagPrefix
@@ -838,7 +839,7 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
     tupleStore tp thisPrefixPtrs inclusivePrefix
 
     OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagPrefix
-    _ <- instr' $ AtomicStore singleType thisFlagPtr newFlag Release
+    _ <- instrMD' (AtomicStore scalarType thisFlagPtr newFlag Release) (bufferMetadata' Nothing)
     return ()
   )
   (\_ _ _ -> return ())
@@ -864,7 +865,8 @@ parCodeGenScan descending foldOrScan fun seed input index codeSeed codePre codeP
       accum <- tupleLoad tp accumVar
       codePre envs accum
       isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
-      new <- combineInDirection envs seed isFirstTile False accum x
+      first <- A.land isFirstTile $ envsIsFirst envs
+      new <- combineInDirection envs seed first False accum x
       codePost envs new
       tupleStore tp accumVar new
     )

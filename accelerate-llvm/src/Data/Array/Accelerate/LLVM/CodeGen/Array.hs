@@ -22,7 +22,8 @@ module Data.Array.Accelerate.LLVM.CodeGen.Array (
 
   intOfIndex,
 
-  firstArrayPtr
+  firstArrayPtr,
+  singleArrayPtr
 
 ) where
 
@@ -324,3 +325,26 @@ firstArrayPtr envs (ArgArray _ _ _ vars) = case flattenTupR vars of
     Just (GroundOperandBuffer (IRBuffer ptr _ _ _ _)) ->
       instr $ PtrToInt TypeInt ptr
     _ -> internalError "Buffer not found in firstArrayPtr"
+
+-- | Get a pointer to an element of an array at a certain index.
+-- This requires the array to contain single values, not tuples.
+-- This function assumes that the array is stored in global memory,
+-- e.g. has scope IRBufferScopeArray
+--
+singleArrayPtr
+    :: forall int genv idxEnv m sh e arch.
+       IntegralType int
+    -> ScalarType e
+    -> Envs genv idxEnv
+    -> Arg genv (m sh e)
+    -> Operands int
+    -> CodeGen arch (Operand (Ptr (BufferEltR e)), Maybe (MetadataNodeID, MetadataNodeID))
+singleArrayPtr int tp envs (ArgArray _ _ _ (TupRsingle irBuffer)) (op int -> ix)
+  | Refl <- reprIsSingle @ScalarType @e @Buffer tp
+  , IRBuffer buffer _ _ scope alias <- envsPrjBuffer irBuffer envs
+  = case scope of
+      IRBufferScopeArray -> do
+        p <- instr' $ GetElementPtr $ GEP1 buffer ix
+        return (p, alias)
+      _ -> internalError "Expected IRBufferScopeArray"
+singleArrayPtr _ _ _ _ _ = internalError "Tuple impossible"

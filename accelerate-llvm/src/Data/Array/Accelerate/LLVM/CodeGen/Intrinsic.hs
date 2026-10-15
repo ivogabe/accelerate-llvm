@@ -16,8 +16,13 @@ module Data.Array.Accelerate.LLVM.CodeGen.Intrinsic (
 
 ) where
 
+import Data.Array.Accelerate.Type
+import Data.Array.Accelerate.Representation.Elt
+
 -- accelerate-llvm
 import LLVM.AST.Type.Name
+import LLVM.AST.Type.Instruction.RMW
+import Data.Array.Accelerate.LLVM.State
 import {-# SOURCE #-} Data.Array.Accelerate.LLVM.CodeGen.Monad  ( CodeGen )
 
 -- libraries
@@ -45,6 +50,22 @@ class Intrinsic arch where
 
   trapWithMessage :: Text -> CodeGen arch ()
   trapWithMessage _ = return ()
+
+  supportsAtomicCAS :: Int -> LLVM arch Bool
+
+  supportsAtomicRMW :: ScalarType e -> RMWOperation -> LLVM arch Bool
+  -- We can overapproximate the set of supported RMW operations by checking if
+  -- CAS is supported on the size of the elements. LLVM will convert any
+  -- unsupported RMWs to a CAS loop, so it is fine to emit RMW operations if we
+  -- know the fallback will be possible.
+  --
+  -- See https://llvm.org/docs/Atomics.html, for instance on X86:
+  -- atomicrmw xchg uses XCHG, atomicrmw add and atomicrmw sub use XADD, and
+  -- all other atomicrmw operations generate a loop with LOCK CMPXCHG.
+  --
+  -- If this is not desired for a certain backend, this behavior can be
+  -- overwritten.
+  supportsAtomicRMW tp _ = supportsAtomicCAS (scalarTypeSize tp)
 
 llvmIntrinsic :: HashMap ShortByteString Label
 llvmIntrinsic =

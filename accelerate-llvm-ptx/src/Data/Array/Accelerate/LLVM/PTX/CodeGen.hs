@@ -42,7 +42,6 @@ import Data.Array.Accelerate.LLVM.PTX.CodeGen.Base
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Fold
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Scan
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Intrinsic ()
-import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute
 import Data.Array.Accelerate.LLVM.PTX.Foreign
 import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Maybe
@@ -59,7 +58,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Array
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
--- import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (atomically)
+import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (atomically, lockArraySize)
 import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists), flattenTupR)
 import Control.Monad
 import Control.Monad.Reader ( asks )
@@ -291,7 +290,7 @@ makeKernel
 makeKernel name env =
   ( gamma
   , \postfix body ->
-    snd <$> codeGenKernel (name ++ postfix) (LLVM.Lam kernelDataRawType "kernel_data" . bindArgs) (extractEnv >> body)
+    snd <$> codeGenKernel (name ++ postfix) (LLVM.Lam kernelDataRawType "kernel_data" . LLVM.Lam primType "locks_array" . bindArgs) (extractEnv >> body)
   )
   where
     (bindArgs, extractEnv, gamma) = bindEnvArgs @PTX env
@@ -303,14 +302,7 @@ opCodeGen flatOp@(FlatOp op' args idxArgs) = case op' of
   PTXGenerate -> defaultCodeGenGenerate args idxArgs
   PTXMap -> defaultCodeGenMap args idxArgs
   PTXBackpermute -> defaultCodeGenBackpermute args idxArgs
-  -- TODO: Similar to Native, we should use one global array of locks, instead of an array per permute
-  PTXPermute
-    | combineFun :>: output :>: locks :>: source :>: _ <- args
-    , i1 :>: i2 :>: _ :>: i3 :>: _ <- idxArgs ->
-      defaultCodeGenPermute
-        (\envs j _ -> atomically envs locks $ OP_Int j)
-        (combineFun :>: output :>: source :>: ArgsNil)
-        (i1 :>: i2 :>: i3 :>: ArgsNil)
+  PTXPermute -> defaultCodeGenPermute lockArraySize atomically args idxArgs
   PTXPermute' -> defaultCodeGenPermuteUnique args idxArgs
   PTXFold -> defaultCodeGenFold flatOp args idxArgs
   PTXFold1 -> defaultCodeGenFold1 flatOp args idxArgs
@@ -401,7 +393,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     case ptrs of
       TupRsingle _ -> internalError "Pair impossible"
       TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instr' $ Store NonVolatile intPtr (scalar scalarTypeInt 0) Nothing
+        _ <- instrMD' (Store NonVolatile intPtr (scalar scalarTypeInt 0) Nothing) (bufferMetadata' Nothing)
         case seed of
           Nothing -> return ()
           Just s -> do
@@ -482,8 +474,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
           -- Wait on our turn
           _ <- Loop.while [] TupRunit
             (\_ -> do
-              -- TODO: Change to atomic load?
-              idx <- instr $ Load Volatile idxPtr Nothing
+              idx <- instrMD (AtomicLoad scalarTypeInt idxPtr Acquire) (bufferMetadata' Nothing)
               A.neq singleType idx (envsTileIndex envs)
             )
             (\_ -> return OP_Unit) -- TODO: Maybe add nanosleep here
@@ -522,8 +513,7 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
 
           _ <- instr' $ LLVM.Fence (CrossThread, Release)
           OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-          -- TODO: Change to atomic store?
-          _ <- instr' $ Store Volatile idxPtr nextIdx Nothing
+          _ <- instrMD' (AtomicStore scalarTypeInt idxPtr nextIdx Release) (bufferMetadata' Nothing)
           return exclusive
     
     when (foldOrScan == IsScan) $ do

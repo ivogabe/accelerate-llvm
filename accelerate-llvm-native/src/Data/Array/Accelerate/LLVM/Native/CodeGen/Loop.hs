@@ -252,7 +252,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size' doWor
     claimStealSuccess <- newBlock "workassist.loop.claim.steal.success"
     claimStealFail <- newBlock "workassist.loop.claim.steal.fail"
 
-    initialCounter <- instr' $ AtomicLoad singleType counter Monotonic
+    initialCounter <- instr' $ AtomicLoad scalarType counter Monotonic
     _ <- instr' $ Store NonVolatile counterEstimate initialCounter Nothing
 
     -- The index from which we will next try to claim new work
@@ -301,7 +301,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size' doWor
     -- 2. Otherwise, claim from global counter
     indexGlobal <- do
       _ <- setBlock claimGlobal
-      _ <- instr' $ AtomicStore singleType workPerThreadSelf (integral TypeWord64 0) Monotonic
+      _ <- instr' $ AtomicStore scalarType workPerThreadSelf (integral TypeWord64 0) Monotonic
 
       -- First, use a heuristic to compute how many tiles we will claim from
       -- the global counter. This is based on the current number of remaining
@@ -339,7 +339,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size' doWor
       -- non-positive, other threads know that this thread has no work,
       -- and those threads can then check the start index for 2^47+2^46.
       let markAnnounce = (1 `shiftL` 63) + (1 `shiftL` 62)
-      _ <- instr' $ AtomicStore singleType workPerThreadSelf (integral TypeWord64 markAnnounce) Monotonic
+      _ <- instr' $ AtomicStore scalarType workPerThreadSelf (integral TypeWord64 markAnnounce) Monotonic
 
       -- Increment the global counter by count3
       index' <- instr' $ AtomicRMW numType NonVolatile RMW.Add counter count3 (CrossThread, Monotonic)
@@ -362,7 +362,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size' doWor
       indexPlusOne <- A.add numType (OP_Word64 index') $ A.liftWord64 1
       -- Pack indexPlusOne and claimedSubOne into a word, and store that in workPerThread
       OP_Word64 packed <- packWorkRange indexPlusOne claimedSubOne
-      _ <- instr' $ AtomicStore singleType workPerThreadSelf packed Monotonic
+      _ <- instr' $ AtomicStore scalarType workPerThreadSelf packed Monotonic
 
       return index'
 
@@ -372,7 +372,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size' doWor
       _ <- instr' $ Store NonVolatile counterEstimate size' Nothing
 
       -- Unmark that we will claim something
-      _ <- instr' $ AtomicStore singleType workPerThreadSelf (integral TypeWord64 0) Monotonic
+      _ <- instr' $ AtomicStore scalarType workPerThreadSelf (integral TypeWord64 0) Monotonic
       single' <- A.eq singleType (OP_Word32 maxThreads) $ A.liftWord32 1
       inc <- do
         -- (threadIdx % 2 == 0) ? 1 : thread_count - 1
@@ -401,7 +401,7 @@ workassistLoop counter workPerThread maxClaim threadIndex maxThreads size' doWor
       OP_Word32 otherIndexMulStride <- A.mul numType otherIndex $ OP_Word32 $ integral TypeWord32 workPerThreadStride
       otherWorkPtr <- instr' $ GetElementPtr $ GEP1 workPerThread otherIndexMulStride
       -- First perform an early check, before we perform an atomic fetch-and-add
-      earlyPacked <- instr $ AtomicLoad singleType otherWorkPtr Monotonic
+      earlyPacked <- instr $ AtomicLoad scalarType otherWorkPtr Monotonic
       (earlyStart, earlySize) <- unpackWorkRange earlyPacked
       canSteal <- A.gte singleType earlySize $ A.liftInt64 1
 

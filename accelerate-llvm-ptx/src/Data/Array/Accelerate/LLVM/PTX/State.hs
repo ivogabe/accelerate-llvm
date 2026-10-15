@@ -21,6 +21,7 @@ module Data.Array.Accelerate.LLVM.PTX.State (
 ) where
 
 import Data.Array.Accelerate.Error
+import Data.Array.Accelerate.Lifetime
 
 import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.PTX.Target
@@ -30,6 +31,7 @@ import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
 import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Stream      as ST
 import qualified Data.Array.Accelerate.LLVM.PTX.Link.Cache          as LC
 import qualified Data.Array.Accelerate.LLVM.PTX.Pool                as Pool
+import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute               ( lockArraySize )
 
 import Foreign.CUDA.Driver.Error
 import qualified Foreign.CUDA.Driver                                as CUDA
@@ -38,6 +40,7 @@ import qualified Foreign.CUDA.Driver.Context                        as Context
 import Control.Concurrent
 import Control.Exception                                            ( try, catch )
 import Data.Maybe                                                   ( fromMaybe, catMaybes )
+import Data.Word
 import Formatting
 import System.Environment                                           ( lookupEnv )
 import System.IO.Unsafe                                             ( unsafePerformIO, unsafeInterleaveIO )
@@ -90,8 +93,17 @@ createTarget dev prp raw = do
   -- mt  <- MT.new ctx
   lc  <- LC.new
   st  <- ST.new ctx
-  return $! PTX ctx lc st
+  locks <- mallocLocksArray
+  return $! PTX ctx lc st locks
 
+mallocLocksArray :: IO (Lifetime (CUDA.DevicePtr Word8))
+mallocLocksArray = do
+  let size = lockArraySize `div` 8 -- Number of bytes
+  array <- CUDA.mallocArray size
+  CUDA.memset array size 0
+  lifetime <- newLifetime array
+  addFinalizer lifetime $ CUDA.free array
+  return lifetime
 
 -- Shared execution contexts
 -- -------------------------

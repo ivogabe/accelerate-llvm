@@ -1,3 +1,4 @@
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
@@ -13,6 +14,7 @@
 module Data.Array.Accelerate.LLVM.CodeGen.Default where
 
 import Data.Array.Accelerate.Representation.Array
+import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.AST.Partitioned
@@ -24,12 +26,18 @@ import Data.Array.Accelerate.LLVM.CodeGen.Cluster
 import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
+import Data.Array.Accelerate.LLVM.CodeGen.Permute
 import Data.Array.Accelerate.LLVM.CodeGen.Environment
-import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic (Intrinsic)
-import Data.Array.Accelerate.LLVM.CodeGen.Sugar (app1, IROpenFun2 (app2))
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic (Intrinsic(..))
+import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 import Data.Array.Accelerate.LLVM.Foreign
 
+import LLVM.AST.Type.Instruction
+import LLVM.AST.Type.Instruction.Atomic
+import LLVM.AST.Type.Instruction.RMW
+import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Operand
+import LLVM.AST.Type.Representation
 
 import Control.Monad
 
@@ -73,9 +81,27 @@ defaultCodeGenBackpermute _ _ = internalError "Missing index for argument of bac
 
 defaultCodeGenPermute
   :: (CompileForeignExp target, Intrinsic target, f ~ (Fun' (e -> e -> e) -> Mut sh' e -> In sh (PrimMaybe (sh', e)) -> ()))
-  => (Envs env idxEnv -> Operand Int -> Operands sh' -> CodeGen target () -> CodeGen target ())
+  => Int
+  -> (Operands Word64 -> CodeGen target () -> CodeGen target ())
   -> Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
-defaultCodeGenPermute atomically (ArgFun combineFun :>: output :>: source :>: _) (_ :>: _ :>: IdxArgIdx depth sourceIdx :>: _) =
+defaultCodeGenPermute lockArraySize atomically (ArgFun combineFun :>: output :>: source :>: _) (_ :>: _ :>: IdxArgIdx depth sourceIdx :>: _) =
+  -- To perform atomic updates to values in output, we may use locks. Instead
+  -- of having one lock per entry in output, we use a fixed-size array of
+  -- locks, with size lockArraySize. We map an index in values to the index of
+  -- a lock using a hash function. We use the pointer of the first array in
+  -- output as a seed in the hash function, to make conflicts between multiple
+  -- permute operations (that execute concurrently) less likely.
+  --
+  -- We use the pointer of the first output buffer
+  -- together with the index of the hash function,
+  -- as:
+  -- hash(ptr + i)
+  -- This reduces the chance of collisions between multiple concurrent
+  -- permutes, as each permute will have a different ptr, as they cannot write
+  -- to the same buffer concurrently.
+  -- Note that we use ptr + i instead of ptr + i * sizeof(..) for simplicity.
+  -- Given that ptr + i * sizeof(..) will not overlap between concurrent
+  -- permutes, ptr + i will also not overlap as sizeof(..) >= 1.
   ( depth
   , OpCodeGenSingle $ \envs -> do
     -- project element onto the destination array and (atomically) update
@@ -85,15 +111,72 @@ defaultCodeGenPermute atomically (ArgFun combineFun :>: output :>: source :>: _)
       let idx = A.fst idxx
       let x = A.snd idxx
       let sh' = envsPrjParameters (shapeExpVars shr sh) envs
-      OP_Int j <- intOfIndex shr sh' idx
-      atomically envs j idx $ do
-        y <- readArray TypeInt envs output (OP_Int j)
-        r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combineFun) x y
-        writeArray TypeInt envs output (OP_Int j) r
+      j <- intOfIndex shr sh' idx
+
+      -- Choose a synchronisation strategy:
+      -- (1) Atomic RMW (atomic-fetch-and-something) or atomic store (when combineFun = const)
+      -- (2) Atomic Compare-and-swap loop
+      -- (3) Locks
+      -- For option 1, check if combineFun corresponds to a RMW operation
+      combineRMW <- detectRMW combineFun `guard'` (\(tp, rmw, _) -> liftCodeGen $ supportsAtomicRMW tp rmw)
+      -- For option 2, check if the values are singular and if the target supports CAS on these values
+      combineCAS <- detectCAS combineFun `guard'` (\tp -> liftCodeGen $ supportsAtomicCAS $ scalarTypeSize tp)
+      -- Option 3 is always possible.
+      -- Branch on these options
+      if
+        -- Option 1
+        | Just (tp, rmw, fun) <- combineRMW -> do
+          z <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) x
+          (ptr, alias) <- singleArrayPtr TypeInt tp envs output j
+          -- Pointer cast is safe, since detectRMW checks the alignment of the value
+          let ptr' = ptrCast (ScalarPrimType tp) ptr
+          case rmw of
+            Exchange -> do
+              _ <- instrMD' (AtomicStore tp ptr' (op tp z) Monotonic) (bufferMetadata' alias)
+              return ()
+            _
+              | SingleScalarType (NumSingleType numTp) <- tp -> do
+                _ <- instrMD' (AtomicRMW numTp NonVolatile rmw ptr' (op tp z) (CrossThread, AcquireRelease)) (bufferMetadata' alias)
+                return ()
+              | otherwise -> internalError "AtomicRMW only supports num types"
+
+        -- Option 2
+        | Just tp <- combineCAS -> do
+          (ptr, alias) <- singleArrayPtr TypeInt tp envs output j
+          -- Pointer cast is safe, since detectCAS checks the alignment of the value
+          let ptr' = ptrCast (ScalarPrimType tp) ptr
+          atomicCasLoop tp
+            (\y -> app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combineFun) x y)
+            ptr'
+            alias
+
+        -- Option 3
+        | otherwise -> do
+          -- Convert 'j' to the index of the lock.
+          -- As commented above, we compute the hash of ptr + j,
+          -- where ptr is the pointer of the first buffer in the output, bitcasted to an int,
+          -- and j is the index in the array (where the permute is writing to).
+          seed <- firstArrayPtr envs output
+          i <- A.add numType seed j
+          i' <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) i
+          h <- A.hash i'
+          lockIdx <- A.rem TypeWord64 h $ A.liftWord64 $ Prelude.fromIntegral lockArraySize
+
+          atomically lockIdx $ do
+            y <- readArray TypeInt envs output j
+            r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combineFun) x y
+            writeArray TypeInt envs output j r
   )
   where
     ArgArray _ (ArrayR shr _) sh _ = output
-defaultCodeGenPermute _ _ _ = internalError "Missing index for argument of permute"
+
+    guard' :: Maybe a -> (a -> CodeGen target Bool) -> CodeGen target (Maybe a)
+    guard' Nothing _ = return Nothing
+    guard' (Just a) cond = do
+      c <- cond a
+      return $ if c then Just a else Nothing
+
+defaultCodeGenPermute _ _ _ _ = internalError "Missing index for argument of permute"
 
 defaultCodeGenPermuteUnique
   :: CG (Mut sh' e -> In sh (PrimMaybe (sh', e)) -> ())

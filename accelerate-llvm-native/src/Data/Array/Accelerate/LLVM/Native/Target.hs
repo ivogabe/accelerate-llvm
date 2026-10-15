@@ -63,6 +63,14 @@ instance Intrinsic Native where
       then abort
       else trap
 
+  -- All modern processors should support 64-bit CAS.
+  -- x86-64 (via CMPXCHG16B, except for the first few generation(s)?) and
+  -- modern ARM also support 128-bit CAS, but Accelerate has no 128-bit integer
+  -- type (and this is required during code generation).
+  -- TODO: We should at some point add 128-bit integers, and this would also
+  -- enable CAS on vectors of 128 bits (eg Vec 2 Double, used for complex numbers).
+  supportsAtomicCAS size = return $ size <= 64
+
 printf :: IsPrim a => String -> Operand a -> CodeGen Native ()
 printf format val = do
   (nm, l) <- global_string format

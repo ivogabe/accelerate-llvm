@@ -55,7 +55,6 @@ data PTXOp t where
   PTXGenerate  :: PTXOp (Fun' (sh -> t)              -> Out sh  t -> ())
   PTXPermute   :: PTXOp (Fun' (e -> e -> e)
                          -> Mut sh' e
-                         -> Mut sh' Word32
                          -> In sh (PrimMaybe (sh', e))
                          -> ())
   PTXPermute'  :: PTXOp (Mut sh' e
@@ -132,21 +131,7 @@ instance LowerAcc PTXOp where
     = Exec (PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o1 o2
     = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute     (Just a) b@(ArgArray _ (ArrayR shr _) sh _) c
-    | DeclareVars lhs w lock <- declareVars $ buffersR $ TupRsingle scalarTypeWord32
-    = aletUnique lhs
-        (Alloc shr scalarTypeWord32 $ groundToExpVar (shapeType shr) sh)
-        $ alet LeftHandSideUnit
-          (Exec PTXGenerate ( -- TODO: The old pipeline used a 'memset 0' instead, which sounds faster...
-                ArgFun (Lam (LeftHandSideWildcard (shapeType shr)) $ Body $ Const scalarTypeWord32 0)
-            :>: ArgArray Out (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId)
-            :>: ArgsNil))
-          (Exec PTXPermute (
-                weaken w a
-            :>: weaken w b
-            :>: ArgArray Mut (ArrayR shr (TupRsingle scalarTypeWord32)) (weakenVars w sh) (lock weakenId)
-            :>: weaken w c
-            :>: ArgsNil))
+  mkPermute (Just a) b c = Exec PTXPermute (a :>: b :>: c :>: ArgsNil)
   mkPermute Nothing a b = Exec PTXPermute' (a :>: b :>: ArgsNil)
   {-mkFold a (Just seed) b c = Exec PTXFold (a :>: seed :>: b :>: c :>: ArgsNil)
   mkFold a Nothing b c = Exec PTXFold1 (a :>: b :>: c :>: ArgsNil) -}
@@ -210,10 +195,10 @@ instance SetOpIndices PTXOp where
     | otherwise
     = Nothing
   setOpIndices _ PTXFold1 _ _ = error "Missing indices for PTXFold1"
-  setOpIndices indexVar PTXPermute (_ :>: _ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
+  setOpIndices indexVar PTXPermute (_ :>: _ :>: ArgArray _ (ArrayR shr _) _ _ :>: _) (_ :: IdxArgs idxEnv f)
     | Just i <- findIndex shr
     = Just $ Right $
-      IdxArgNone :>: IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
+      IdxArgNone :>: IdxArgNone :>: IdxArgIdx (rank shr) i :>: ArgsNil
     | otherwise
     = Nothing
     where
@@ -314,17 +299,17 @@ instance MakesILP PTXOp where
       ( lower (-2) (InDir l)
       <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). -}
 
-  mkGraph c PTXPermute (_fun :>: L _ lTargets :>: L _ lLocks :>: L _ lIn :>: ArgsNil) = do
+  mkGraph c PTXPermute (_fun :>: L _ lTargets :>: L _ lIn :>: ArgsNil) = do
     let bsTargets = getLabelArrDeps lTargets
-    let bsLocks   = getLabelArrDeps lLocks
     let bsIn      = getLabelArrDeps lIn
     wsTargets <- use $ allWriters bsTargets
-    wsLocks   <- use $ allWriters bsLocks
     wsIn      <- use $ allWriters bsIn
-    fusionILP %= (wsTargets <> wsLocks <> wsIn) `allBefore` c
-    fusionILP.constraints %= (<> [SameFoldSize c])
-    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsLocks <> bsIn)
-                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsLocks <> bsIn))
+    fusionILP %= wsTargets `allBefore` c
+    fusionILP.constraints %= (
+      <> [SameFoldSize c]
+      <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
+    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
+                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsIn))
 
   mkGraph c PTXPermute' (L _ lTargets :>: L _ lIn :>: ArgsNil) = do
     let bsTargets = getLabelArrDeps lTargets
