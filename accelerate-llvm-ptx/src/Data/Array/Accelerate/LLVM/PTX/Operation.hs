@@ -27,14 +27,9 @@ import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
 
 
-import Data.Array.Accelerate.AST.Environment (weakenId)
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
-import Data.Array.Accelerate.Trafo.Var (DeclareVars(..), declareVars)
-import Data.Array.Accelerate.Representation.Ground (buffersR)
-import Data.Array.Accelerate.AST.LeftHandSide
 import Data.Array.Accelerate.Trafo.Operation.Bounds
-import Data.Array.Accelerate.Trafo.Operation.Substitution (aletUnique, alet, weaken)
-import Data.Array.Accelerate.Representation.Shape (ShapeR (..), shapeType, rank)
+import Data.Array.Accelerate.Representation.Shape (ShapeR (..), rank)
 import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Analysis.Match
