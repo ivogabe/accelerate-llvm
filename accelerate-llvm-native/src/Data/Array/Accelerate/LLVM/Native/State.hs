@@ -46,9 +46,9 @@ evalNative :: Native -> LLVM Native a -> IO a
 --
 evalNative target acc = do
   let label = Ptr $(litE (stringPrimL (map (fromIntegral . ord) "Native.run\0")))
-  emit_frame_mark_start label
+  emitFrameMarkStart label
   !result <- evalLLVM target acc
-  emit_frame_mark_end label
+  emitFrameMarkEnd label
   return result
 
 

@@ -5,9 +5,11 @@
 #endif
 
 #include "types.h"
-#include "tracy.h"
 #include <unistd.h>
 #include <sched.h>
+
+// Installed by accelerate-tracy package
+#include "accelerate_tracy.h"
 
 struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .accelerate_buffer_alloc = accelerate_buffer_alloc,
@@ -21,6 +23,14 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .accelerate_schedule_after_or = accelerate_schedule_after_or,
   .accelerate_signal_resolve = accelerate_signal_resolve,
   .hs_try_putmvar = hs_try_putmvar
+};
+
+static const struct ___tracy_source_location_data program_run_srcloc = {
+  .name = "program.run()",
+  .function = "-",
+  .file = "-",
+  .line = 0,
+  .color = 0x00FFFF,
 };
 
 __thread struct Workers *accelerate_worker_workers = NULL;
@@ -110,9 +120,9 @@ void* accelerate_worker(void *data_packed) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
 
-      TRACY_ZONE_BEGIN(run_ctx, &program_run_srcloc, COLOR_NORMAL);
+      AccTracyEmitZoneBegin(run_ctx, &program_run_srcloc, COLOR_NORMAL);
       struct KernelLaunch* kernel = task.program->run(&accelerate_runtime_lib, workers, thread_idx, task.program, task.location);
-      TRACY_ZONE_END(run_ctx);
+      AccTracyEmitZoneEnd(run_ctx);
 
       if (kernel == NULL) {
         accelerate_program_release(task.program);
@@ -121,10 +131,10 @@ void* accelerate_worker(void *data_packed) {
       } else {
         kernel->work_per_thread = accelerate_work_per_thread_claim(workers, thread_idx);
         // Initialize kernel memory and check if the kernel should be executed in parallel.
-        TRACY_ZONE_BEGIN(init_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
+        AccTracyEmitZoneBegin(init_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
         unsigned char parallel =
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFF, workers->thread_count);
-        TRACY_ZONE_END(init_ctx);
+        AccTracyEmitZoneEnd(init_ctx);
 
         // start_task from the Work Assisting paper
         if (parallel == 1) {
@@ -132,9 +142,9 @@ void* accelerate_worker(void *data_packed) {
           accelerate_parker_wake_all(&workers->scheduler.parker);
         }
 
-        TRACY_ZONE_BEGIN(work_ctx, kernel->tracy_srcloc, COLOR_NORMAL);
+        AccTracyEmitZoneBegin(work_ctx, kernel->tracy_srcloc, COLOR_NORMAL);
         kernel->work_function(kernel, workers->locks, parallel == 1 ? thread_idx : 0, parallel == 1 ? workers->thread_count : 1);
-        TRACY_ZONE_END(work_ctx);
+        AccTracyEmitZoneEnd(work_ctx);
 
         // Keep track of whether this was the last thread working on the kernel
         bool is_last;
@@ -148,9 +158,9 @@ void* accelerate_worker(void *data_packed) {
         if (is_last) {
           // The last thread executes the finish function.
           // First, execute the finish procedure of the kernel:
-          TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
+          AccTracyEmitZoneBegin(final_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE, workers->thread_count);
-          TRACY_ZONE_END(final_ctx);
+          AccTracyEmitZoneEnd(final_ctx);
           // Recycle work_per_thread for later kernels
           accelerate_work_per_thread_free(workers, kernel->work_per_thread);
           // Then continue the program after this kernel, via
@@ -187,9 +197,9 @@ void* accelerate_worker(void *data_packed) {
         accelerate_parker_cancel_park(&workers->scheduler.parker);
       }
 
-      TRACY_ZONE_BEGIN(steal_ctx, kernel->tracy_srcloc, COLOR_DARK);
+      AccTracyEmitZoneBegin(steal_ctx, kernel->tracy_srcloc, COLOR_DARK);
       kernel->work_function(kernel, workers->locks, thread_idx, workers->thread_count);
-      TRACY_ZONE_END(steal_ctx);
+      AccTracyEmitZoneEnd(steal_ctx);
 
       // signal_task_empty from the Work Assisting paper,
       // and end_task
@@ -206,9 +216,9 @@ void* accelerate_worker(void *data_packed) {
 
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
-        TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_DARK);
+        AccTracyEmitZoneBegin(final_ctx, kernel->tracy_srcloc, COLOR_DARK);
         kernel->work_function(kernel, workers->locks, 0xFFFFFFFE, workers->thread_count);
-        TRACY_ZONE_END(final_ctx);
+        AccTracyEmitZoneEnd(final_ctx);
         // Recycle work_per_thread for later kernels
         if (work_per_thread != NULL) {
           // For kernels started via accelerate_llvm_native_ffi_parallel_loop,
