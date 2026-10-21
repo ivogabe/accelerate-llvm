@@ -12,7 +12,7 @@
 module LLVM.AST.Type.Operand (
 
   Operand(..),
-  ptrCast,
+  ptrCast, ptrCastUnSizedArray,
 
 ) where
 
@@ -62,3 +62,7 @@ ptrCast tp (ConstantOperand c) = ConstantOperand $ case c of
   ConstantGetElementPtr _ -> internalError "ptrCast not yet supported for ConstantGetElementPtr"
   GlobalReference (PrimType (PtrPrimType _ addrspace)) name -> GlobalReference (PrimType (PtrPrimType tp addrspace)) $ castName name
   GlobalReference _ _ -> internalError "Ptr impossible"
+
+ptrCastUnSizedArray :: Operand (Ptr (SizedArray a)) -> Operand (Ptr a)
+ptrCastUnSizedArray operand = case typeOf operand of
+  PrimType (PtrPrimType (ArrayPrimType _ t) _) -> ptrCast t operand

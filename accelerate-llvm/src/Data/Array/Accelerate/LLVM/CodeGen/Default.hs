@@ -538,7 +538,7 @@ defaultParCodeGenFold1 scanCode descending
 defaultParCodeGenFold1 _ _ _ _ = internalError "Missing index for argument of fold1"
 
 data FoldScanCodeGen target analysis = FoldScanCodeGen
-  (forall env idxEnv sh e. ParCodeGenFoldCommutative target analysis env idxEnv sh e)
+  (forall env idxEnv sh e. Maybe (ParCodeGenFoldCommutative target analysis env idxEnv sh e))
   (forall env idxEnv sh e. ParCodeGenChainedScan target analysis env idxEnv sh e)
 
 parCodeGenFoldOrScan
@@ -570,7 +570,9 @@ parCodeGenFoldOrScan (FoldScanCodeGen foldCode scanCode) descending foldOrScan i
   | IsFold <- foldOrScan
   , Just s <- seed
   , Just i <- identity
-  = foldCode descending tp fun s i (\envs -> readArray' envs input inputIdx) codeEnd
+  , Just foldCode' <- foldCode
+  , isCommutative fun
+  = foldCode' descending tp fun s i (\envs -> readArray' envs input inputIdx) codeEnd
   -- Non-commutative folds or any scan
   | otherwise
   = scanCode descending foldOrScan inclusiveness tp fun seed identity (\envs -> readArray' envs input inputIdx) codeSeed codeElement codeEnd
@@ -704,7 +706,7 @@ chainedScanLookback
   -> Maybe (Exp env e) -- Identity
   -> Operands e -- Reduced value of current tile
   -> CodeGen target (Operands e, Operands e) -- Exclusive, inclusive prefix of this tile
-chainedScanLookback envs getThreadCount descriptorsLength tp ptr lookbackIndex lookbackValue fun seed identity local = do
+chainedScanLookback envs getThreadCount descriptorsLength tp ptr lookbackIndex lookbackValue fun seed identity aggregate = do
   -- Before sharing our aggregate, check if we can already write to this
   -- slot in the cyclic buffer in 'ptr'.
   --
@@ -802,7 +804,7 @@ chainedScanLookback envs getThreadCount descriptorsLength tp ptr lookbackIndex l
   nextTileIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
   (thisDescIdx, thisTag) <- chainedScanDescriptorIdxTag descriptorsLength nextTileIdx
   (thisFlagPtr, thisAggregatePtrs, thisPrefixPtrs) <- chainedScanGetDescriptorSlot descriptorsLength tp ptr thisDescIdx
-  tupleStore tp thisAggregatePtrs local
+  tupleStore tp thisAggregatePtrs aggregate
   OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagAggregate
   _ <- instrMD' (AtomicStore scalarType thisFlagPtr newFlag Release) (bufferMetadata' Nothing)
 
@@ -828,7 +830,7 @@ chainedScanLookback envs getThreadCount descriptorsLength tp ptr lookbackIndex l
 
       hasAggregate <- A.eq singleType flag flagAggregate'
       hasPrefix <- A.eq singleType flag flagPrefix'
-      
+
       _ <- A.ifThenElse (TupRunit, A.lor hasAggregate hasPrefix)
         (do
           value <- A.ifThenElse (tp, return hasPrefix)
@@ -859,7 +861,7 @@ chainedScanLookback envs getThreadCount descriptorsLength tp ptr lookbackIndex l
 
   isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
   -- Add local value to exclusive prefix to compute inclusive prefix
-  inclusivePrefix <- combineInDirection envs tp fun seed isFirstTile False exclusivePrefix local
+  inclusivePrefix <- combineInDirection envs tp fun seed isFirstTile False exclusivePrefix aggregate
 
   tupleStore tp thisPrefixPtrs inclusivePrefix
   OP_Word8 newFlag' <- A.bor TypeWord8 thisTag $ OP_Word8 flagPrefix

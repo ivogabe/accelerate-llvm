@@ -338,7 +338,7 @@ type NParLoopCodeGen = ParLoopCodeGen Native CPULoopAnalysis
 -- Parallel code generation for one-dimensional collective operations (folds and scans).
 -- Other operations, either OpCodeGenSingle or nested deeper, are handled in opCodeGen
 parCodeGen :: Bool -> FlatOp NativeOp env idxEnv -> Maybe (Exists (NParLoopCodeGen env idxEnv))
-parCodeGen descending (FlatOp op args idxArgs) = case op of
+parCodeGen descending (FlatOp op' args idxArgs) = case op' of
   NScan1 _ -> defaultParCodeGenScan1 scanCode descending args idxArgs
   NScan' _ -> defaultParCodeGenScan' scanCode descending args idxArgs
   NScan _ -> defaultParCodeGenScan scanCode descending args idxArgs
@@ -347,7 +347,7 @@ parCodeGen descending (FlatOp op args idxArgs) = case op of
   _ -> Nothing
 
 scanCode :: FoldScanCodeGen Native CPULoopAnalysis
-scanCode = FoldScanCodeGen parCodeGenFoldCommutative parCodeGenChainedScan
+scanCode = FoldScanCodeGen (Just parCodeGenFoldCommutative) parCodeGenChainedScan
 
 parCodeGenFoldCommutative
   :: ParCodeGenFoldCommutative Native CPULoopAnalysis env idxEnv sh e
@@ -518,7 +518,7 @@ parCodeGenChainedScan _descending foldOrScan inclusiveness tp fun seed identity 
       when (inclusiveness == ScanExclusive) $ codeElement envs accum
       isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
       first <- A.land isFirstTile $ envsIsFirst envs
-      new <- combineInDirection envs seed first False accum x
+      new <- combineInDirection envs tp fun seed first False accum x
       when (inclusiveness == ScanInclusive) $ codeElement envs new
       tupleStore tp accumVar new
     else do
@@ -526,7 +526,7 @@ parCodeGenChainedScan _descending foldOrScan inclusiveness tp fun seed identity 
       -- Execute the reduce-phase of a parallel chained scan here.
       x <- input envs
       accum <- tupleLoad tp accumVar
-      new <- combineInDirection envs identity (envsIsFirst envs) False accum x
+      new <- combineInDirection envs tp fun identity (envsIsFirst envs) False accum x
       tupleStore tp accumVar new
   )
   -- Code after the tile loop
@@ -569,42 +569,17 @@ parCodeGenChainedScan _descending foldOrScan inclusiveness tp fun seed identity 
       when (inclusiveness == ScanExclusive) $ codeElement envs accum
       isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
       first <- A.land isFirstTile $ envsIsFirst envs
-      new <- combineInDirection envs seed first False accum x
+      new <- combineInDirection envs tp fun seed first False accum x
       when (inclusiveness == ScanInclusive) $ codeElement envs new
       tupleStore tp accumVar new
     )
   )
   where
     -- ((flag, valueAggregate), valuePrefix)
-    memorySlotTp = TupRsingle scalarTypeWord8 `TupRpair` tp `TupRpair` tp
-    memoryTp = ArrayPrimType (fromIntegral descriptorsLength) $ StructPrimType False $ bufferEltsR memorySlotTp
+    memoryTp = chainedScanKernelMemory descriptorsLength tp
 
     descriptorIdxTag = chainedScanDescriptorIdxTag descriptorsLength
     getDescriptorSlot = chainedScanGetDescriptorSlot descriptorsLength tp
-
-    -- initial: the initial value of the accumulator ('a'). This function
-    --   checks whether this is Just or Nothing to know whether the variable
-    --   was initialized or not.
-    -- isFirst: whether this is the first iteration. When isFirst is true and
-    --   initial Nothing, this function will not use the value in 'a' and
-    --   directly return 'b'. Otherwise it will combine 'a' and 'b'.
-    -- reversed: whether the direction should be reversed (ie fun should be flipped)
-    combineInDirection :: Envs env idxEnv -> Maybe a -> Operands Bool -> Bool -> Operands e -> Operands e -> CodeGen Native (Operands e)
-    combineInDirection envs initial isFirst reversed a b
-      | isJust initial = do
-        if envsDescending envs /= reversed then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) b a
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) a b
-      | otherwise =
-        A.ifThenElse' (tp, isFirst)
-          ( return b )
-          ( do
-            if envsDescending envs /= reversed then
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) b a
-            else
-              app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) a b
-          )
 
 {- TODO WALL: DEAD CODE
 -- Checks if the cluster has a permute.

@@ -20,13 +20,11 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen (
 
 -- accelerate
 
-import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape (shapeRFromRank, rank)
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Partitioned as P hiding (combine)
-import Data.Array.Accelerate.Analysis.Exp
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Error
 import qualified Data.Array.Accelerate.AST.Environment as Env
@@ -51,7 +49,6 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
-import LLVM.AST.Type.Instruction.Atomic
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -62,7 +59,6 @@ import Data.Array.Accelerate.LLVM.PTX.CodeGen.Permute (atomically, lockArraySize
 import Data.Array.Accelerate.AST.LeftHandSide (Exists (Exists), flattenTupR)
 import Control.Monad
 import Control.Monad.Reader ( asks )
-import qualified Data.Array.Accelerate.LLVM.CodeGen.Loop as Loop
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant as Const
@@ -125,6 +121,10 @@ codegenIndependent name env flatCluster parallelDepth
       imapFromTo (A.liftInt 0) parSize $ \linearIdx -> do
         idx <- indexOfInt parallelShr parSizes linearIdx
         let envs' = envs{
+            -- Tile size and count are currently only needed when parallelizing
+            -- collective operations; not when parallelizing over independent
+            -- dimensions.
+            envsTileSizeCount = internalError "Tile size and count are not available when parallelizing over independent dimensions.",
             envsLoopDepth = parallelDepth,
             envsIdx =
               foldr (\(o, i) -> Env.partialUpdate o i) (envsIdx envs)
@@ -168,6 +168,12 @@ codegenDim1 name env flatCluster
   , elementsPerThread <- if rank shr > 1 then 1 else 4
   , envs1 <- envs{
       envsLoopDepth = 0,
+      -- TODO: Set number of tiles
+      -- The number of tiles needs to be available in the finalization kernel, but we cannot properly compute the
+      -- number of tiles there, as that is dynamically computed in the 'regular' kernel based on blockDim
+      -- (which varies per GPU and exact instantiation of scan based on register pressure)
+      -- We either need a way to properly propagate that information,
+      -- or move the finalization into the 'regular' kernel (and make sure that kernel runs on empty inputs).
       envsDescending = isDescending direction
     }
   -- Kernel memory
@@ -313,93 +319,34 @@ opCodeGen flatOp@(FlatOp op' args idxArgs) = case op' of
 type PTXParLoopCodeGen = ParLoopCodeGen PTX GPULoopAnalysis
 
 parCodeGen :: Bool -> FlatOp PTXOp env idxEnv -> Maybe (Exists (PTXParLoopCodeGen env idxEnv))
--- TODO: parCodeGen for Folds
--- TODO: Make defaultParCodeGenScan{,',1}?
-parCodeGen descending (FlatOp (PTXScan1 _)
-    (ArgFun fun :>: input :>: output :>: _)
-    (_ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: _))
-  = Just $ parCodeGenScan descending IsScan ScanInclusive fun Nothing input inputIdx
-    (\_ _ -> return ())
-    (\envs result -> writeArray' envs output outputIdx result)
-    (\_ _ -> return ())
-parCodeGen descending (FlatOp (PTXScan' _)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: foldOutput :>: _)
-    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: IdxArgIdx _ outputIdx :>: IdxArgIdx _ foldOutputIdx :>: _))
-  = Just $ parCodeGenScan descending IsScan ScanExclusive fun (Just seed) input inputIdx
-    (\_ _ -> return ())
-    (\envs result -> writeArray' envs output outputIdx result)
-    (\envs result -> writeArray' envs foldOutput foldOutputIdx result)
-parCodeGen descending (FlatOp (PTXScan dir)
-    (ArgFun fun :>: ArgExp seed :>: input :>: output :>: _)
-    (_ :>: _ :>: IdxArgIdx _ inputIdx :>: _ :>: _))
-  = case dir of
-      LeftToRight -> Just $ parCodeGenScan descending IsScan ScanExclusive fun (Just seed) input inputIdx
-        (\_ _ -> return ())
-        (\envs result -> writeArray' envs output inputIdx result)
-        (\envs result -> do
-          let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
-          writeArrayAt' envs output rowIdx n' result
-        )
-      RightToLeft -> Just $ parCodeGenScan descending IsScan ScanInclusive fun (Just seed) input inputIdx
-        (\envs result -> do
-          let n' = envsPrjParameter (Var scalarTypeInt $ varIdx n) envs
-          writeArrayAt' envs output rowIdx n' result
-        )
-        (\envs result -> writeArray' envs output inputIdx result)
-        (\_ _ -> return ())
-  where
-    ArgArray _ _ inputSh _ = input
-    n = case inputSh of
-      TupRpair _ (TupRsingle n') -> n'
-      _ -> internalError "Shape impossible"
-    rowIdx = case inputIdx of
-      TupRpair i _ -> i
-      _ -> internalError "Shape impossible"
-parCodeGen _ _ = Nothing
+parCodeGen descending (FlatOp op' args idxArgs) = case op' of
+  PTXScan1 _ -> defaultParCodeGenScan1 scanCode descending args idxArgs
+  PTXScan' _ -> defaultParCodeGenScan' scanCode descending args idxArgs
+  PTXScan _ -> defaultParCodeGenScan scanCode descending args idxArgs
+  PTXFold -> defaultParCodeGenFold scanCode descending args idxArgs
+  PTXFold1 -> defaultParCodeGenFold1 scanCode descending args idxArgs
+  _ -> Nothing
 
-parCodeGenScan
-  :: Bool -- Whether the loop is descending
-  -- Whether this is a fold. Folds use similar code generation as scans, hence
-  -- it is handled here. Commutative folds are handled separately.
-  -> FoldOrScan
-  -> ScanInclusiveness
-  -> Fun env (e -> e -> e)
-  -> Maybe (Exp env e) -- Seed. Optional for inclusive scans, required for exclusive scans
-  -> Arg env (In (sh, Int) e)
-  -> ExpVars idxEnv (sh, Int)
-  -- Code after evaluating the seed
-  -- Must be 'return ()' if the seed is Nothing
-  -> (Envs env idxEnv -> Operands e -> CodeGen PTX ())
-  -- Code in a tile loop, to handle one item of the output
-  -> (Envs env idxEnv -> Operands e -> CodeGen PTX ())
-  -- Code after the parallel loop
-  -> (Envs env idxEnv -> Operands e -> CodeGen PTX ())
-  -> Exists (PTXParLoopCodeGen env idxEnv)
-parCodeGenScan descending foldOrScan inclusiveness fun Nothing input index codeSeed codeElement codeEnd
-  -- TODO: Move this logic to default implementations
-  | Just identity <- if descending then findRightIdentity fun else findLeftIdentity fun
-  = parCodeGenScan descending foldOrScan inclusiveness fun (Just $ mkConstant tp identity) input index codeSeed codeElement codeEnd
-  where
-    ArgArray _ (ArrayR _ tp) _ _ = input
-parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed codeElement codeEnd = Exists $ ParLoopCodeGen
+scanCode :: FoldScanCodeGen PTX GPULoopAnalysis
+scanCode = FoldScanCodeGen Nothing parCodeGenChainedScan
+
+parCodeGenChainedScan
+  :: forall env idxEnv sh e. ParCodeGenChainedScan PTX GPULoopAnalysis env idxEnv sh e
+parCodeGenChainedScan descending foldOrScan inclusiveness tp fun seed identity input codeSeed codeElement codeEnd = Exists $ ParLoopCodeGen
   analysis
   -- In kernel memory, store the index of the block we must now handle and the
   -- reduced value so far. 'Handle' here means that we should now add the value
   -- of that block.
-  (bufferEltsR memoryTp)
+  (TupRsingle memoryTp)
   -- Initialize kernel memory
-  (\kernelMem envs -> do
-    ptrs <- tuplePtrs memoryTp kernelMem
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instrMD' (Store NonVolatile intPtr (scalar scalarTypeInt 0) Nothing) (bufferMetadata' Nothing)
-        case seed of
-          Nothing -> return ()
-          Just s -> do
-            value <- llvmOfExp (compileArrayInstrEnvs envs) s
-            codeSeed envs value
-            tupleStore tp valuePtrs value
+  (\ptr envs -> do
+    valuePtrs <- chainedScanInit descriptorsLength tp ptr
+    case seed of
+      Nothing -> return ()
+      Just s -> do
+        value <- llvmOfExp (compileArrayInstrEnvs envs) s
+        codeSeed envs value
+        tupleStore tp valuePtrs value
   )
   -- Initialize a thread(group)
   (\_ _ -> do
@@ -408,10 +355,13 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
     idx <- warpId
     -- The entry in shared memory for this warp
     smemWarp <- tupleArrayGep tp smemAll idx
-    return (smemAll, smemWarp)
+    -- State of look-back
+    lookbackIndex <- staticSharedMemSingle scalarTypeInt
+    lookbackValue <- staticSharedMemTupleSingle tp
+    return (smemAll, smemWarp, lookbackIndex, lookbackValue)
   )
   -- Code before the tile loop: initialize value of this warp to identity (zero)
-  (\_ (_, smemWarp) _ envs -> do
+  (\_ (_, smemWarp, _, _) _ envs -> do
     case identity of
       Nothing -> return ()
       Just identity' -> perThreadBlock $ do
@@ -419,38 +369,23 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
         tupleStore tp smemWarp value
   )
   -- Code within the tile loop: perform reduction
-  (\_ (_, smemWarp) _ envs -> do
+  (\_ (_, smemWarp, _, _) _ envs -> do
     dev <- liftCodeGen $ asks ptxDeviceProperties
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
-    x <- readArray' envs input index
+    x <- input envs
+    -- TODO: When 'fun' is commutative, we can optimize this by only doing the
+    -- warp-wide reduction once, at the end.
     warpValue <- reduceWarp
       dev tp fun'
       (OP_Int32 <$> envsGpuWarpActiveThreads envs)
       x
     perWarp $ do
-      new <-
-        if isJust identity then do
-          accum <- tupleLoad tp smemWarp
-          if envsDescending envs then
-            app2 fun' warpValue accum
-          else
-            app2 fun' accum warpValue
-        else
-          A.ifThenElse' (tp, envsIsFirst envs)
-            ( do
-              return x
-            )
-            ( do
-              accum <- tupleLoad tp smemWarp
-              if envsDescending envs then
-                app2 fun' warpValue accum
-              else
-                app2 fun' accum warpValue
-            )
+      accum <- tupleLoad tp smemWarp
+      new <- combineInDirection envs tp fun identity (envsIsFirst envs) (envsDescending envs) accum warpValue
       tupleStore tp smemWarp new
   )
   -- Code after the tile loop
-  (\_ (smem, _) kernelMem envs -> warpPerThreadBlock $ do
+  (\_ (smem, _, lookbackIndex, lookbackValue) kernelMem envs -> warpPerThreadBlock $ do
     let identity' = fmap (llvmOfExp $ compileArrayInstrEnvs envs) identity
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     dev <- liftCodeGen $ asks ptxDeviceProperties
@@ -465,66 +400,18 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
         -- This is executed on a single warp.
         scanFromSMem dir dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
 
-    -- Share aggregate
-    prefix <- perWarp' tp $ do
-      ptrs <- tuplePtrs memoryTp kernelMem
-      case ptrs of
-        TupRsingle _ -> internalError "Pair impossible"
-        TupRpair (TupRsingle idxPtr) valuePtrs -> do
-          -- Wait on our turn
-          _ <- Loop.while [] TupRunit
-            (\_ -> do
-              idx <- instrMD (AtomicLoad scalarTypeInt idxPtr Acquire) (bufferMetadata' Nothing)
-              A.neq singleType idx (envsTileIndex envs)
-            )
-            (\_ -> return OP_Unit) -- TODO: Maybe add nanosleep here
-            OP_Unit
-          _ <- instr' $ LLVM.Fence (CrossThread, Acquire)
-          
-          OP_Pair exclusive inclusive <-
-            if isNothing seed then
-              -- If there is no seed, then write the output directly in the first tile.
-              -- The other tiles must combine their result with the given operator.
-              A.ifThenElse (TupRpair tp tp, A.eq singleType (envsTileIndex envs) (A.liftInt 0))
-                (do
-                  return $ OP_Pair (Const.undefs tp) aggregate
-                )
-                (do
-                  prefix <- tupleLoad tp valuePtrs
-                  inc <-
-                    if envsDescending envs then
-                      app2 fun' aggregate prefix
-                    else
-                      app2 fun' prefix aggregate
-                  return $ OP_Pair prefix inc
-                )
-            -- If there is a seed, then all tiles will combine their local result with
-            -- the already available value.
-            else do
-              prefix <- tupleLoad tp valuePtrs
-              inc <-
-                if envsDescending envs then
-                  app2 fun' aggregate prefix
-                else
-                  app2 fun' prefix aggregate
-              return $ OP_Pair prefix inc
-
-          tupleStore tp valuePtrs inclusive
-
-          _ <- instr' $ LLVM.Fence (CrossThread, Release)
-          OP_Int nextIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
-          _ <- instrMD' (AtomicStore scalarTypeInt idxPtr nextIdx Release) (bufferMetadata' Nothing)
-          return exclusive
+    -- Perform look-back to find exclusive prefix for this tile
+    (exclusivePrefix, _) <- chainedScanLookback envs gridDim' descriptorsLength tp kernelMem lookbackIndex lookbackValue fun seed identity aggregate 
     
     when (foldOrScan == IsScan) $ do
-      -- Add prefix to all values in smem
+      -- Add exclusivePrefix to all values in smem
       lane <- laneId
 
       let action =
             A.when (A.lt singleType lane $ OP_Int32 $ envsGpuActiveWarps envs) $ do
               ptr <- tupleArrayGep tp smem lane
               value <- tupleLoad tp ptr
-              new <- if envsDescending envs then app2 fun' value prefix else app2 fun' prefix value
+              new <- if envsDescending envs then app2 fun' value exclusivePrefix else app2 fun' exclusivePrefix value
               tupleStore tp ptr new
 
           action' =
@@ -545,18 +432,14 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
   (\_ _ _ -> return ())
   -- Finalize the kernel
   (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair _ valuePtrs -> do
-        value <- tupleLoad tp valuePtrs
-        codeEnd envs value
+    value <- chainedScanFinish envs descriptorsLength tp ptr
+    codeEnd envs value
   )
   -- Code in next tile loop
-  (if foldOrScan == IsFold then Nothing else Just (analysis, \(_, smemWarp) _ envs -> do
+  (if foldOrScan == IsFold then Nothing else Just (analysis, \(_, smemWarp, _, _) _ envs -> do
     dev <- liftCodeGen $ asks ptxDeviceProperties
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
-    x <- readArray' envs input index
+    x <- input envs
 
     (scanned, reduced) <- case seed of
       Just _ -> do
@@ -600,16 +483,8 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
       tupleStore tp smemWarp reduced
   ))
   where
-    memoryTp = TupRsingle scalarTypeInt `TupRpair` tp
-    ArgArray _ (ArrayR _ tp) _ _ = input
-    identity
-      | Just s <- seed
-      , if descending then isRightIdentity fun s else isLeftIdentity fun s
-      = Just s
-      | Just v <- if descending then findRightIdentity fun else findLeftIdentity fun
-      = Just $ mkConstant tp v
-      | otherwise
-      = Nothing
+    memoryTp = chainedScanKernelMemory descriptorsLength tp
+
     dir = if descending then RightToLeft else LeftToRight
     analysis = mempty
       { gpuLoopScheduleAscending = True
@@ -617,8 +492,18 @@ parCodeGenScan descending foldOrScan inclusiveness fun seed input index codeSeed
       -- If we know an identity value, we can implement this without loop peeling
       , gpuLoopPeel = isNothing identity
       }
+    
+    gridDim' :: CodeGen PTX (Operand Word32)
+    gridDim' = do
+      i <- gridDim
+      OP_Word32 w <- A.fromIntegral TypeInt32 numType i
+      return w
 
 -- Maximum number of warps per threadgroup
 maxWarps :: Word64
 maxWarps = 32
 
+-- Ideally at least three times the number of shading multiprocessors (SMPs).
+-- Should be a power of 2, and at least 2
+descriptorsLength :: Int
+descriptorsLength = 2048

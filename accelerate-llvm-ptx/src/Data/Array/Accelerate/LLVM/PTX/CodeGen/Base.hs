@@ -38,7 +38,8 @@ module Data.Array.Accelerate.LLVM.PTX.CodeGen.Base (
   __shfl_up, __shfl_down, __shfl_idx, __broadcast,
 
   -- Shared memory
-  staticSharedMem, staticSharedMemTuple,
+  staticSharedMem, staticSharedMemSingle,
+  staticSharedMemTuple, staticSharedMemTupleSingle,
   sharedMemorySizeAdd,
   dynamicSharedMem,
   sharedMemAddrSpace, sharedMemVolatility,
@@ -650,6 +651,11 @@ staticSharedMem tp n = do
 
   return sm
 
+staticSharedMemSingle
+    :: ScalarType e
+    -> CodeGen PTX (Operand (Ptr (BufferEltR e)))
+staticSharedMemSingle tp = ptrCastUnSizedArray <$> staticSharedMem tp 1
+
 staticSharedMemTuple
   :: forall e.
      TypeR e
@@ -663,6 +669,18 @@ staticSharedMemTuple tp n = case tp of
     , Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr t'
     , Refl <- reprIsSingle @PrimType @(BufferEltR e) @SizedArray t' ->
       TupRsingle <$> staticSharedMem t n
+
+staticSharedMemTupleSingle
+  :: forall e.
+     TypeR e
+  -> CodeGen PTX (TupR Operand (Distribute Ptr (BufferEltR e)))
+staticSharedMemTupleSingle tp = case tp of
+  TupRunit -> return TupRunit
+  TupRpair t1 t2 -> TupRpair <$> staticSharedMemTupleSingle t1 <*> staticSharedMemTupleSingle t2
+  TupRsingle t
+    | t' <- bufferEltR t
+    , Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr t' ->
+      TupRsingle <$> staticSharedMemSingle t
 
 -- External declaration in shared memory address space. This must be declared in
 -- order to access memory allocated dynamically by the CUDA driver. This results
