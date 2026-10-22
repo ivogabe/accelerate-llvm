@@ -416,8 +416,8 @@ convert _ Return =
     maySuspend = False,
     phase2 = \_ _ _ _ _ _ _ -> returnNull
   }
--- convert inAwhile (Spawn (Effect (SignalAwait signals) a) b)
-convert inAwhile (Spawn a b)
+-- convert inAwhile (Spawn SplitEnd (Effect (SignalAwait signals) a) b)
+convert inAwhile (Spawn SplitEnd a b)
   | Exists2 a1 <- convert inAwhile a
   , Exists2 b1 <- convert inAwhile b =
   Exists2 $ Phase1{
@@ -469,6 +469,7 @@ convert inAwhile (Spawn a b)
         (tupleRight stateIdx)
         nextBlock
   }
+convert inAwhile (Release SubsetEnd s) = convert inAwhile s
 -- Control flow
 convert inAwhile (Acond cond whenTrue whenFalse next)
   | Exists2 whenTrue1 <- convert inAwhile whenTrue
