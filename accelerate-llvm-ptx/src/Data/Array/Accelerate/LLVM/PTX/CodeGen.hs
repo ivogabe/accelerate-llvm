@@ -475,7 +475,7 @@ parCodeGenChainedScan descending foldOrScan inclusiveness tp fun seed identity i
       x
     perWarp $ do
       accum <- tupleLoad tp smemWarp
-      new <- combineInDirection envs tp fun identity (envsIsFirst envs) (envsDescending envs) accum warpValue
+      new <- combineInDirection envs tp fun identity (envsIsFirst envs) False accum warpValue
       tupleStore tp smemWarp new
   )
   -- Code after the tile loop
