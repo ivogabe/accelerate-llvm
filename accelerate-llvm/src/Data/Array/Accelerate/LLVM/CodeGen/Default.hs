@@ -1,4 +1,3 @@
-{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
@@ -43,7 +42,6 @@ module Data.Array.Accelerate.LLVM.CodeGen.Default (
 ) where
 
 import Data.Array.Accelerate.Representation.Array
-import Data.Array.Accelerate.Representation.Elt
 import Data.Array.Accelerate.Representation.Type
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.AST.LeftHandSide
@@ -70,11 +68,13 @@ import LLVM.AST.Type.Instruction.Atomic
 import LLVM.AST.Type.Instruction.RMW
 import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.GetElementPtr
+import LLVM.AST.Type.Metadata
 import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 
 import Control.Monad
 import Data.Maybe
+import Data.Typeable ( (:~:)(..) )
 
 type CG f = forall target op env idxEnv. (CompileForeignExp target, Intrinsic target) => Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
 type CGLoop f = forall target op env idxEnv. (CompileForeignExp target, Intrinsic target) => FlatOp op env idxEnv -> Args env f -> IdxArgs idxEnv f -> (LoopDepth, OpCodeGen target op env idxEnv)
@@ -149,68 +149,27 @@ defaultCodeGenPermute lockArraySize atomically (ArgFun combineFun :>: output :>:
       let sh' = envsPrjParameters (shapeExpVars shr sh) envs
       j <- intOfIndex shr sh' idx
 
-      -- Choose a synchronisation strategy:
-      -- (1) Atomic RMW (atomic-fetch-and-something) or atomic store (when combineFun = const)
-      -- (2) Atomic Compare-and-swap loop
-      -- (3) Locks
-      -- For option 1, check if combineFun corresponds to a RMW operation
-      combineRMW <- detectRMW combineFun `guard'` (\(tp, rmw, _) -> liftCodeGen $ supportsAtomicRMW tp rmw)
-      -- For option 2, check if the values are singular and if the target supports CAS on these values
-      combineCAS <- detectCAS combineFun `guard'` (\tp -> liftCodeGen $ supportsAtomicCAS $ scalarTypeSize tp)
-      -- Option 3 is always possible.
-      -- Branch on these options
-      if
-        -- Option 1
-        | Just (tp, rmw, fun) <- combineRMW -> do
-          z <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) x
-          (ptr, alias) <- singleArrayPtr TypeInt tp envs output j
-          -- Pointer cast is safe, since detectRMW checks the alignment of the value
-          let ptr' = ptrCast (ScalarPrimType tp) ptr
-          case rmw of
-            Exchange -> do
-              _ <- instrMD' (AtomicStore tp ptr' (op tp z) Monotonic) (bufferMetadata' alias)
-              return ()
-            _
-              | SingleScalarType (NumSingleType numTp) <- tp -> do
-                _ <- instrMD' (AtomicRMW numTp NonVolatile rmw ptr' (op tp z) (CrossThread, AcquireRelease)) (bufferMetadata' alias)
-                return ()
-              | otherwise -> internalError "AtomicRMW only supports num types"
+      -- Try to perform update lock-free using atomic RMW or cas-loop
+      atomicUpdate envs combineFun x (\tp -> singleArrayPtr TypeInt tp envs output j) $ do
+        -- Fallback when no lock-free option is available
 
-        -- Option 2
-        | Just tp <- combineCAS -> do
-          (ptr, alias) <- singleArrayPtr TypeInt tp envs output j
-          -- Pointer cast is safe, since detectCAS checks the alignment of the value
-          let ptr' = ptrCast (ScalarPrimType tp) ptr
-          atomicCasLoop tp
-            (\y -> app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combineFun) x y)
-            ptr'
-            alias
+        -- Convert 'j' to the index of the lock.
+        -- As commented above, we compute the hash of ptr + j,
+        -- where ptr is the pointer of the first buffer in the output, bitcasted to an int,
+        -- and j is the index in the array (where the permute is writing to).
+        seed <- firstArrayPtr envs output
+        i <- A.add numType seed j
+        i' <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) i
+        h <- A.hash i'
+        lockIdx <- A.rem TypeWord64 h $ A.liftWord64 $ Prelude.fromIntegral lockArraySize
 
-        -- Option 3
-        | otherwise -> do
-          -- Convert 'j' to the index of the lock.
-          -- As commented above, we compute the hash of ptr + j,
-          -- where ptr is the pointer of the first buffer in the output, bitcasted to an int,
-          -- and j is the index in the array (where the permute is writing to).
-          seed <- firstArrayPtr envs output
-          i <- A.add numType seed j
-          i' <- A.fromIntegral TypeInt (IntegralNumType TypeWord64) i
-          h <- A.hash i'
-          lockIdx <- A.rem TypeWord64 h $ A.liftWord64 $ Prelude.fromIntegral lockArraySize
-
-          atomically lockIdx $ do
-            y <- readArray TypeInt envs output j
-            r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combineFun) x y
-            writeArray TypeInt envs output j r
+        atomically lockIdx $ do
+          y <- readArray TypeInt envs output j
+          r <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combineFun) x y
+          writeArray TypeInt envs output j r
   )
   where
     ArgArray _ (ArrayR shr _) sh _ = output
-
-    guard' :: Maybe a -> (a -> CodeGen target Bool) -> CodeGen target (Maybe a)
-    guard' Nothing _ = return Nothing
-    guard' (Just a) cond = do
-      c <- cond a
-      return $ if c then Just a else Nothing
 
 defaultCodeGenPermute _ _ _ _ = internalError "Missing index for argument of permute"
 
@@ -675,26 +634,30 @@ foldCommFinishThread envs tp ptr fun local = do
   case ptrs of
     TupRsingle _ -> internalError "Pair impossible"
     TupRpair (TupRsingle lock) valuePtrs -> do
-      -- TODO: Use atomic compare-and-swap or read-modify-write
-      -- to update the value in kernel memory lock-free,
-      -- instead of taking a lock here.
-      -- Can we reuse code from Permute?
-      _ <- Loop.while [] TupRunit
-        (\_ -> do
-          -- While the lock is taken
-          old <- instrMD (AtomicRMW numType NonVolatile Exchange lock (A.scalar scalarTypeWord8 1) (CrossThread, Acquire)) (bufferMetadata' Nothing)
-          A.neq singleType old (A.liftWord8 0)
-        )
-        (\_ -> return OP_Unit)
-        OP_Unit
+      atomicUpdate envs fun local (\t -> return $ ptrAlias t valuePtrs) $ do
+        -- Lock-based fallback when no lock-free option is available
+        _ <- Loop.while [] TupRunit
+          (\_ -> do
+            -- While the lock is taken
+            old <- instrMD (AtomicRMW numType NonVolatile Exchange lock (A.scalar scalarTypeWord8 1) (CrossThread, Acquire)) (bufferMetadata' Nothing)
+            A.neq singleType old (A.liftWord8 0)
+          )
+          (\_ -> return OP_Unit)
+          OP_Unit
 
-      old <- tupleLoad tp valuePtrs
-      new <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
-      tupleStore tp valuePtrs new
+        old <- tupleLoad tp valuePtrs
+        new <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
+        tupleStore tp valuePtrs new
 
-      -- Release the lock
-      _ <- instrMD' (AtomicStore scalarType lock (A.scalar scalarTypeWord8 0) Release) (bufferMetadata' Nothing)
-      return ()
+        -- Release the lock
+        _ <- instrMD' (AtomicStore scalarType lock (A.scalar scalarTypeWord8 0) Release) (bufferMetadata' Nothing)
+        return ()
+  where
+    ptrAlias :: forall e. ScalarType e -> TupR Operand (Distribute Ptr (BufferEltR e)) -> (Operand (Ptr (BufferEltR e)), Maybe (MetadataNodeID, MetadataNodeID))
+    ptrAlias t ps
+      | Refl <- reprIsSingle @PrimType @(BufferEltR e) @Ptr $ bufferEltR t
+      , TupRsingle p <- ps
+      = (p, Nothing)
 
 -- | Concludes a commutative fold by returning the total reduced value
 foldCommFinish
