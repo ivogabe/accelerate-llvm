@@ -839,13 +839,15 @@ chainedScanLookback envs getThreadCount descriptorsLength tp ptr lookbackIndex l
 
   -- Perform regular work for look-back
 
-  -- Share our aggregate
+  -- Share our aggregate (except for the first tile)
   nextTileIdx <- A.add numType (envsTileIndex envs) (A.liftInt 1)
   (thisDescIdx, thisTag) <- chainedScanDescriptorIdxTag descriptorsLength nextTileIdx
   (thisFlagPtr, thisAggregatePtrs, thisPrefixPtrs) <- chainedScanGetDescriptorSlot descriptorsLength tp ptr thisDescIdx
-  tupleStore tp thisAggregatePtrs aggregate
-  OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagAggregate
-  _ <- instrMD' (AtomicStore scalarType thisFlagPtr newFlag Release) (bufferMetadata' Nothing)
+  A.when (A.neq singleType (envsTileIndex envs) (A.liftInt 0)) $ do
+    tupleStore tp thisAggregatePtrs aggregate
+    OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagAggregate
+    _ <- instrMD' (AtomicStore scalarType thisFlagPtr newFlag Release) (bufferMetadata' Nothing)
+    return ()
 
   -- Initialize look-back
   _ <- instr' $ Store NonVolatile lookbackIndex (op scalarTypeInt $ envsTileIndex envs) Nothing
@@ -903,8 +905,8 @@ chainedScanLookback envs getThreadCount descriptorsLength tp ptr lookbackIndex l
   inclusivePrefix <- combineInDirection envs tp fun seed isFirstTile False exclusivePrefix aggregate
 
   tupleStore tp thisPrefixPtrs inclusivePrefix
-  OP_Word8 newFlag' <- A.bor TypeWord8 thisTag $ OP_Word8 flagPrefix
-  _ <- instrMD' (AtomicStore scalarType thisFlagPtr newFlag' Release) (bufferMetadata' Nothing)
+  OP_Word8 newFlag <- A.bor TypeWord8 thisTag $ OP_Word8 flagPrefix
+  _ <- instrMD' (AtomicStore scalarType thisFlagPtr newFlag Release) (bufferMetadata' Nothing)
   return (exclusivePrefix, inclusivePrefix)
 
 

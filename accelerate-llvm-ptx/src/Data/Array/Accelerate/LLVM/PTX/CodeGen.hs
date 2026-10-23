@@ -497,7 +497,7 @@ parCodeGenChainedScan descending foldOrScan inclusiveness tp fun seed identity i
     -- Perform look-back to find exclusive prefix for this tile
     exclusivePrefix <- perWarp' tp $ fmap fst $
       chainedScanLookback envs gridDim' descriptorsLength tp kernelMem lookbackIndex lookbackValue fun seed identity aggregate 
-    
+
     when (foldOrScan == IsScan) $ do
       -- Add exclusivePrefix to all values in smem
       lane <- laneId
@@ -506,22 +506,22 @@ parCodeGenChainedScan descending foldOrScan inclusiveness tp fun seed identity i
             A.when (A.lt singleType lane $ OP_Int32 $ envsGpuActiveWarps envs) $ do
               ptr <- tupleArrayGep tp smem lane
               value <- tupleLoad tp ptr
-              new <- if envsDescending envs then app2 fun' value exclusivePrefix else app2 fun' exclusivePrefix value
+              new <-
+                -- If there is no identity, do not do anything with the (undefined) value in the first lane
+                if isNothing identity then do
+                  A.ifThenElse (tp, firstLane dir dev (Just $ OP_Int32 $ envsGpuActiveWarps envs) >>= A.eq singleType lane)
+                    -- First lane directly gets the exclusive prefix
+                    (return exclusivePrefix)
+                    (if envsDescending envs then app2 fun' value exclusivePrefix else app2 fun' exclusivePrefix value)
+                else do
+                  if envsDescending envs then app2 fun' value exclusivePrefix else app2 fun' exclusivePrefix value
               tupleStore tp ptr new
-
-          action' =
-            -- If there is no identity, do not do anything with the first (undefined) value
-            if isNothing identity then
-              A.when (firstLane dir dev (OP_Int32 <$> envsGpuWarpActiveThreads envs) >>= A.neq singleType lane) action
-            else
-              -- Otherwise, handle all values
-              action
 
       -- If this scan does not have a seed, we need to check if we are in the first tile
       if isNothing seed then
-        A.when (A.neq singleType (envsTileIndex envs) (A.liftInt 0)) action'
+        A.when (A.neq singleType (envsTileIndex envs) (A.liftInt 0)) action
       else
-        action'
+        action
   )
   -- Finialize a thread(group)
   (\_ _ _ -> return ())
@@ -553,9 +553,10 @@ parCodeGenChainedScan descending foldOrScan inclusiveness tp fun seed identity i
           -- When we then scan over the values in this warp, the prefix is part
           -- of each value in the warp
           lane <- laneId
+          -- Combine item in first lane with prefix
           y <- A.ifThenElse (tp, firstLane dir dev (OP_Int32 <$> envsGpuWarpActiveThreads envs) >>= A.eq singleType lane)
             ( do
-              -- The first item does not have a prefix
+              -- The first tile does not have a prefix
               isFirstTile <- A.eq singleType (envsTileIndex envs) (A.liftInt 0)
               A.ifThenElse (tp, A.land isFirstTile $ envsIsFirst envs)
                 (return x)
@@ -568,7 +569,7 @@ parCodeGenChainedScan descending foldOrScan inclusiveness tp fun seed identity i
                 )
             )
             (return x)
-          
+
           scanWarp dir inclusiveness dev tp Nothing fun'
             (OP_Int32 <$> envsGpuWarpActiveThreads envs) y
 
