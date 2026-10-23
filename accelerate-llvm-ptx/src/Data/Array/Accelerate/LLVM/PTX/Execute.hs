@@ -170,7 +170,12 @@ executeEffect env = \case
       let n = product
             $ fmap (\idx -> fromMaybe (internalError "Expected Int argument for kernel grid size") $ intArgs' Prelude.!! idxToInt idx)
             $ kernelElements kernel
-      let maxGridSize = (n + kernelElementsPerThread kernel - 1) `div` kernelElementsPerThread kernel
+      -- Kernels with 1-dimensional folds and scans always need to be started
+      -- with at least 1 thread block. Other kernels may be skipped if their
+      -- input is empty.
+      -- TODO: Only perform the 'max 1' when the kernel contains a dim1 fold
+      -- or scan.
+      let maxGridSize = max 1 $ (n + kernelElementsPerThread kernel - 1) `div` kernelElementsPerThread kernel
 
       locks <- unsafeGetValue <$> liftPar (asks ptxLocks)
 

@@ -53,6 +53,7 @@ data PTXKernel env where
   PTXKernel
     :: { kernelInit       :: !(Maybe (PTXKernelPhase env))
        , kernelMain       :: !(PTXKernelPhase env)
+       -- TODO: Remove kernelFinish (and kernelInit?) as that work can be done in kernelMain
        , kernelFinish     :: !(Maybe (PTXKernelPhase env))
        , kernelUID        :: {-# UNPACK #-} !UID
        -- Note: [PTX Kernel Grid Size]

@@ -109,7 +109,7 @@ codegen name env cluster args
 
           let envs' = envs{
             envsLoopDepth = 0,
-            envsTileSizeCount = [(tileSize, OP_Int tileCount')],
+            envsTileSizeCount = [(A.liftInt tileSize, OP_Int tileCount')],
             envsDescending = isDescending direction
           }
 

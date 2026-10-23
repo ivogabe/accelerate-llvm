@@ -49,6 +49,8 @@ import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction as LLVM
 import LLVM.AST.Type.Instruction.Volatile
+import LLVM.AST.Type.Instruction.Atomic
+import qualified LLVM.AST.Type.Instruction.RMW as RMW
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -178,32 +180,24 @@ codegenDim1 name env flatCluster
       envsDescending = isDescending direction
     }
   -- Kernel memory
-  , memoryTp' <- TupRsingle (ScalarPrimType scalarTypeWord64) `TupRpair` parCodeGenMemory parCodes
+  -- work index (atomic counter for self scheduling), #finished thread blocks (to determine end of kernel), 
+  , memoryTp' <- TupRsingle (ScalarPrimType scalarTypeWord64) `TupRpair` TupRsingle (ScalarPrimType scalarTypeInt32) `TupRpair` parCodeGenMemory parCodes
   , memoryTp <- StructPrimType False memoryTp'
   , kernelMem <- LocalReference (PrimType $ PtrPrimType memoryTp defaultAddrSpace) "kernel_data"
   = do
     kernelInit <- makeKernel' "_init" $ do
       perThreadBlock $ do
-        counter <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType scalarTypeWord64) kernelMem $ TupleIdxLeft TupleIdxSelf
-        _ <- instr' $ Store NonVolatile counter (integral TypeWord64 0) Nothing
-        
+        workIndex <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType scalarTypeWord64) kernelMem $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf
+        _ <- instr' $ Store NonVolatile workIndex (integral TypeWord64 0) Nothing
+        groupsFinished <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType scalarTypeInt32) kernelMem $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+        _ <- instr' $ Store NonVolatile groupsFinished (integral TypeInt32 0) Nothing
+
         parCodeGenInitMemory kernelMem envs1 (TupleIdxRight TupleIdxSelf) parCodes
       return_
 
-    kernelFinish <- makeKernel' "_finish" $ do
-      perThreadBlock $ do
-        -- Declare fused-away and dead arrays at level zero.
-        -- This is for instance needed for `map (+1) $ fold ...`,
-        -- or a scanl' or scanr' whose reduced value is not used (like in prescanl).
-        envs2 <- bindLocals 0 envs1
-        -- Execute code for after the parallel work of this kernel, for
-        -- instance to write the result of a fold to the output array.
-        parCodeGenFinish kernelMem envs2 (TupleIdxRight TupleIdxSelf) parCodes
-      return_
-    
     kernelWork <- makeKernel' "" $ do
       -- Atomic counter used for self scheduling
-      counter <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType scalarTypeWord64) kernelMem $ TupleIdxLeft TupleIdxSelf
+      workIndex <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType scalarTypeWord64) kernelMem $ TupleIdxLeft $ TupleIdxLeft TupleIdxSelf
 
       -- Compute the tile size
       blockDim' <- blockDim >>= A.fromIntegral TypeInt32 numType
@@ -218,11 +212,13 @@ codegenDim1 name env flatCluster
       tileLoops <- genParallel kernelMem envs1 (TupleIdxRight TupleIdxSelf) parCodes
 
       -- Declare fused away arrays
-      envs2 <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 elementsPerThread envs1
+      envs2 <- bindLocalsInTile (\_ -> not $ null $ ptOtherLoops tileLoops) 1 elementsPerThread
+        -- and add tile count to environment
+        (envs1{ envsTileSizeCount = [(OP_Int tileSize, OP_Int tileCount)] })
 
       -- Loop to claim tile
       OP_Word64 tileCount' <- A.fromIntegral TypeInt numType (OP_Int tileCount)
-      loopSelfScheduled counter tileCount' $ \tileIdx' -> do
+      loopSelfScheduled workIndex tileCount' $ \tileIdx' -> do
         tileIdx <- instr' $ BitCast scalarType tileIdx'
         (_, lower, upper, full) <- tileRange (isDescending direction) (op TypeInt size) tileSize tileCount tileIdx
 
@@ -272,7 +268,25 @@ codegenDim1 name env flatCluster
           __syncthreads
           ptAfter tileLoop envs3
 
-      ptExit tileLoops envs1
+      ptExit tileLoops envs2
+
+      -- Increment counter with number of finished thread blocks
+      perThreadBlock $ do
+        groupsFinishedPtr <- instr' $ GetElementPtr $ gepStruct (ScalarPrimType scalarTypeInt32) kernelMem $ TupleIdxLeft $ TupleIdxRight TupleIdxSelf
+        groupsFinishedSub1 <- instr' $ AtomicRMW numType NonVolatile RMW.Add groupsFinishedPtr (integral TypeInt32 1) (CrossThread, AcquireRelease)
+        -- Atomic fetch-and-add returns the value before the increment
+        groupsFinished <- A.add numType (OP_Int32 groupsFinishedSub1) (A.liftInt32 1)
+        -- Check whether all thread blocks have finished
+        A.when (gridDim >>= A.eq singleType groupsFinished) $ do
+          -- If so, perform finalization work
+
+          -- Declare fused-away and dead arrays at level zero.
+          -- This is for instance needed for `map (+1) $ fold ...`,
+          -- or a scanl' or scanr' whose reduced value is not used (like in prescanl).
+          envs3 <- bindLocals 0 envs2
+          -- Execute code for after the parallel work of this kernel, for
+          -- instance to write the result of a fold to the output array.
+          parCodeGenFinish kernelMem envs3 (TupleIdxRight TupleIdxSelf) parCodes
 
       return_
 
@@ -282,7 +296,7 @@ codegenDim1 name env flatCluster
       (fst $ primSizeAlignment memoryTp)
       (Just kernelInit)
       kernelWork
-      (Just kernelFinish)
+      Nothing
 
   | otherwise
   = internalError "Could not generate code for a cluster as parCodeGens returned Nothing. Does parCodeGen lack a case for a collective parallel operation?"
@@ -369,9 +383,6 @@ parCodeGenFoldCommutative _ tp fun seed identity input output = Exists $ ParLoop
   (\_ _ _ _ -> return ())
     -- Code at the end of a thread (block)
   (\(smemAll, smemWarp, accumVar) ptr envs -> do
-    -- tupleLoad tp accumVar >>= foldCommFinishThread envs tp ptr fun
-
-
     dev <- liftCodeGen $ asks ptxDeviceProperties
     let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
     threadLocal <- tupleLoad tp accumVar
