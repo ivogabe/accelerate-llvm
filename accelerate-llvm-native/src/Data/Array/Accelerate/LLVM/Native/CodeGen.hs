@@ -38,9 +38,7 @@ import Data.Bits
 import LLVM.AST.Type.Module
 import LLVM.AST.Type.Representation
 import LLVM.AST.Type.Instruction as LLVM
-import LLVM.AST.Type.Instruction.Volatile
 import LLVM.AST.Type.Instruction.Atomic
-import LLVM.AST.Type.Instruction.RMW
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import qualified LLVM.AST.Type.Function as LLVM
 import Data.Array.Accelerate.LLVM.CodeGen.Array
@@ -353,20 +351,9 @@ parCodeGenFoldCommutative
   :: ParCodeGenFoldCommutative Native CPULoopAnalysis env idxEnv sh e
 parCodeGenFoldCommutative _ tp fun seed identity input output = Exists $ ParLoopCodeGen
   (CPULoopAnalysis False)
-  -- In kernel memory, store a lock (Word8) and the
-  -- reduced value so far. The lock must be acquired to read or update the total value.
-  -- Value 0 means unlocked, 1 is locked.
-  (bufferEltsR memoryTp)
+  (bufferEltsR $ foldCommKernelMemory tp)
   -- Initialize kernel memory
-  (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle intPtr) valuePtrs -> do
-        _ <- instrMD' (Store NonVolatile intPtr (scalar scalarTypeWord8 0) Nothing) (bufferMetadata' Nothing) -- unlocked
-        value <- llvmOfExp (compileArrayInstrEnvs envs) seed
-        tupleStore tp valuePtrs value
-  )
+  (\ptr envs -> foldCommInit envs tp ptr seed)
   -- Initialize a thread
   (\_ envs -> do
     accumVar <- tupleAlloca tp
@@ -380,61 +367,22 @@ parCodeGenFoldCommutative _ tp fun seed identity input output = Exists $ ParLoop
   (\_ accumVar _ envs -> do
     x <- input envs
     accum <- tupleLoad tp accumVar
-    new <-
-      -- TODO: we don't need to check for the direction here,
-      -- since 'fun' is commutative in this function.
-      if envsDescending envs then
-        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-      else
-        app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+    new <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
     tupleStore tp accumVar new
   )
   -- Code after the tile loop
   (\_ _ _ _ -> return ())
   -- Code at the end of a thread
   (\accumVar ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair (TupRsingle lock) valuePtrs -> do
-        -- TODO: Use atomic compare-and-swap or read-modify-write
-        -- to update the value in kernel memory lock-free,
-        -- instead of taking a lock here.
-        _ <- Loop.while [] TupRunit
-          (\_ -> do
-            -- While the lock is taken
-            old <- instrMD (AtomicRMW numType NonVolatile Exchange lock (scalar scalarTypeWord8 1) (CrossThread, Acquire)) (bufferMetadata' Nothing)
-            A.neq singleType old (A.liftWord8 0)
-          )
-          (\_ -> return OP_Unit)
-          OP_Unit
-
-        local <- tupleLoad tp accumVar
-
-        old <- tupleLoad tp valuePtrs
-        new <-
-          if envsDescending envs then
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) local old
-          else
-            app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
-        tupleStore tp valuePtrs new
-
-        -- Release the lock
-        _ <- instrMD' (AtomicStore scalarType lock (scalar scalarTypeWord8 0) Release) (bufferMetadata' Nothing)
-        return ()
+    local <- tupleLoad tp accumVar
+    foldCommFinishThread envs tp ptr fun local
   )
   -- Code after the loop
   (\ptr envs -> do
-    ptrs <- tuplePtrs memoryTp ptr
-    case ptrs of
-      TupRsingle _ -> internalError "Pair impossible"
-      TupRpair _ valuePtrs -> do
-        value <- tupleLoad tp valuePtrs
-        output envs value
+    value <- foldCommFinish tp ptr
+    output envs value
   )
   Nothing
-  where
-    memoryTp = TupRsingle scalarTypeWord8 `TupRpair` tp
 
 -- Implements the single-pass chained scan with decoupled-lookback
 -- (https://research.nvidia.com/sites/default/files/publications/nvr-2016-002.pdf)

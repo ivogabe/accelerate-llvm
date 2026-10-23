@@ -31,6 +31,9 @@ module Data.Array.Accelerate.LLVM.CodeGen.Default (
   defaultParCodeGenFold,
   defaultParCodeGenFold1,
   FoldScanCodeGen(..), ParCodeGenFoldCommutative, ParCodeGenChainedScan,
+  -- Utilities for implementing commutative folds
+  FoldCommKernelMemory, foldCommKernelMemory,
+  foldCommInit, foldCommFinishThread, foldCommFinish,
   -- Utilities for implementing chained scans
   ChainedScanKernelMemory, ChainedScanKernelMemorySlot,
   chainedScanKernelMemory, chainedScanKernelMemorySlot,
@@ -630,6 +633,79 @@ type ParCodeGenFoldCommutative target analysis env idxEnv sh e
   -- Code after the parallel loop
   -> (Envs env idxEnv -> Operands e -> CodeGen target ())
   -> Exists (ParLoopCodeGen target analysis env idxEnv)
+
+-- In kernel memory, store a lock (Word8) and the
+-- reduced value so far. The lock must be acquired to read or update the total value.
+-- Value 0 means unlocked, 1 is locked.
+type FoldCommKernelMemory e = (Word8, e)
+-- TODO: Allow backends to choose the type for the lock.
+-- Metal for instance would need a 32-bit lock, as it only supports the
+-- atomic operations on 32-bit values.
+
+foldCommKernelMemory :: TypeR e -> TypeR (FoldCommKernelMemory e)
+foldCommKernelMemory tp = TupRsingle scalarTypeWord8 `TupRpair` tp
+
+-- | Initialize kernel memory for a commutative fold.
+foldCommInit
+  :: (CompileForeignExp target, Intrinsic target)
+  => Envs env idxEnv
+  -> TypeR e
+  -> Operand (Ptr (Struct (BufferEltR (FoldCommKernelMemory e))))
+  -> Exp env e
+  -> CodeGen target ()
+foldCommInit envs tp ptr seed = do
+  ptrs <- tuplePtrs (foldCommKernelMemory tp) ptr
+  case ptrs of
+    TupRsingle _ -> internalError "Pair impossible"
+    TupRpair (TupRsingle intPtr) valuePtrs -> do
+      _ <- instrMD' (Store NonVolatile intPtr (A.scalar scalarTypeWord8 0) Nothing) (bufferMetadata' Nothing) -- unlocked
+      value <- llvmOfExp (compileArrayInstrEnvs envs) seed
+      tupleStore tp valuePtrs value
+
+foldCommFinishThread
+  :: (CompileForeignExp target, Intrinsic target)
+  => Envs env idxEnv
+  -> TypeR e
+  -> Operand (Ptr (Struct (BufferEltR (FoldCommKernelMemory e))))
+  -> Fun env (e -> e -> e)
+  -> Operands e
+  -> CodeGen target ()
+foldCommFinishThread envs tp ptr fun local = do
+  ptrs <- tuplePtrs (foldCommKernelMemory tp) ptr
+  case ptrs of
+    TupRsingle _ -> internalError "Pair impossible"
+    TupRpair (TupRsingle lock) valuePtrs -> do
+      -- TODO: Use atomic compare-and-swap or read-modify-write
+      -- to update the value in kernel memory lock-free,
+      -- instead of taking a lock here.
+      -- Can we reuse code from Permute?
+      _ <- Loop.while [] TupRunit
+        (\_ -> do
+          -- While the lock is taken
+          old <- instrMD (AtomicRMW numType NonVolatile Exchange lock (A.scalar scalarTypeWord8 1) (CrossThread, Acquire)) (bufferMetadata' Nothing)
+          A.neq singleType old (A.liftWord8 0)
+        )
+        (\_ -> return OP_Unit)
+        OP_Unit
+
+      old <- tupleLoad tp valuePtrs
+      new <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) old local
+      tupleStore tp valuePtrs new
+
+      -- Release the lock
+      _ <- instrMD' (AtomicStore scalarType lock (A.scalar scalarTypeWord8 0) Release) (bufferMetadata' Nothing)
+      return ()
+
+-- | Concludes a commutative fold by returning the total reduced value
+foldCommFinish
+  :: TypeR e
+  -> Operand (Ptr (Struct (BufferEltR (FoldCommKernelMemory e))))
+  -> CodeGen target (Operands e)
+foldCommFinish tp ptr = do
+    ptrs <- tuplePtrs (foldCommKernelMemory tp) ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair _ valuePtrs -> tupleLoad tp valuePtrs
 
 type ChainedScanKernelMemory e = SizedArray (Struct (BufferEltR (ChainedScanKernelMemorySlot e)))
 type ChainedScanKernelMemorySlot e = ((Word8, e), e)

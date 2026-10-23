@@ -62,6 +62,7 @@ import Control.Monad.Reader ( asks )
 import Data.Array.Accelerate.LLVM.PTX.CodeGen.Loop
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Constant as Const
+import qualified Foreign.CUDA.Analysis                              as CUDA
 
 data PTXCode env = PTXCode
   { ptxCodeElements :: [Idx env Int] -- The product of these variables divided by ptxCodeElementsPerThread is the maximum grid size for this kernel, see [PTX Kernel Grid Size]
@@ -268,7 +269,11 @@ codegenDim1 name env flatCluster
                 envsGpuWarpActiveThreads = activeInWarp
               }
             genSequential envs4 loops' $ ptIn tileLoop
+          __syncthreads
           ptAfter tileLoop envs3
+
+      ptExit tileLoops envs1
+
       return_
 
     return $ PTXCode
@@ -328,7 +333,85 @@ parCodeGen descending (FlatOp op' args idxArgs) = case op' of
   _ -> Nothing
 
 scanCode :: FoldScanCodeGen PTX GPULoopAnalysis
-scanCode = FoldScanCodeGen Nothing parCodeGenChainedScan
+scanCode = FoldScanCodeGen (Just parCodeGenFoldCommutative) parCodeGenChainedScan
+
+parCodeGenFoldCommutative
+  :: ParCodeGenFoldCommutative PTX GPULoopAnalysis env idxEnv sh e
+parCodeGenFoldCommutative _ tp fun seed identity input output = Exists $ ParLoopCodeGen
+  analysis
+  (bufferEltsR $ foldCommKernelMemory tp)
+  -- Initialize kernel memory
+  (\ptr envs -> foldCommInit envs tp ptr seed)
+  -- Initialize a thread
+  (\_ envs -> do
+    -- Store one value per warp in shared memory
+    smemAll <- staticSharedMemTuple tp maxWarps
+    idx <- warpId
+    -- The entry in shared memory for this warp
+    smemWarp <- tupleArrayGep tp smemAll idx
+    -- Local value of thread
+    accumVar <- tupleAlloca tp
+    -- Initialize local value to identity
+    value <- llvmOfExp (compileArrayInstrEnvs envs) identity
+    tupleStore tp accumVar value
+    return (smemAll, smemWarp, accumVar)
+  )
+  -- Code before the tile loop
+  (\_ _ _ _ -> return ())
+  -- Code within the tile loop
+  (\_ (_, _, accumVar) _ envs -> do
+    x <- input envs
+    accum <- tupleLoad tp accumVar
+    new <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+    tupleStore tp accumVar new
+  )
+  -- Code after the tile loop
+  (\_ _ _ _ -> return ())
+    -- Code at the end of a thread (block)
+  (\(smemAll, smemWarp, accumVar) ptr envs -> do
+    -- tupleLoad tp accumVar >>= foldCommFinishThread envs tp ptr fun
+
+
+    dev <- liftCodeGen $ asks ptxDeviceProperties
+    let fun' = llvmOfFun2 (compileArrayInstrEnvs envs) fun
+    threadLocal <- tupleLoad tp accumVar
+    -- Perform a reduction per warp
+    warpValue <- reduceWarp
+      dev tp fun'
+      (OP_Int32 <$> envsGpuWarpActiveThreads envs)
+      threadLocal
+
+    -- Share value of the warp
+    perWarp $ tupleStore tp smemWarp warpValue
+
+    -- Compute number of warps per threadblock
+    blockDim' <- blockDim
+    OP_Int32 warpCount <- A.quot TypeInt32 blockDim' (A.liftInt32 $ fromIntegral $ CUDA.warpSize dev)
+
+    -- Reduce values per warp to single value for this thread block
+    __syncthreads
+    warpPerThreadBlock $ do
+      aggregate <- reduceFromSMem dev tp fun' (fromIntegral maxWarps) warpCount smemAll
+      perWarp $ do
+        foldCommFinishThread envs tp ptr fun aggregate
+  )
+  -- Code after the loop
+  (\ptr envs -> do
+    ptrs <- tuplePtrs memoryTp ptr
+    case ptrs of
+      TupRsingle _ -> internalError "Pair impossible"
+      TupRpair _ valuePtrs -> do
+        value <- tupleLoad tp valuePtrs
+        output envs value
+  )
+  Nothing
+  where
+    memoryTp = TupRsingle scalarTypeWord8 `TupRpair` tp
+    analysis = mempty
+      { gpuLoopScheduleAscending = False
+      , gpuLoopFullWarp = False
+      , gpuLoopPeel = False
+      }
 
 parCodeGenChainedScan
   :: forall env idxEnv sh e. ParCodeGenChainedScan PTX GPULoopAnalysis env idxEnv sh e
@@ -401,7 +484,8 @@ parCodeGenChainedScan descending foldOrScan inclusiveness tp fun seed identity i
         scanFromSMem dir dev tp identity' fun' (fromIntegral maxWarps) (envsGpuActiveWarps envs) smem
 
     -- Perform look-back to find exclusive prefix for this tile
-    (exclusivePrefix, _) <- chainedScanLookback envs gridDim' descriptorsLength tp kernelMem lookbackIndex lookbackValue fun seed identity aggregate 
+    exclusivePrefix <- perWarp' tp $ fmap fst $
+      chainedScanLookback envs gridDim' descriptorsLength tp kernelMem lookbackIndex lookbackValue fun seed identity aggregate 
     
     when (foldOrScan == IsScan) $ do
       -- Add exclusivePrefix to all values in smem
