@@ -173,6 +173,7 @@ test-suite nofib-llvm-ptx
   build-depends:
           base                          >= 4.17.2.1
         , accelerate
+        , accelerate:nofib
         , accelerate-llvm-ptx
         , tasty
         , tasty-hunit
