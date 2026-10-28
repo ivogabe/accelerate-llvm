@@ -58,7 +58,7 @@ import Data.Array.Accelerate.LLVM.PTX.State
 import qualified Foreign.CUDA.Driver                                as CUDA
 --import qualified Foreign.CUDA.Driver.Stream                         as CUDA
 
-import Control.Monad                                                ( forM_, when, unless )
+import Control.Monad                                                ( forM_, unless )
 import Control.Monad.Reader                                         ( asks )
 import Control.Monad.State                                          ( liftIO )
 import Control.Concurrent.MVar
@@ -192,17 +192,11 @@ executeEffect env = \case
       -- To simplify things, we could also always launch the latter number of
       -- threads and ignore the input size (the code in the kernel works with
       -- any grid size).
-      when (maxGridSize /= 0) $ liftIO $ launch (kernelMain kernel) stream maxGridSize kernelMemoryPtr locks args'
+      unless (n == 0 && kernelSkipEmpty kernel) $ liftIO $ launch (kernelMain kernel) stream maxGridSize kernelMemoryPtr locks args'
 
       -- Ensure 'touchLifetime' is called when we next synchronise.
       cleanUpTouchLifetime $ kernelPhaseLinked $ kernelMain kernel
 
-      case kernelFinish kernel of
-        Just p -> do
-          liftIO $ launch p stream 1 kernelMemoryPtr locks args'
-          -- Ensure 'touchLifetime' is called when we next synchronise.
-          cleanUpTouchLifetime $ kernelPhaseLinked p
-        Nothing -> return ()
       mapM_ (\(Exists l) -> cleanUpTouchLifetime l) lifetimes
       case kernelMemoryLifetime of
         Just l -> cleanUpTouchLifetime l

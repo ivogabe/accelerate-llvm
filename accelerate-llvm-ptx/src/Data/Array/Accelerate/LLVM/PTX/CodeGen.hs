@@ -72,7 +72,7 @@ data PTXCode env = PTXCode
   , ptxCodeKernelMemory :: Int  -- The size of the kernel data, shared by all threads working on this kernel.
   , ptxCodeInit :: Maybe (Module (KernelType env))
   , ptxCodeWork :: Module (KernelType env)
-  , ptxCodeFinish :: Maybe (Module (KernelType env))
+  , ptxCodeSkipEmpty :: Bool -- ^ Whether the kernel may be skipped if the input is empty
   }
 
 codegen :: forall env args.
@@ -146,7 +146,7 @@ codegenIndependent name env flatCluster parallelDepth
       0 -- We don't need kernel memory here
       Nothing -- No need to initialize kernel memory
       kernelWork
-      Nothing -- No need to finalize kernel memory
+      True
 
 codegenDim1
   :: forall env.
@@ -296,7 +296,7 @@ codegenDim1 name env flatCluster
       (fst $ primSizeAlignment memoryTp)
       (Just kernelInit)
       kernelWork
-      Nothing
+      False
 
   | otherwise
   = internalError "Could not generate code for a cluster as parCodeGens returned Nothing. Does parCodeGen lack a case for a collective parallel operation?"
