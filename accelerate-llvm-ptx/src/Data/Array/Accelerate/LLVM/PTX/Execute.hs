@@ -122,8 +122,8 @@ executeBinding env baseTp = \case
     result <- evalExp expr $ evalArrayInstr env
     return $ scalarToValues (mapTupR expectScalarType baseTp) result
   NewSignal _ -> do
-    event <- liftPar $ Event.create
-    let signal = PTXSignal event
+    eventVar <- liftIO newEmptyMVar
+    let signal = PTXSignal eventVar
     return (ValueSignal signal, ValueSignalResolver signal)
   NewRef _ -> do
     mvar <- liftIO newEmptyMVar
@@ -210,13 +210,17 @@ executeEffect env = \case
       liftPar (asks ptxLocks) >>= cleanUpTouchLifetime
   SignalAwait signals -> do
     stream <- asks ptxStream
-    forM_ signals $ \signal -> case prj' signal env of
-      ValueSignal (PTXSignal event) -> liftIO $ Event.after event stream
+    liftIO $ forM_ signals $ \signal -> case prj' signal env of
+      ValueSignal (PTXSignal eventVar) -> do
+        event <- readMVar eventVar
+        Event.after event stream
       ValueScalar _ _ -> internalError "Signal impossible"
   SignalResolve signals -> do
     stream <- asks ptxStream
     forM_ signals $ \signal -> case prj' signal env of
-      ValueSignalResolver (PTXSignal event) -> liftIO $ Event.record event stream
+      ValueSignalResolver (PTXSignal eventVar) -> do
+        event <- liftPar $ Event.waypoint stream
+        liftIO $ putMVar eventVar event
       ValueScalar _ _ -> internalError "SignalResolver impossible"
   RefWrite refVar valueVar
     | ValueOutputRef mvar <- prj' (varIdx refVar) env
@@ -288,14 +292,15 @@ executeAwhile
   -> Par ()
 executeAwhile env io step input next = do
   -- Set up the output variables for this iteration (and the input for the next)
-  event <- liftPar $ Event.create
-  let signal = PTXSignal event
+  eventVar <- liftIO newEmptyMVar
+  let signal = PTXSignal eventVar
   mvar <- liftIO newEmptyMVar
   (output, nextInput) <- bindAwhileIO io
 
   -- Check condition when it is available
   spawnPar $ do
     stream <- asks ptxStream
+    event <- liftIO $ readMVar eventVar
     liftIO $ Event.after event stream
     condition <- liftIO $ readMVar mvar
     case condition of
@@ -330,8 +335,8 @@ executeAwhileSeq env io step input next = do
 
 bindAwhileIO :: InputOutputR input output -> Par (Distribute Value output, Distribute Value input)
 bindAwhileIO InputOutputRsignal = do
-  event <- liftPar $ Event.create
-  return (ValueSignalResolver $ PTXSignal event, ValueSignal $ PTXSignal event)
+  eventVar <- liftIO newEmptyMVar
+  return (ValueSignalResolver $ PTXSignal eventVar, ValueSignal $ PTXSignal eventVar)
 bindAwhileIO (InputOutputRref _) = do
   mvar <- liftIO newEmptyMVar
   return (ValueOutputRef mvar, ValueRef mvar)
