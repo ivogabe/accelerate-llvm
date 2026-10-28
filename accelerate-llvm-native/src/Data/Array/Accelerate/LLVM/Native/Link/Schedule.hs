@@ -55,6 +55,7 @@ import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
 import Data.Bits
 import Data.Text (unpack)
+import Data.IORef
 import Control.Monad
 import Data.String
 import qualified Data.List as List
@@ -72,6 +73,7 @@ data NativeProgram = NativeProgram
   !(Ptr Int8 -> IO ()) -- The IO action to fill the imports part of a program structure.
   !Int -- The offset of the data in the program structure.
 
+-- TODO: change to UniformScheduleFunRC
 linkSchedule :: UID -> UniformScheduleFun NativeKernel () t -> NativeProgram
 linkSchedule uid schedule = unsafePerformIO $ evalLLVM defaultTarget $ linkSchedule' uid schedule
 
@@ -149,9 +151,10 @@ loadRuntime = mapM_ load $ Prelude.zip [0..] runtime
       , "hs_try_putmvar"
       ]
 
+-- TODO: Change to UniformScheduleFunRC
 codegenSchedule :: forall t. UniformScheduleFun NativeKernel () t -> (Int, Int, [Exists Lifetime], Ptr Int8 -> IO (), CodeGen Native ())
-codegenSchedule schedule
-  | Exists2 schedule1 <- convertFun schedule =
+codegenSchedule schedule = undefined
+  {- | Exists2 schedule1 <- convertFun schedule =
     ( fst $ primSizeAlignment $ programType
       (StructPrimType False $ importsType schedule1)
       (StructPrimType False $ stateType schedule1)
@@ -241,7 +244,7 @@ codegenSchedule schedule
         let blockRet = newBlockNamed "return"
         setBlock blockRet
         returnNull
-    )
+    ) -}
 
 operandRuntimeLib :: Operand (Ptr (Ptr Int8))
 operandRuntimeLib = LocalReference (PrimType $ PtrPrimType primType defaultAddrSpace) "runtime_lib"
@@ -261,7 +264,7 @@ operandAwhileIsFirst = LocalReference type' "awhile_is_first"
 operandAwhileSlotIdx :: Operand (Ptr Word8)
 operandAwhileSlotIdx = LocalReference type' "awhile_slot_idx"
 
-destructor :: Operand (Ptr (Struct fullImports)) -> TupR PrimType imports -> TupleIdx fullImports imports -> CodeGen Native ()
+{- destructor :: Operand (Ptr (Struct fullImports)) -> TupR PrimType imports -> TupleIdx fullImports imports -> CodeGen Native ()
 destructor fullState (TupRpair i1 i2) idx = destructor fullState i1 (tupleLeft idx) >> destructor fullState i2 (tupleRight idx)
 destructor _ TupRunit _ = return ()
 -- This uses the assumption that imported kernels have kernelTp (which is a NamedPrimType),
@@ -284,7 +287,7 @@ destructor fullState (TupRsingle tp) idx = do
           LLVM.ArgumentsNil)
         []
       return ()
-    _ -> internalError "imports should only include pointers"
+    _ -> internalError "imports should only include pointers" -}
 
 -- Kernels are actually functions, but to simplify the code generation here, we just use an untyped pointer.
 -- To separate pointers to buffers from pointer to kernels however, we introduce this type.
@@ -329,26 +332,296 @@ type family ReprBasesR t where
 type StorageBaseR t = BufferEltR (ReprBaseR t)
 type StorageBasesR t = BufferEltR (ReprBasesR t)
 
--- Note: we store the code to get access to a value here (in the CodeGen monad)
--- instead of only the operand.
--- This variable may be accessed in a different block than were it was defined,
--- and is not in scope there. This is due to the generator-style definition
--- of the generated code.
-data StructVar t = StructVar
-  -- Whether this is an input or output of the program.
-  -- i.e., whether this is bound by an Slam of the toplevel program.
-  !Bool
-  !(BaseR t)
-  !(CodeGen Native (Operand (Ptr (StorageBaseR t))))
-type StructVars = PartialEnv StructVar
+-- Representation of a BaseR when stored in registers
+toPrimType :: BaseR t -> PrimType (ReprBaseR t)
+toPrimType (BaseRground (GroundRscalar tp))
+  | Refl <- scalarReprBase tp = ScalarPrimType tp
+toPrimType (BaseRground (GroundRbuffer tp)) = PtrPrimType (bufferEltR tp) defaultAddrSpace
+toPrimType BaseRsignal = primType
+toPrimType BaseRsignalResolver = primType
+toPrimType (BaseRref tp) = toPrimType $ BaseRground tp
+toPrimType (BaseRrefWrite tp) = toPrimType $ BaseRground tp
 
-newtype LocalVar t = LocalVar (Operand (ReprBaseR t))
-type LocalVars = PartialEnv LocalVar
+-- Representation of a BaseR when stored in a struct
+toStoragePrimType :: BaseR t -> PrimType (StorageBaseR t)
+toStoragePrimType (BaseRground (GroundRscalar tp))
+  | Refl <- scalarReprBase tp = bufferEltR tp
+toStoragePrimType (BaseRground (GroundRbuffer tp)) = PtrPrimType (bufferEltR tp) defaultAddrSpace
+toStoragePrimType BaseRsignal = primType
+toStoragePrimType BaseRsignalResolver = primType
+toStoragePrimType (BaseRref tp) = toStoragePrimType $ BaseRground tp
+toStoragePrimType (BaseRrefWrite tp) = toStoragePrimType $ BaseRground tp
 
-data Exists2 f where
-  Exists2 :: f a b -> Exists2 f
+-- | The program function is constructed as a coroutine - a function that can
+-- be suspended from within the body of the function, and later be resumed.
+-- The function is suspended when waiting on a synchronisation or when
+-- executing a kernel.
+--
+-- The function is suspended by returning (as a regular function), and resumed
+-- by calling the function again. The function is called with an integer
+-- denoting the position/location/label where the function should resume. These
+-- integers correspond with basic blocks in the LLVM IR. The entry block has a
+-- switch instruction to jump to the correct block. These blocks are introduced
+-- using coroutineBlock.
+-- 
+-- Variables that need to be live across yield points (suspend points) need to
+-- be allocated in a struct, since local variables stored in registers (via
+-- Operand) will be lost when the function resumes. These slots can be claimed
+-- via coroutineDeclare.
+data CoroutineBuilder = CoroutineBuilder
+  (IORef Int) -- ^ Block count
+  (IORef CoroutineStruct)
 
-data Phase1 env imports state where
+-- | Represents the object containing the state of the coroutine, ie. the
+-- variables of the program that need to be stored between yield points.
+data CoroutineStruct where
+  CoroutineStruct
+    :: TupR PrimType tp -- ^ Type of state
+    -> Int -- ^ Size of state (& cursor for new allocations in the state)
+    -> CoroutineStruct
+
+-- Generate a new block for the coroutine. The block index will be added to the
+-- switch statement in the entry block of the function.
+coroutineBlock :: CoroutineBuilder -> CodeGen Native (Int, Block)
+coroutineBlock coroutine = undefined
+  -- TODO: Get the current number of blocks from the IORef
+  -- and increment by one.
+  -- Create a new block using 'newBlockNamed $ blockName idx'
+
+coroutineDeclare :: CoroutineBuilder -> InAwhile -> PrimType tp -> CodeGen Native Int
+coroutineDeclare coroutine inAwhile tp = undefined
+  -- TODO: Read cursor from CoroutineStruct,
+  -- compute size and alignment of tp via primSizeAlignment,
+  -- size' = if inAwhile then size * awhileConcurrentStates else size,
+  -- align cursor and increment by size' (using makeAligned from LLVM.AST.Type.Representation),
+  -- update type of state and cursor in CoroutineStruct.
+  -- Use liftIO to update the second IORef in CoroutineBuilder
+
+coroutineDeclarePtr :: CoroutineBuilder -> InAwhile -> PrimType tp -> CodeGen Native (CodeGen Native (Operand (Ptr tp)))
+coroutineDeclarePtr coroutine inAwhile tp = do
+  offset <- coroutineDeclare coroutine inAwhile tp
+  -- Return value in the codegen monad, as this code has to be generated after
+  -- each yield.
+  return $ coroutineField tp inAwhile offset
+
+coroutineDeclareValue :: CoroutineBuilder -> InAwhile -> Bool -> BaseR tp -> Maybe (Operand (ReprBaseR tp)) -> Bool -> CodeGen Native (Value tp)
+coroutineDeclareValue coroutine inAwhile isInOut tp val keepRegister = do
+  offset <- coroutineDeclare coroutine inAwhile (toStoragePrimType tp)
+  ptr <- coroutineField (toStoragePrimType tp) inAwhile offset
+  case val of
+    Nothing -> return ()
+    Just v ->
+      case baseBufferEltR tp of
+        Right t
+          | Refl <- scalarReprBase t ->
+            store NonVolatile t ptr v Nothing
+        Left Refl -> do
+          _ <- instrMD' (Store NonVolatile ptr v Nothing) (bufferMetadata' Nothing)
+          return ()
+  return $ Value isInOut tp inAwhile
+    (if keepRegister && valueInRegister tp then val else Nothing)
+    (Just offset)
+
+-- | Get a pointer to a field in the coroutine struct, given its type, offset,
+-- and whether it was *declared* in an awhile (not whether it is *used* in an
+-- awhile)
+coroutineField :: PrimType tp -> InAwhile -> Int -> CodeGen Native (Operand (Ptr tp))
+coroutineField = undefined
+  -- Cast operandProgram to i8*,
+  -- Compute o = offset + (if inAwhile then operandAwhileSlotIdx else 0)
+  -- Using GetElementPtr, add o to operandProgram
+  -- (eg in C: &(operandProgram as i8*)[o])
+  -- Cast to Ptr tp
+  -- Useful functions: ptrCast, A.add, GetElementPtr from LLVM.AST.Type.GetElementPtr (set last argument to GEPEmpty).
+
+baseBufferEltR :: BaseR tp -> Either (ReprBaseR tp :~: BufferEltR (ReprBaseR tp)) (ScalarType (ReprBaseR tp))
+baseBufferEltR = \case
+  BaseRground tp -> ground tp
+  BaseRref tp -> ground tp
+  BaseRrefWrite tp -> ground tp
+  BaseRsignal -> Left Refl
+  BaseRsignalResolver -> Left Refl
+  where
+    ground :: GroundR tp -> Either (ReprBaseR tp :~: BufferEltR (ReprBaseR tp)) (ScalarType (ReprBaseR tp))
+    ground (GroundRscalar t)
+      | Refl <- scalarReprBase t = Right t
+    ground GroundRbuffer{} = Left Refl
+
+data ImportsBuilder = ImportsBuilder (IORef (Exists Imports))
+data Imports imports = Imports {
+    importsType :: TupR PrimType imports,
+    importsInit :: TupR IO imports,
+    -- List of the lifetimes of the imported kernels.
+    -- Stored for memory management. The pointers stored in the lifetimes are
+    -- passed to the C runtime. The C runtime will inform the Haskell world
+    -- when the computation is finished, after which the Haskell code will
+    -- touch all these lifetimes. The Haskell GC can deallocate these objects
+    -- only after this touching happened.
+    importedLifetimes :: [Exists Lifetime]
+  }
+
+-- | Whether this term/variable is declared within an Awhile (not AwhileSeq).
+type InAwhile = Bool
+
+data Value t
+  = Value
+    -- | Whether this is an input or output of the program.
+    -- i.e., whether this is bound by an Slam of the toplevel program.
+    !Bool
+    -- | Type of the variable
+    !(BaseR t)
+    -- | Whether this value is part of Awhile
+    !InAwhile
+    -- | If stored in a register (instead of the struct of the coroutine),
+    -- an operand containing the actual value.
+    -- Not available after a yield point (but can be lifted to the struct if
+    -- this is needed, via prepareYield).
+    -- This field may only be set to Just if valueInRegister returns True.
+    !(Maybe (Operand (ReprBaseR t)))
+    -- | If stored in the struct of the coroutine, the offset in that struct.
+    -- At least one of this field and the previous field should be Just.
+    !(Maybe Int)
+
+valueInRegister :: BaseR t -> Bool
+valueInRegister BaseRground{} = True
+valueInRegister _ = False
+
+type Env' = Env Value
+
+prjPtr :: Idx env t -> Env' env -> CodeGen Native (Operand (Ptr (StorageBaseR t)))
+prjPtr i env = case prj' i env of
+  Value _ tp inAwhile _ (Just offset) -> coroutineField (toStoragePrimType tp) inAwhile offset
+  Value _ _ _ _ Nothing -> internalError "Expected value in struct"
+
+prepareYield :: CoroutineBuilder -> Env' env -> CodeGen Native (Env' env)
+prepareYield coroutine = mapMEnv f
+  where
+    f :: Value t -> CodeGen Native (Value t)
+    f (Value isInOut tp inAwhile _ offset@(Just _)) = return $
+      -- If value is already stored in the coroutine struct, we don't need to
+      -- allocate any new space. We do need to remove the register/operand for
+      -- this value, as that operand is no longer available after resuming the
+      -- coroutine
+      Value isInOut tp inAwhile Nothing offset
+    f (Value isInOut tp inAwhile (Just operand) Nothing) =
+      -- If the value is not yet stored in the coroutine struct, allocate space
+      -- in the struct and write the value to that location.
+      coroutineDeclareValue coroutine inAwhile isInOut tp (Just operand) False
+    f (Value _ _ _ Nothing Nothing) = internalError "Value should have a register or struct storage (or both)"
+
+convert :: forall env. CoroutineBuilder -> ImportsBuilder -> InAwhile -> Env' env -> UniformScheduleRC NativeKernel env -> CodeGen Native ()
+convert coroutine imports inAwhile env = \case
+  Return -> returnNull
+
+  Release subset a -> do
+    -- TODO: Create a function that removes bindings from the environment,
+    -- and calls release on these bindings.
+    -- See the former subEnv
+    env' <- undefined subset env
+    convert coroutine imports inAwhile env' a
+
+  Spawn split a b -> do
+    -- TODO: Create a function that splits the environment based on Split,
+    -- and adds retain calls when duplicating a value.
+    -- See the former forkEnv
+    (envA, envB) <- undefined split env
+
+    envA' <- prepareYield coroutine envA
+
+    (blockAIdx, blockA) <- coroutineBlock coroutine
+    location <- computeLocation inAwhile $ fromIntegral blockAIdx
+
+    _ <- callLocal (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.Body VoidType Nothing (Label "accelerate_schedule"))
+      (LLVM.ArgumentsCons operandWorkers []
+        $ LLVM.ArgumentsCons operandProgram []
+        $ LLVM.ArgumentsCons location []
+        LLVM.ArgumentsNil)
+      []
+
+    -- Note: we must first emit the code for 'a' (which is spawned in a new task),
+    -- then the code for 'b'. The reason is that this spawn may for instance be part
+    -- of the true or false branch of an Acond, and the 'next' instruction of the
+    -- Acond must follow 'b', not 'a'.
+    -- We guarantee this by creating a separate block for the code after spawning 'a'.
+    block <- newBlock "spawn.after"
+    _ <- br block
+
+    setBlock blockA
+    convert coroutine imports inAwhile envA' a
+
+    setBlock block
+    convert coroutine imports inAwhile envB b
+
+  Effect (SignalAwait signals) next -> do
+    (nextBlock, blockNext) <- coroutineBlock coroutine
+    let blockAwait = newBlockNamed "return"
+    getWaiter <- coroutineDeclarePtr coroutine inAwhile typeSignalWaiter
+    -- For await [a, b, c, d], we generate the following code:
+    -- if accelerate_schedule_after_or(workers, program, blockNext, a, waiter) return;
+    -- blockNext:
+    -- if accelerate_schedule_after_or(workers, program, blockNext, b, waiter) return;
+    -- if accelerate_schedule_after_or(workers, program, blockNext, c, waiter) return;
+    -- if accelerate_schedule_after_or(workers, program, blockNext, d, waiter) return;
+    --
+    -- Note that if 'b' is not resolved the first time blockNext is executed,
+    -- blockNext will be executed again.
+    -- This is fine: we may call accelerate_schedule_after_or again
+    -- when it is resolved.
+    -- Doing this reduces the number of blocks we need.
+    let
+      go :: Operand (Ptr (Struct (Ptr Int8, (Int32, Ptr Int8)))) -> Int -> [Idx env Signal] -> CodeGen Native ()
+      go _ _ [] = return ()
+      go waiter i (idx : idxs) = do
+        let blockContinue = if i == 0 then blockNext else newBlockNamed $ blockName nextBlock ++ ".continue." ++ show i
+        signal <- prjPtr idx env
+        location <- computeLocation inAwhile $ fromIntegral nextBlock
+        p <- callLocal
+          (LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $ LLVM.lamUnnamed primType $
+            LLVM.lamUnnamed primType $ LLVM.lamUnnamed (PtrPrimType typeSignalWaiter defaultAddrSpace) $
+            LLVM.Body type' Nothing (Label "accelerate_schedule_after_or"))
+          (LLVM.ArgumentsCons operandWorkers []
+            $ LLVM.ArgumentsCons operandProgram []
+            $ LLVM.ArgumentsCons location []
+            $ LLVM.ArgumentsCons signal []
+            $ LLVM.ArgumentsCons waiter []
+            LLVM.ArgumentsNil)
+          []
+        p' <- instr $ IntToBool TypeWord8 p
+        _ <- cbr p' blockAwait blockContinue
+        setBlock blockContinue
+        -- Since function may suspend and return here if i == 0, we must again get a pointer to the waiter here.
+        waiter' <-
+          if i == 0 && not (null idxs) then
+            getWaiter
+          else
+            return waiter
+        go waiter' (i + 1) idxs
+
+    initWaiter <- getWaiter
+    go initWaiter 0 signals
+
+    convert' next
+
+  -- Downside of this one-pass design is that we probably always need to call prepareYield at the beginning of Acond or Awhile,
+  -- whether it contains a yield or not. Variables before a possible yield will then also be moved to the struct.
+  where
+    convert' = convert coroutine imports inAwhile env
+  
+  -- TODO: Handle all constructors
+
+
+-- Compared to the old implementation, we replaced StructVars & LocalVars with Env'
+-- and we remove phase 1. Functionality of phase 1 is replaced as follows:
+--  * blockCount: moves to phase 2 via CoroutineBuilder, generate switch statement in entry block at the end of codegen
+--  * varsFree (replaced by RC instructions in UniformScheduleRC)
+--  * varsInStruct (replaced by new 'prepareYield' function. First store variables as locals, and later move them to struct if needed, instead of making this decision at declaration of variable)
+--  * maySuspend (either default to True, or see if we can derive this in a different way. It is only used in Acond.)
+-- Maybe get rid of:
+--  * stateType (replace by CoroutineBuilder, via untyped GetElementPtrs via offsets instead of TupleIdx. Downside: state of awhile will be interleaved. Based on inAwhile, we need to allocate multiple slots)
+--  * importsType, importsInit, importedLifetimes (similar way as stateType)
+--  -> Then we don't need phase 1 any more!
+
+{- data Phase1 env imports state where
   Phase1 :: {
     blockCount :: Int,
     importsType :: TupR PrimType imports,
@@ -1321,8 +1594,9 @@ phase2Sub phase1 imports fullState structVars localVars importsIdx stateIdx next
 
 stateField :: CodeGen Native (Operand (Ptr (Struct fullState))) -> PrimType field -> TupleIdx fullState field -> CodeGen Native (Operand (Ptr field))
 stateField fullState fieldTp fieldIdx = fullState >>= \s -> instr' $ GetElementPtr $ gepStruct fieldTp s fieldIdx
+-}
 
-computeLocation :: Bool -> Word32 -> CodeGen Native (Operand Word32)
+computeLocation :: InAwhile -> Word32 -> CodeGen Native (Operand Word32)
 -- Not in an awhile: we can ignore the awhile state
 computeLocation False blockIdx = return $ integral TypeWord32 blockIdx
 -- Bit pack the blockIdx, awhileIsFirst and awhileSlotIdx
@@ -1344,7 +1618,7 @@ computeAwhileLocation awhileSlot isFirst blockIdx = do
 -- Should be a power of two and at least 4, max 16
 awhileConcurrentStates :: Word64
 awhileConcurrentStates = 4
-
+{-
 convertArrayInstr
   :: StructVars env
   -> LocalVars env
@@ -1362,12 +1636,12 @@ convertArrayInstr structVars localVars arr arg = case arr of
       ptr' <- instr' $ GetElementPtr $ GEP1 ptr $ op scalarTypeInt arg
       ir t <$> load NonVolatile t ptr' Nothing
     | otherwise -> internalError "Buffer impossible"
-
+-}
 blockName :: Int -> String
 blockName 0 = "block.start"
 blockName 1 = "block.destructor"
 blockName idx = "block." ++ show idx
-
+{-
 getPtr :: StructVars env -> Idx env t -> CodeGen Native (Operand (Ptr (StorageBaseR t)))
 getPtr env idx = case prjPartial idx env of
   Just (StructVar _ _ m) -> m
@@ -1384,7 +1658,7 @@ getValue structVars localVars groundR idx
       GroundRbuffer _ -> instr' $ Load NonVolatile ptr Nothing
     return (partialUpdate (LocalVar value) idx localVars, value)
   | otherwise = internalError "Idx missing in StructVars."
-
+-}
 scalarReprBase :: ScalarType tp -> (tp, BufferEltR tp) :~: (ReprBaseR tp, StorageBaseR tp)
 scalarReprBase (VectorScalarType _) = Refl
 scalarReprBase (SingleScalarType (NumSingleType (IntegralNumType tp))) = case tp of
@@ -1402,7 +1676,7 @@ scalarReprBase (SingleScalarType (NumSingleType (FloatingNumType tp))) = case tp
   TypeHalf   -> Refl
   TypeFloat  -> Refl
   TypeDouble -> Refl
-
+{-
 data Push1 op env env' t state where
   Push1 ::
     { bStateType :: TupR PrimType state
@@ -1704,10 +1978,10 @@ callRefRetain ptr = do
       LLVM.ArgumentsNil)
     []
   return ()
-
+-}
 returnNull :: CodeGen arch ()
 returnNull = retval_ $ ConstantOperand $ NullPtrConstant $ type' @(Ptr Int8)
-
+{-
 -- Utilities for awhile loops
 awhileIOType :: InputOutputR input output -> TupR PrimType (StorageBasesR input)
 awhileIOType (InputOutputRpair io1 io2) = awhileIOType io1 `TupRpair` awhileIOType io2
@@ -2022,6 +2296,7 @@ putArrayDescriptor structVars localVars (ArrayDescriptor shr sh buffer) = do
           printAtIndex buffer i
 
       printString $ "]\n"
+-}
 
 printShape :: ShapeR sh -> CodeGen Native ()
 printShape ShapeRz = printString "  Scalar "
