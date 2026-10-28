@@ -196,6 +196,7 @@ test-suite nofib-llvm-native
   build-depends:
           base                          >= 4.17.2.1
         , accelerate
+        , accelerate:nofib
         , accelerate-llvm-native
         , tasty
         , tasty-hunit
