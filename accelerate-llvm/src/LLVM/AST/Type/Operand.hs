@@ -66,3 +66,5 @@ ptrCast tp (ConstantOperand c) = ConstantOperand $ case c of
 ptrCastUnSizedArray :: Operand (Ptr (SizedArray a)) -> Operand (Ptr a)
 ptrCastUnSizedArray operand = case typeOf operand of
   PrimType (PtrPrimType (ArrayPrimType _ t) _) -> ptrCast t operand
+  PrimType (ScalarPrimType _) -> internalError "Pointer impossible"
+  PrimType (PtrPrimType (ScalarPrimType _) _) -> internalError "Pointer impossible"
