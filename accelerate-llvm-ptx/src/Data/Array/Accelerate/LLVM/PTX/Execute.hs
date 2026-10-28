@@ -58,7 +58,7 @@ import Data.Array.Accelerate.LLVM.PTX.State
 import qualified Foreign.CUDA.Driver                                as CUDA
 --import qualified Foreign.CUDA.Driver.Stream                         as CUDA
 
-import Control.Monad                                                ( forM_, when, unless )
+import Control.Monad                                                ( forM_, unless )
 import Control.Monad.Reader                                         ( asks )
 import Control.Monad.State                                          ( liftIO )
 import Control.Concurrent.MVar
@@ -122,8 +122,8 @@ executeBinding env baseTp = \case
     result <- evalExp expr $ evalArrayInstr env
     return $ scalarToValues (mapTupR expectScalarType baseTp) result
   NewSignal _ -> do
-    event <- liftPar $ Event.create
-    let signal = PTXSignal event
+    eventVar <- liftIO newEmptyMVar
+    let signal = PTXSignal eventVar
     return (ValueSignal signal, ValueSignalResolver signal)
   NewRef _ -> do
     mvar <- liftIO newEmptyMVar
@@ -170,7 +170,12 @@ executeEffect env = \case
       let n = product
             $ fmap (\idx -> fromMaybe (internalError "Expected Int argument for kernel grid size") $ intArgs' Prelude.!! idxToInt idx)
             $ kernelElements kernel
-      let maxGridSize = (n + kernelElementsPerThread kernel - 1) `div` kernelElementsPerThread kernel
+      -- Kernels with 1-dimensional folds and scans always need to be started
+      -- with at least 1 thread block. Other kernels may be skipped if their
+      -- input is empty.
+      -- TODO: Only perform the 'max 1' when the kernel contains a dim1 fold
+      -- or scan.
+      let maxGridSize = max 1 $ (n + kernelElementsPerThread kernel - 1) `div` kernelElementsPerThread kernel
 
       locks <- unsafeGetValue <$> liftPar (asks ptxLocks)
 
@@ -187,17 +192,11 @@ executeEffect env = \case
       -- To simplify things, we could also always launch the latter number of
       -- threads and ignore the input size (the code in the kernel works with
       -- any grid size).
-      when (maxGridSize /= 0) $ liftIO $ launch (kernelMain kernel) stream maxGridSize kernelMemoryPtr locks args'
+      unless (n == 0 && kernelSkipEmpty kernel) $ liftIO $ launch (kernelMain kernel) stream maxGridSize kernelMemoryPtr locks args'
 
       -- Ensure 'touchLifetime' is called when we next synchronise.
       cleanUpTouchLifetime $ kernelPhaseLinked $ kernelMain kernel
 
-      case kernelFinish kernel of
-        Just p -> do
-          liftIO $ launch p stream 1 kernelMemoryPtr locks args'
-          -- Ensure 'touchLifetime' is called when we next synchronise.
-          cleanUpTouchLifetime $ kernelPhaseLinked p
-        Nothing -> return ()
       mapM_ (\(Exists l) -> cleanUpTouchLifetime l) lifetimes
       case kernelMemoryLifetime of
         Just l -> cleanUpTouchLifetime l
@@ -205,13 +204,17 @@ executeEffect env = \case
       liftPar (asks ptxLocks) >>= cleanUpTouchLifetime
   SignalAwait signals -> do
     stream <- asks ptxStream
-    forM_ signals $ \signal -> case prj' signal env of
-      ValueSignal (PTXSignal event) -> liftIO $ Event.after event stream
+    liftIO $ forM_ signals $ \signal -> case prj' signal env of
+      ValueSignal (PTXSignal eventVar) -> do
+        event <- readMVar eventVar
+        Event.after event stream
       ValueScalar _ _ -> internalError "Signal impossible"
   SignalResolve signals -> do
     stream <- asks ptxStream
     forM_ signals $ \signal -> case prj' signal env of
-      ValueSignalResolver (PTXSignal event) -> liftIO $ Event.record event stream
+      ValueSignalResolver (PTXSignal eventVar) -> do
+        event <- liftPar $ Event.waypoint stream
+        liftIO $ putMVar eventVar event
       ValueScalar _ _ -> internalError "SignalResolver impossible"
   RefWrite refVar valueVar
     | ValueOutputRef mvar <- prj' (varIdx refVar) env
@@ -283,14 +286,15 @@ executeAwhile
   -> Par ()
 executeAwhile env io step input next = do
   -- Set up the output variables for this iteration (and the input for the next)
-  event <- liftPar $ Event.create
-  let signal = PTXSignal event
+  eventVar <- liftIO newEmptyMVar
+  let signal = PTXSignal eventVar
   mvar <- liftIO newEmptyMVar
   (output, nextInput) <- bindAwhileIO io
 
   -- Check condition when it is available
   spawnPar $ do
     stream <- asks ptxStream
+    event <- liftIO $ readMVar eventVar
     liftIO $ Event.after event stream
     condition <- liftIO $ readMVar mvar
     case condition of
@@ -325,8 +329,8 @@ executeAwhileSeq env io step input next = do
 
 bindAwhileIO :: InputOutputR input output -> Par (Distribute Value output, Distribute Value input)
 bindAwhileIO InputOutputRsignal = do
-  event <- liftPar $ Event.create
-  return (ValueSignalResolver $ PTXSignal event, ValueSignal $ PTXSignal event)
+  eventVar <- liftIO newEmptyMVar
+  return (ValueSignalResolver $ PTXSignal eventVar, ValueSignal $ PTXSignal eventVar)
 bindAwhileIO (InputOutputRref _) = do
   mvar <- liftIO newEmptyMVar
   return (ValueOutputRef mvar, ValueRef mvar)

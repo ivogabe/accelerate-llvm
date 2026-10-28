@@ -29,7 +29,7 @@ import Data.Array.Accelerate.LLVM.PTX.Execute.Event (Event)
 import qualified Data.Array.Accelerate.LLVM.PTX.Execute.Event as Event
 
 import Data.IORef
-import Control.Concurrent.MVar
+import Control.Concurrent
 import Control.Monad.Reader
 
 type Gamma = Env Value
@@ -66,11 +66,18 @@ instance Distributes Value where
   pairImpossible (ValueScalar tp _) = pairImpossible tp
   unitImpossible (ValueScalar tp _) = unitImpossible tp
 
+-- | Representation of Signals in PTX backend for synchronisation between
+-- subterms of the program. 'Event' is used for GPU-side synchronisations.
+-- Synchronisation via Events is only possible if the host registers the
+-- event in some stream *before* it waits on it in another stream. Since we
+-- cannot guarantee that in general, we put the Event in an MVar. The MVar
+-- is written to in SignalResolve and read (not taken) in SignalAwait.
+--
 -- TODO: Use manual reference counting, instead of Lifetimes with destructors?
 -- We should then first make reference counting explicit in UniformSchedule,
 -- since we would otherwise need to duplicate that logic in all backends.
 -- Applies to PTXSignal and PTXBuffer
-newtype PTXSignal = PTXSignal Event
+newtype PTXSignal = PTXSignal (MVar Event)
 
 -- Partial function, only works on Input and Output of an Acc function.
 baseToValues :: BasesR t -> t -> Par (Distribute Value t)
@@ -78,22 +85,23 @@ baseToValues :: BasesR t -> t -> Par (Distribute Value t)
 baseToValues TupRunit _ = return ()
 -- Scalar input argument
 baseToValues (TupRsingle BaseRsignal `TupRpair` TupRsingle (BaseRref (GroundRscalar tp))) (Signal mvar, Ref input) = do
+  eventVar <- liftIO newEmptyMVar
   event <- liftPar Event.create
-  ref <- liftIO $ newEmptyMVar
+  ref <- liftIO newEmptyMVar
 
   -- Asynchronously wait on the signal, and fill the ptx signal / event and reference when ready.
-  spawnPar $ do
-    liftIO $ readMVar mvar
-    value <- liftIO $ readIORef input
-    liftIO $ putMVar ref $ ValueScalar tp value
-    stream <- asks ptxStream
-    liftIO $ Event.record event stream
+  _ <- liftIO $ forkIO $ do
+    readMVar mvar
+    value <- readIORef input
+    putMVar ref $ ValueScalar tp value
+    liftIO $ putMVar eventVar event
 
-  return (ValueSignal $ PTXSignal event, ValueRef ref)
+  return (ValueSignal $ PTXSignal eventVar, ValueRef ref)
 -- Buffer input argument
 baseToValues (TupRsingle BaseRsignal `TupRpair` TupRsingle (BaseRref (GroundRbuffer tp))) (Signal mvar, Ref input) = do
+  eventVar <- liftIO newEmptyMVar
   event <- liftPar Event.create
-  ref <- liftIO $ newEmptyMVar
+  ref <- liftIO newEmptyMVar
 
   -- Asynchronously wait on the signal, and fill the ptx signal / event and reference when ready.
   spawnPar $ do
@@ -103,14 +111,16 @@ baseToValues (TupRsingle BaseRsignal `TupRpair` TupRsingle (BaseRref (GroundRbuf
     liftIO $ putMVar ref $ ValueBuffer ptxBuffer
     stream <- asks ptxStream
     liftIO $ Event.record event stream
+    liftIO $ putMVar eventVar event
 
-  return (ValueSignal $ PTXSignal event, ValueRef ref)
+  return (ValueSignal $ PTXSignal eventVar, ValueRef ref)
 -- Scalar output argument
 baseToValues (TupRsingle BaseRsignalResolver `TupRpair` TupRsingle (BaseRrefWrite (GroundRscalar _))) (SignalResolver mvar, OutputRef output) = do
-  event <- liftPar Event.create
-  ref <- liftIO $ newEmptyMVar
+  eventVar <- liftIO newEmptyMVar
+  ref <- liftIO newEmptyMVar
 
   spawnPar $ do
+    event <- liftIO $ readMVar eventVar
     stream <- asks ptxStream
     liftIO $ Event.after event stream
     block
@@ -121,13 +131,14 @@ baseToValues (TupRsingle BaseRsignalResolver `TupRpair` TupRsingle (BaseRrefWrit
     liftIO $ writeIORef output value
     liftIO $ putMVar mvar ()
 
-  return (ValueSignalResolver $ PTXSignal event, ValueOutputRef ref)
+  return (ValueSignalResolver $ PTXSignal eventVar, ValueOutputRef ref)
 -- Buffer output argument
 baseToValues (TupRsingle BaseRsignalResolver `TupRpair` TupRsingle (BaseRrefWrite (GroundRbuffer tp))) (SignalResolver mvar, OutputRef output) = do
-  event <- liftPar Event.create
-  ref <- liftIO $ newEmptyMVar
+  eventVar <- liftIO newEmptyMVar
+  ref <- liftIO newEmptyMVar
 
   spawnPar $ do
+    event <- liftIO $ readMVar eventVar
     stream <- asks ptxStream
     liftIO $ Event.after event stream
     block
@@ -140,7 +151,7 @@ baseToValues (TupRsingle BaseRsignalResolver `TupRpair` TupRsingle (BaseRrefWrit
     block
     liftIO $ putMVar mvar ()
 
-  return (ValueSignalResolver $ PTXSignal event, ValueOutputRef ref)
+  return (ValueSignalResolver $ PTXSignal eventVar, ValueOutputRef ref)
 -- Pair
 baseToValues (TupRpair t1 t2) (v1, v2) = do
   x1 <- baseToValues t1 v1

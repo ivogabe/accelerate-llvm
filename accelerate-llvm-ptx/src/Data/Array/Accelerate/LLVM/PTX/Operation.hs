@@ -26,7 +26,6 @@ import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
 
-
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Operation.Bounds
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), rank)
@@ -128,8 +127,8 @@ instance LowerAcc PTXOp where
     = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
   mkPermute (Just a) b c = Exec PTXPermute (a :>: b :>: c :>: ArgsNil)
   mkPermute Nothing a b = Exec PTXPermute' (a :>: b :>: ArgsNil)
-  {-mkFold a (Just seed) b c = Exec PTXFold (a :>: seed :>: b :>: c :>: ArgsNil)
-  mkFold a Nothing b c = Exec PTXFold1 (a :>: b :>: c :>: ArgsNil) -}
+  mkFold a (Just seed) b c = Exec PTXFold (a :>: seed :>: b :>: c :>: ArgsNil)
+  mkFold a Nothing b c = Exec PTXFold1 (a :>: b :>: c :>: ArgsNil)
 
 instance SimplifyOperation PTXOp where
   detectCopy PTXMap         = detectMapCopies
@@ -282,17 +281,6 @@ instance MakesILP PTXOp where
     fusionILP.inplacePaths %= case isIdentity fun of
       Just Refl -> (<> mkUnitInplacePaths (Number nComps * Number nComps) c lIn lOut)
       _         -> (<> mkUnitInplacePaths 1 c lIn lOut)
-
-  {- mkGraph PTXPermute (_ :>: L _ (_, lTargets) :>: L _ (_, lLocks) :>: L (ArgArray In (ArrayR shr _) _ _) (_, lIns) :>: ArgsNil) l =
-    Graph.Info
-      ( mempty & infusibleEdges .~ Set.map (-?> l) (lTargets <> lLocks)) -- add infusible edges from the producers of target and lock arrays to the permute
-      (    inputConstraints l lIns
-        <> ILP.c (InFoldSize l) .==. ILP.c (OutFoldSize l)
-        <> ILP.c (InDims l) .==. int (rank shr)
-        <> ILP.c (InDir  l) .==. int (-2)
-        <> ILP.c (OutDir l) .==. int (-3)) -- Permute cannot fuse with its consumer
-      ( lower (-2) (InDir l)
-      <> upper (InDir l) (-1) ) -- default lowerbound for the input, but not for the output (as we set it to -3). -}
 
   mkGraph c PTXPermute (_fun :>: L _ lTargets :>: L _ lIn :>: ArgsNil) = do
     let bsTargets = getLabelArrDeps lTargets

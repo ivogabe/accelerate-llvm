@@ -53,7 +53,10 @@ data PTXKernel env where
   PTXKernel
     :: { kernelInit       :: !(Maybe (PTXKernelPhase env))
        , kernelMain       :: !(PTXKernelPhase env)
-       , kernelFinish     :: !(Maybe (PTXKernelPhase env))
+       -- | Whether this kernel may be skipped if the input is empty.
+       -- For fold, fold1, scan{l,r} and scan{l,r}', we must still execute the kernel
+       -- as they do generate output for empty inputs.
+       , kernelSkipEmpty  :: Bool
        , kernelUID        :: {-# UNPACK #-} !UID
        -- Note: [PTX Kernel Grid Size]
        -- We always assign a one-dimensional grid size, for simplicity.
@@ -94,8 +97,8 @@ data PTXKernelPhase env where
     -> PTXKernelPhase env
 
 instance NFData' PTXKernel where
-  rnf' (PTXKernel p1 p2 p3 !_ sz !_ !_ s l) =
-    maybe () rnf' p1 `seq` rnf' p2 `seq` maybe () rnf' p3
+  rnf' (PTXKernel p1 p2 !_ !_ sz !_ !_ s l) =
+    maybe () rnf' p1 `seq` rnf' p2
       `seq` rnf sz `seq` rnf s `seq` rnf l
 
 instance NFData' PTXKernelPhase where
@@ -117,12 +120,11 @@ instance IsKernel PTXKernel where
 
     phaseInit   <- compilePhase uid 1 `mapM` ptxCodeInit   ptxCode
     phaseWork   <- compilePhase uid 0  $     ptxCodeWork   ptxCode
-    phaseFinish <- compilePhase uid 2 `mapM` ptxCodeFinish ptxCode
     
     return $ PTXKernel
       phaseInit
       phaseWork
-      phaseFinish
+      (ptxCodeSkipEmpty ptxCode)
       uid
       (ptxCodeElements ptxCode)
       (ptxCodeElementsPerThread ptxCode)

@@ -1282,10 +1282,9 @@ scanWarp dir ScanInclusive dev tp (Just (False, seed)) combine size' value = do
   value' <- A.ifThenElse (tp, firstLane dir dev size' >>= A.eq singleType lane)
     ( do
       seed' <- seed
-      value' <- case dir of
+      case dir of
         LeftToRight -> app2 combine seed' value
         RightToLeft -> app2 combine value seed'
-      return value'
     )
     ( return value
     )

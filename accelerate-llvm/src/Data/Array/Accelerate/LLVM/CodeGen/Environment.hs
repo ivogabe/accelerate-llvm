@@ -76,7 +76,7 @@ data Envs env idxEnv = Envs
   -- The number of nested loops
   , envsLoopCount :: LoopDepth
   -- For each loop nest that uses tiling, the tile size and number of tiles at that depth.
-  , envsTileSizeCount :: [(Int, Operands Int)]
+  , envsTileSizeCount :: [(Operands Int, Operands Int)]
   -- The valuation of the ground environment.
   -- This is a partial environment as some local (fused away) buffers are only
   -- available in deeper loop depths.

@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.CodeGen.Permute
@@ -12,7 +12,8 @@
 
 module Data.Array.Accelerate.LLVM.CodeGen.Permute (
   detectRMW, detectCAS,
-  atomicCasLoop
+  atomicCasLoop,
+  atomicUpdate
 ) where
 
 import Data.Array.Accelerate.AST.Operation
@@ -25,9 +26,13 @@ import Data.Array.Accelerate.Trafo.Substitution
 import Data.Array.Accelerate.Type
 
 import qualified Data.Array.Accelerate.LLVM.CodeGen.Arithmetic as A
+import Data.Array.Accelerate.LLVM.CodeGen.Environment
+import Data.Array.Accelerate.LLVM.CodeGen.Exp
 import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
+import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic (Intrinsic(..))
+import Data.Array.Accelerate.LLVM.Foreign
 
 import LLVM.AST.Type.Instruction
 import LLVM.AST.Type.Instruction.Atomic
@@ -141,7 +146,6 @@ isProperlyAligned :: ScalarType e -> Bool
 isProperlyAligned (SingleScalarType _) = True
 isProperlyAligned (VectorScalarType (VectorType w tp)) = popCount w == 1 && singleTypeSize tp * w <= 64
 
-
 -- Implementation of atomic RMW operation (e.g. (+), (-)) using atomic
 -- compare-and-swap instructions, for targets which do not support the native
 -- instruction at this type but do support CAS at this bit width.
@@ -208,6 +212,67 @@ atomicCasLoop tp update addr alias
     _     <- phi' (TupRsingle si) spin old' [(ir i init',top), (ir i next',bot)]
 
     setBlock exit
+
+-- | Attempts to generate code for lock-free updates to a value, as used in
+-- permute and commutative folds. When no lock-free option is possible,
+-- this uses the fallback argument (which should use locks).
+atomicUpdate
+  :: (CompileForeignExp target, Intrinsic target)
+  => Envs env idxEnv
+  -> Fun env (e -> e -> e)
+  -> Operands e -- Left argument of combineFun
+  -- In case of a singular (non-tuple) value, get pointer and alias info
+  -> (ScalarType e -> CodeGen target (Operand (Ptr (BufferEltR e)), Maybe (MetadataNodeID, MetadataNodeID)))
+  -> CodeGen target () -- fallback when a lock-free solution is not possible
+  -> CodeGen target ()
+atomicUpdate envs combineFun x ptrAlias fallback = do
+  -- Choose a synchronisation strategy:
+  -- (1) Atomic RMW (atomic-fetch-and-something) or atomic store (when combineFun = const)
+  -- (2) Atomic Compare-and-swap loop
+  -- (3) Locks
+  -- For option 1, check if fun corresponds to a RMW operation
+  combineRMW <- detectRMW combineFun `guard'` (\(tp, rmw, _) -> liftCodeGen $ supportsAtomicRMW tp rmw)
+  -- For option 2, check if the values are singular and if the target supports CAS on these values
+  combineCAS <- detectCAS combineFun `guard'` (\tp -> liftCodeGen $ supportsAtomicCAS $ scalarTypeSize tp)
+  -- Option 3 is always possible.
+
+  -- Branch on these options
+  if
+    -- Option 1
+    | Just (tp, rmw, fun) <- combineRMW -> do
+      z <- app1 (llvmOfFun1 (compileArrayInstrEnvs envs) fun) x
+      (ptr, alias) <- ptrAlias tp
+      -- Pointer cast from 'BufferEltR e' to 'e'
+      -- Pointer cast is safe, since detectRMW checks the alignment of the value
+      let ptr' = ptrCast (ScalarPrimType tp) ptr
+      case rmw of
+        Exchange -> do
+          _ <- instrMD' (AtomicStore tp ptr' (op tp z) Monotonic) (bufferMetadata' alias)
+          return ()
+        _
+          | SingleScalarType (NumSingleType numTp) <- tp -> do
+            _ <- instrMD' (AtomicRMW numTp NonVolatile rmw ptr' (op tp z) (CrossThread, AcquireRelease)) (bufferMetadata' alias)
+            return ()
+          | otherwise -> internalError "AtomicRMW only supports num types"
+
+    -- Option 2
+    | Just tp <- combineCAS -> do
+      (ptr, alias) <- ptrAlias tp
+      -- Pointer cast is safe, since detectCAS checks the alignment of the value
+      let ptr' = ptrCast (ScalarPrimType tp) ptr
+      atomicCasLoop tp
+        (\y -> app2 (llvmOfFun2 (compileArrayInstrEnvs envs) combineFun) x y)
+        ptr'
+        alias
+
+    -- Option 3
+    | otherwise -> fallback
+  where
+    guard' :: Maybe a -> (a -> CodeGen target Bool) -> CodeGen target (Maybe a)
+    guard' Nothing _ = return Nothing
+    guard' (Just a) cond = do
+      c <- cond a
+      return $ if c then Just a else Nothing
 
 intTypeOfSize :: Int -> Exists IntegralType
 intTypeOfSize = \case
