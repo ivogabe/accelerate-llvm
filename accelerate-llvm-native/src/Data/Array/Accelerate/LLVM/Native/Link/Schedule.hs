@@ -416,8 +416,8 @@ convert _ Return =
     maySuspend = False,
     phase2 = \_ _ _ _ _ _ _ -> returnNull
   }
--- convert inAwhile (Spawn (Effect (SignalAwait signals) a) b)
-convert inAwhile (Spawn a b)
+-- convert inAwhile (Spawn SplitDefault (Effect (SignalAwait signals) a) b)
+convert inAwhile (Spawn SplitDefault a b)
   | Exists2 a1 <- convert inAwhile a
   , Exists2 b1 <- convert inAwhile b =
   Exists2 $ Phase1{

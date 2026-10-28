@@ -112,7 +112,7 @@ execute env = \case
     execute env next
   Awhile io step initial next -> executeAwhile env io step (prjVars initial env) next
   AwhileSeq io step initial next -> executeAwhileSeq env io step (prjVars initial env) next
-  Spawn a b -> do
+  Spawn SplitDefault a b -> do
     spawnPar (execute env a)
     execute env b
 
