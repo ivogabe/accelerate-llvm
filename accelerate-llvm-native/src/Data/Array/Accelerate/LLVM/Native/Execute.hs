@@ -41,8 +41,12 @@ import System.IO.Unsafe ( unsafePerformIO )
 import LLVM.AST.Type.Representation
 import System.Environment
 
-instance Execute UniformScheduleFun NativeKernel where
-  data Linked UniformScheduleFun NativeKernel t = NativeLinked !(NativeProgram) !(UniformScheduleFun NativeKernel () t)
+instance Execute UniformScheduleFunRC NativeKernel where
+  -- TODO: Get rid of UniformScheduleFunRC in this data type. We only store it
+  -- to get the LeftHandSide of the argument(s), and the body is thus not used.
+  -- We should create a new data type that only contains the left hand sides,
+  -- not the body of the function.
+  data Linked UniformScheduleFunRC NativeKernel t = NativeLinked !(NativeProgram) !(UniformScheduleFunRC NativeKernel () t)
 
   linkAfunSchedule schedule =
     NativeLinked
@@ -84,7 +88,7 @@ destructWhen mvar list = do
   mapM_ (\(Exists l) -> touchLifetime l) list
 
 prepareProgram
-  :: UniformScheduleFun NativeKernel env f
+  :: UniformScheduleFunRC NativeKernel env f
   -> IO (Ptr Int8, Int)
   -> (Ptr Int8 -> IO ())
   -> IOFun f

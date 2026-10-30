@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds            #-}
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
@@ -73,11 +74,10 @@ data NativeProgram = NativeProgram
   !(Ptr Int8 -> IO ()) -- The IO action to fill the imports part of a program structure.
   !Int -- The offset of the data in the program structure.
 
--- TODO: change to UniformScheduleFunRC
-linkSchedule :: UID -> UniformScheduleFun NativeKernel () t -> NativeProgram
+linkSchedule :: UID -> UniformScheduleFunRC NativeKernel () t -> NativeProgram
 linkSchedule uid schedule = unsafePerformIO $ evalLLVM defaultTarget $ linkSchedule' uid schedule
 
-linkSchedule' :: UID -> UniformScheduleFun NativeKernel () t -> LLVM Native NativeProgram
+linkSchedule' :: UID -> UniformScheduleFunRC NativeKernel () t -> LLVM Native NativeProgram
 linkSchedule' uid schedule
   | (sz, offset, lifetimes, prepInput, body) <- codegenSchedule schedule
   = do
@@ -151,8 +151,7 @@ loadRuntime = mapM_ load $ Prelude.zip [0..] runtime
       , "hs_try_putmvar"
       ]
 
--- TODO: Change to UniformScheduleFunRC
-codegenSchedule :: forall t. UniformScheduleFun NativeKernel () t -> (Int, Int, [Exists Lifetime], Ptr Int8 -> IO (), CodeGen Native ())
+codegenSchedule :: forall t. UniformScheduleFunRC NativeKernel () t -> (Int, Int, [Exists Lifetime], Ptr Int8 -> IO (), CodeGen Native ())
 codegenSchedule schedule = undefined
   {- | Exists2 schedule1 <- convertFun schedule =
     ( fst $ primSizeAlignment $ programType
@@ -493,8 +492,20 @@ prjPtr i env = case prj' i env of
   Value _ tp inAwhile _ (Just offset) -> coroutineField (toStoragePrimType tp) inAwhile offset
   Value _ _ _ _ Nothing -> internalError "Expected value in struct"
 
-prepareYield :: CoroutineBuilder -> Env' env -> CodeGen Native (Env' env)
-prepareYield coroutine = mapMEnv f
+prjValue :: Idx env t -> Env' env -> CodeGen Native (Operand (ReprBaseR t))
+prjValue i env = case prj' i env of
+  Value _ _ _ (Just operand) _ -> return operand
+  Value _ tp inAwhile _ (Just offset) -> do
+    ptr <- coroutineField (toStoragePrimType tp) inAwhile offset
+    case baseBufferEltR tp of
+        Right t
+          | Refl <- scalarReprBase t ->
+            load NonVolatile t ptr Nothing
+        Left Refl -> do
+          instrMD' (Load NonVolatile ptr Nothing) (bufferMetadata' Nothing)
+
+prepareYield :: CoroutineBuilder -> Bool -> Env' env -> CodeGen Native (Env' env)
+prepareYield coroutine keepRegister = mapMEnv f
   where
     f :: Value t -> CodeGen Native (Value t)
     f (Value isInOut tp inAwhile _ offset@(Just _)) = return $
@@ -506,27 +517,71 @@ prepareYield coroutine = mapMEnv f
     f (Value isInOut tp inAwhile (Just operand) Nothing) =
       -- If the value is not yet stored in the coroutine struct, allocate space
       -- in the struct and write the value to that location.
-      coroutineDeclareValue coroutine inAwhile isInOut tp (Just operand) False
+      coroutineDeclareValue coroutine inAwhile isInOut tp (Just operand) keepRegister
     f (Value _ _ _ Nothing Nothing) = internalError "Value should have a register or struct storage (or both)"
+
+-- | Variant of prepareYield that operates on a subset of the bindings in the
+-- environment. Values are kept in registers.
+prepareYieldSubset :: CoroutineBuilder -> IdxSet env -> Env' env -> CodeGen Native (Env' env)
+prepareYieldSubset = undefined -- TODO: Implement
 
 convert :: forall env. CoroutineBuilder -> ImportsBuilder -> InAwhile -> Env' env -> UniformScheduleRC NativeKernel env -> CodeGen Native ()
 convert coroutine imports inAwhile env = \case
   Return -> returnNull
 
   Release subset a -> do
-    -- TODO: Create a function that removes bindings from the environment,
-    -- and calls release on these bindings.
-    -- See the former subEnv
-    env' <- undefined subset env
+    env' <- subEnv subset env
     convert coroutine imports inAwhile env' a
 
-  Spawn split a b -> do
-    -- TODO: Create a function that splits the environment based on Split,
-    -- and adds retain calls when duplicating a value.
-    -- See the former forkEnv
-    (envA, envB) <- undefined split env
+  Acond cond split whenTrue whenFalse next
+    | Released subTrue whenTrue' <- leadingRelease whenTrue
+    , Released subFalse whenFalse' <- leadingRelease whenFalse
+    -> do
+      cond' <- prjValue (varIdx cond) env
+      cond'' <- instr $ IntToBool TypeWord8 cond'
 
-    envA' <- prepareYield coroutine envA
+      -- Move variables used in 'next' to coroutine struct,
+      -- so they are available even if whenTrue or whenFalse yields.\
+      env' <- prepareYieldSubset coroutine (IdxSet.splitRight split) env
+
+      blockTrue <- newBlock "acond.true"
+      blockFalse <- newBlock "acond.false"
+      blockExit <- newBlock "acond.next"
+      _  <- cbr cond'' blockTrue blockFalse
+
+      setBlock blockTrue
+      let subTrue' = splitSubsetLeft split `composeSubsets` subTrue
+      -- Increment reference count of variables used in both whenTrue and next,
+      -- or alternatively phrased: all variables in next minus the ones unused
+      -- in whenTrue
+      retain env' (IdxSet.splitRight split IdxSet.\\ IdxSet.subsetDropped subTrue')
+      let envT = subsetEnv subTrue' env'
+      convert coroutine imports inAwhile envT whenTrue'
+      _ <- br blockExit
+
+      setBlock blockFalse
+      let subFalse' = splitSubsetLeft split `composeSubsets` subFalse
+      retain env' (IdxSet.splitRight split IdxSet.\\ IdxSet.subsetDropped subFalse')
+      let envF = subsetEnv subFalse' env'
+      convert coroutine imports inAwhile envF whenFalse'
+      _ <- br blockExit
+
+      setBlock blockExit
+      let envNext = subsetEnv (splitSubsetRight split) env'
+      convert coroutine imports inAwhile envNext next
+
+  Spawn split a b -> do
+    -- Move variables used by 'a' to the coroutine struct. We still keep them
+    -- in registers, so 'b' can directly use them.
+    -- By calling this before forkEnv, these variables will not be moved
+    -- multiple times to the struct, if 'b' also uses these variables.
+    env' <- prepareYieldSubset coroutine (IdxSet.splitLeft split) env
+
+    -- Retain reference counts when needed, and create environments for both
+    -- subterms.
+    (envA, envB) <- forkEnv split env'
+
+    envA' <- prepareYield coroutine False envA
 
     (blockAIdx, blockA) <- coroutineBlock coroutine
     location <- computeLocation inAwhile $ fromIntegral blockAIdx
@@ -609,6 +664,32 @@ convert coroutine imports inAwhile env = \case
   
   -- TODO: Handle all constructors
 
+forkEnv :: Split True env env1 env2 -> Env' env -> CodeGen Native (Env' env1, Env' env2)
+forkEnv split env = do
+  retain env $ IdxSet.intersect (IdxSet.splitLeft split) (IdxSet.splitRight split)
+
+  return
+    ( subsetEnv (splitSubsetLeft  split) env
+    , subsetEnv (splitSubsetRight split) env )
+
+subEnv :: Subset env env' -> Env' env -> CodeGen Native (Env' env')
+subEnv subset env = do
+  release env $ IdxSet.subsetDropped subset
+  return $ subsetEnv subset env
+
+-- TODO: Increment reference counts for bindings in set.
+-- Recurse over set and env (as a zip), and emit the correct instruction to increment the reference count
+-- of a buffer or buffer reference.
+-- See the old forkEnv
+retain :: Env' env -> IdxSet env -> CodeGen Native ()
+retain = undefined
+
+-- TODO: Decrement reference counts for bindings in set.
+-- Recurse over set and env (as a zip), and emit the correct instruction to decrement the reference count
+-- of a buffer or buffer reference.
+-- See the old subEnv
+release :: Env' env -> IdxSet env -> CodeGen Native ()
+release = undefined
 
 -- Compared to the old implementation, we replaced StructVars & LocalVars with Env'
 -- and we remove phase 1. Functionality of phase 1 is replaced as follows:

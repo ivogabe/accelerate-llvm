@@ -47,7 +47,7 @@ module Data.Array.Accelerate.LLVM.Native (
   Native,
   createTarget,
 -}
-  Native, UniformScheduleFun, NativeKernel
+  Native, UniformScheduleFunRC, NativeKernel
 ) where
 
 import Data.Array.Accelerate
@@ -61,7 +61,7 @@ import Data.Array.Accelerate.LLVM.Native.Kernel
 import Data.Array.Accelerate.LLVM.Native.Execute ()
 
 instance Backend Native where
-  type Schedule Native = UniformScheduleFun
+  type Schedule Native = UniformScheduleFunRC
   type Kernel   Native = NativeKernel
 
 {-
