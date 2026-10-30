@@ -102,7 +102,7 @@ execute env = \case
   Effect effect next -> do
     executeEffect env effect
     execute env next
-  Acond cond true false next -> do
+  Acond cond SplitDefault true false next -> do
     let cond' = case prj' (varIdx cond) env of
           ValueScalar _ c -> c
     if cond' == 1 then
@@ -110,8 +110,8 @@ execute env = \case
     else
       execute env false
     execute env next
-  Awhile io step initial next -> executeAwhile env io step (prjVars initial env) next
-  AwhileSeq io step initial next -> executeAwhileSeq env io step (prjVars initial env) next
+  Awhile SplitDefault SplitDefault io step initial next -> executeAwhile env io step (prjVars initial env) next
+  AwhileSeq SplitDefault SplitDefault io step initial next -> executeAwhileSeq env io step (prjVars initial env) next
   Spawn SplitDefault a b -> do
     spawnPar (execute env a)
     execute env b

@@ -470,7 +470,7 @@ convert inAwhile (Spawn SplitDefault a b)
         nextBlock
   }
 -- Control flow
-convert inAwhile (Acond cond whenTrue whenFalse next)
+convert inAwhile (Acond cond SplitDefault whenTrue whenFalse next)
   | Exists2 whenTrue1 <- convert inAwhile whenTrue
   , Exists2 whenFalse1 <- convert inAwhile whenFalse
   , Exists2 next1 <- convert inAwhile next
@@ -535,7 +535,7 @@ convert inAwhile (Acond cond whenTrue whenFalse next)
         (tupleRight stateIdx)
         (nextBlock + blockCount whenTrue1 + blockCount whenFalse1)
   }
-convert inAwhile (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step)))) initial next)
+convert inAwhile (AwhileSeq SplitDefault SplitDefault io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step)))) initial next)
   | Refl <- awhileIOMatch io
   , Exists2 step1 <- convert inAwhile step
   , Exists2 next1 <- convert inAwhile next
@@ -610,7 +610,7 @@ convert inAwhile (AwhileSeq io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbo
       phase2Sub next1 imports fullState structVarsStart PEnd (tupleRight importsIdx) (tupleRight stateIdx) (nextBlock + blockCount step1)
   }
 convert True Awhile{} = internalError "Awhile cannot be nested. Outer Awhile should have been converted to an AwhileSeq"
-convert False (Awhile io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step)))) initial next)
+convert False (Awhile SplitDefault SplitDefault io (Slam lhsInput (Slam lhsBool (Slam lhsOutput (Sbody step)))) initial next)
   | Refl <- awhileIOMatch io
   , Exists2 step1 <- convert True step
   , Exists2 next1 <- convert False next
