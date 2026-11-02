@@ -11,40 +11,23 @@
 
 module Data.Array.Accelerate.LLVM.CodeGen.Profile (
 
-  zone_begin, zone_begin_alloc,
-  zone_end,
   global_string, derefGlobalString, locationDataType, source_location_data, TracySrcloc
 
 ) where
 
 import LLVM.AST.Type.Constant
 import LLVM.AST.Type.Downcast
-import LLVM.AST.Type.Function
 import LLVM.AST.Type.GetElementPtr
-import LLVM.AST.Type.Global
 import LLVM.AST.Type.Name
-import LLVM.AST.Type.Operand
 import LLVM.AST.Type.Representation
 import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty     as LP
 
-import Data.Array.Accelerate.LLVM.CodeGen.Base
-import Data.Array.Accelerate.LLVM.CodeGen.Constant
-import Data.Array.Accelerate.LLVM.CodeGen.IR
 import Data.Array.Accelerate.LLVM.CodeGen.Monad
 
-import Data.Array.Accelerate.Sugar.Elt
 import Data.Array.Accelerate.Representation.Type
-import Data.Array.Accelerate.Debug.Internal                         ( tracyIsEnabled, SrcLoc, Zone )
 
-import Control.Monad
 import Data.Char
 
-
-call1 :: GlobalFunction t -> Arguments t -> CodeGen arch (Operands (Result t))
-call1 f args = call f args [NoUnwind, NoDuplicate]
-
-lam :: IsPrim a => GlobalFunction t -> GlobalFunction (a -> t)
-lam = lamUnnamed primType
 
 global_string :: String -> CodeGen arch (Name (Ptr (SizedArray Word8)), Word64)
 global_string str = do
@@ -133,97 +116,3 @@ source_location_data nm fun src line colour = do
     , LP.globalMetadata = mempty
     }
   return v
-
-
-alloc_srcloc_name
-    :: Int      -- line
-    -> String   -- source file
-    -> String   -- function
-    -> String   -- name
-    -> CodeGen arch (Operands SrcLoc)
-alloc_srcloc_name l src fun nm
-  | not tracyIsEnabled = return (constant (eltR @SrcLoc) 0)
-  | otherwise              = do
-      (s, sl) <- global_string src
-      (f, fl) <- global_string fun
-      (n, nl) <- global_string nm
-      let
-          line       = ConstantOperand $ ScalarConstant scalarType (fromIntegral l :: Word32)
-          source     = ConstantOperand $ if null src then NullPtrConstant type' else derefGlobalString sl s
-          function   = ConstantOperand $ if null fun then NullPtrConstant type' else derefGlobalString fl f
-          name       = ConstantOperand $ if null nm  then NullPtrConstant type' else derefGlobalString nl n
-          sourceSz   = ConstantOperand $ ScalarConstant scalarType (sl-1) -- null
-          functionSz = ConstantOperand $ ScalarConstant scalarType (fl-1) -- null
-          nameSz     = ConstantOperand $ ScalarConstant scalarType (nl-1) -- null
-      --
-      call1
-        (lam
-          $ lam
-          $ lam
-          $ lam
-          $ lam
-          $ lam
-          $ lam
-          $ Body (type' @SrcLoc) (Just Tail) "___tracy_alloc_srcloc_name")
-        (ArgumentsCons line []
-          $ ArgumentsCons source []
-          $ ArgumentsCons sourceSz []
-          $ ArgumentsCons function []
-          $ ArgumentsCons functionSz []
-          $ ArgumentsCons name []
-          $ ArgumentsCons nameSz []
-            ArgumentsNil)
-
-zone_begin
-    :: Int      -- line
-    -> String   -- source file
-    -> String   -- function
-    -> String   -- name
-    -> Word32   -- colour
-    -> CodeGen arch (Operands Zone)
-zone_begin line src fun name colour
-  | not tracyIsEnabled = return (constant (eltR @SrcLoc) 0)
-  | otherwise              = do
-      srcloc <- source_location_data name fun src line colour
-      let srcloc_ty = PtrPrimType (NamedPrimType "___tracy_source_location_data" locationDataType) defaultAddrSpace
-      --
-      call1
-        (lamUnnamed srcloc_ty
-          $ lam
-          $ Body (type' @SrcLoc) (Just Tail) "___tracy_emit_zone_begin")
-        (ArgumentsCons (ConstantOperand (GlobalReference (PrimType srcloc_ty) srcloc)) []
-          $ ArgumentsCons (ConstantOperand (ScalarConstant scalarType (1 :: Int32))) []
-            ArgumentsNil)
-
-zone_begin_alloc
-    :: Int      -- line
-    -> String   -- source file
-    -> String   -- function
-    -> String   -- name
-    -> Word32   -- colour
-    -> CodeGen arch (Operands Zone)
-zone_begin_alloc line src fun name colour
-  | not tracyIsEnabled = return (constant (eltR @Zone) 0)
-  | otherwise              = do
-      srcloc <- alloc_srcloc_name line src fun name
-      zone   <- call1
-        (lam $ lam $ Body (type' @SrcLoc) (Just Tail) "___tracy_emit_zone_begin_alloc")
-        (ArgumentsCons (op primType srcloc) []
-          $ ArgumentsCons (ConstantOperand (ScalarConstant scalarType (1 :: Int32))) []
-            ArgumentsNil)
-      when (colour /= 0) $ void $ call1
-          (lam $ lam $ Body (type' :: Type ()) (Just Tail) "___tracy_emit_zone_color")
-          (ArgumentsCons (op primType zone) []
-            $ ArgumentsCons (ConstantOperand (ScalarConstant scalarType colour)) []
-              ArgumentsNil)
-      return zone
-
-zone_end
-    :: Operands Zone
-    -> CodeGen arch ()
-zone_end zone
-  | not tracyIsEnabled = return ()
-  | otherwise = void $ call1
-      (lam (Body VoidType (Just Tail) "___tracy_emit_zone_end"))
-      (ArgumentsCons (op primType zone) [] ArgumentsNil)
-
