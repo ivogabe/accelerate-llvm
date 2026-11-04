@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds       #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies    #-}
 {-# LANGUAGE ViewPatterns    #-}
@@ -30,8 +31,8 @@ import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Operation.Bounds
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), rank)
-import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
-import Data.Array.Accelerate.Type (scalarType, scalarTypeInt)
+import Data.Array.Accelerate.Representation.Type (TupR (..))
+import Data.Array.Accelerate.Type (scalarTypeInt)
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
 import Lens.Micro
@@ -45,44 +46,44 @@ import Control.Monad.State.Strict
 import Data.Array.Accelerate.Analysis.Match ((:~:)(Refl))
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
 
-data NativeOp t where
-  NMap         :: NativeOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
-  NBackpermute :: NativeOp (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
-  NGenerate    :: NativeOp (Fun' (sh -> t)              -> Out sh  t -> ())
-  NPermute     :: NativeOp (Fun' (e -> e -> e)
-                         -> Mut sh' e
-                         -> In sh (PrimMaybe (sh', e))
-                         -> ())
-  NPermute'    :: NativeOp (Mut sh' e
-                         -> In sh (PrimMaybe (sh', e))
-                         -> ())
-  NScan        :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> ())
-  NScan1       :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> ())
-  NScan'       :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> Out sh e
-                         -> ())
-  NFold        :: NativeOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out sh e
-                         -> ())
-  NFold1       :: NativeOp (Fun' (e -> e -> e)
-                         -> In (sh, Int) e
-                         -> Out sh e
-                         -> ())
+data NativeOp (fusible :: Bool) t where
+  NMap         :: NativeOp True (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
+  NBackpermute :: NativeOp True (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
+  NGenerate    :: NativeOp True (Fun' (sh -> t)              -> Out sh  t -> ())
+  NPermute     :: NativeOp True (Fun' (e -> e -> e)
+                              -> Mut sh' e
+                              -> In sh (PrimMaybe (sh', e))
+                              -> ())
+  NPermute'    :: NativeOp True (Mut sh' e
+                              -> In sh (PrimMaybe (sh', e))
+                              -> ())
+  NScan        :: !Direction
+               -> NativeOp True (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> ())
+  NScan1       :: !Direction
+               -> NativeOp True (Fun' (e -> e -> e)
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> ())
+  NScan'       :: !Direction
+               -> NativeOp True (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> Out sh e
+                              -> ())
+  NFold        :: NativeOp True (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out sh e
+                              -> ())
+  NFold1       :: NativeOp True (Fun' (e -> e -> e)
+                              -> In (sh, Int) e
+                              -> Out sh e
+                              -> ())
 
 instance PrettyOp NativeOp where
   prettyOp NMap         = "map"
@@ -102,8 +103,8 @@ instance PrettyOp NativeOp where
   prettyOp NFold        = "fold"
   prettyOp NFold1       = "fold1"
 
-instance NFData' NativeOp where
-  rnf' !_ = ()
+instance NFDataOp NativeOp where
+  rnfOp !_ = ()
 
 instance OperationBounds NativeOp where
   boundsOptimizeOp = \case
@@ -118,19 +119,19 @@ instance OperationBounds NativeOp where
     _ -> boundsOptimizeOpDefault
 
 instance LowerAcc NativeOp where
-  mkMap         a b c   = Exec NMap         (a :>: b :>: c :>:       ArgsNil)
-  mkBackpermute a b c   = Exec NBackpermute (a :>: b :>: c :>:       ArgsNil)
-  mkGenerate    a b     = Exec NGenerate    (a :>: b :>:             ArgsNil)
+  mkMap         a b c   = Exec (ExecOp Fusible NMap)         (a :>: b :>: c :>:       ArgsNil)
+  mkBackpermute a b c   = Exec (ExecOp Fusible NBackpermute) (a :>: b :>: c :>:       ArgsNil)
+  mkGenerate    a b     = Exec (ExecOp Fusible NGenerate)    (a :>: b :>:             ArgsNil)
   mkScan dir f (Just seed) i o
-    = Exec (NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp Fusible $ NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
   mkScan dir f Nothing i o
-    = Exec (NScan1 dir) (f :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp Fusible $ NScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i o1 o2
-    = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute (Just a) b c = Exec NPermute (a :>: b :>: c :>: ArgsNil)
-  mkPermute Nothing a b = Exec NPermute' (a :>: b :>: ArgsNil)
-  mkFold a (Just seed) b c = Exec NFold (a :>: seed :>: b :>: c :>: ArgsNil)
-  mkFold a Nothing b c = Exec NFold1 (a :>: b :>: c :>: ArgsNil)
+    = Exec (ExecOp Fusible $ NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
+  mkPermute (Just a) b c = Exec (ExecOp Fusible NPermute) (a :>: b :>: c :>: ArgsNil)
+  mkPermute Nothing a b = Exec (ExecOp Fusible NPermute') (a :>: b :>: ArgsNil)
+  mkFold a (Just seed) b c = Exec (ExecOp Fusible NFold) (a :>: seed :>: b :>: c :>: ArgsNil)
+  mkFold a Nothing b c = Exec (ExecOp Fusible NFold1) (a :>: b :>: c :>: ArgsNil)
 
 instance SimplifyOperation NativeOp where
   detectCopy NMap         = detectMapCopies
@@ -252,14 +253,9 @@ instance MakesILP NativeOp where
   type BackendArg NativeOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
   defaultBA :: BackendArg NativeOp
   defaultBA = 0
-  data BackendClusterArg NativeOp a = BCAN
-  combineBackendClusterArg :: BackendClusterArg NativeOp (Out  sh e)
-                           -> BackendClusterArg NativeOp (In   sh e)
-                           -> BackendClusterArg NativeOp (Var' sh)
-  combineBackendClusterArg _ _ = error "combineBackendClusterArg: Shouldn't be able to fuse."
 
   mkGraph :: Node Comp
-          -> NativeOp args
+          -> NativeOp True args
           -> LabelledArgs env args
           -> State (BackendGraphState NativeOp env) ()
   mkGraph c@(Node _i _) NBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
@@ -381,29 +377,10 @@ instance MakesILP NativeOp where
   labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
   labelLabelledArg _ _ (L x y) = LOp x y 0
 
-  getClusterArg :: LabelledArgOp NativeOp env a -> BackendClusterArg NativeOp a
-  getClusterArg LOp{} = BCAN
-
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
   finalize :: FusionGraph -> [Constraint]
   finalize g = map NegativeDirIfManifest $ S.toList $ g^.writeEdges
 
-  encodeBackendClusterArg BCAN = intHost $(hashQ ("BCAN" :: String))
-
 defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
-
-instance NFData' (BackendClusterArg NativeOp) where
-  rnf' :: BackendClusterArg NativeOp a -> ()
-  rnf' !_ = ()
-
-instance ShrinkArg (BackendClusterArg NativeOp) where
-  shrinkArg :: SubArg t t' -> BackendClusterArg NativeOp t -> BackendClusterArg NativeOp t'
-  shrinkArg _ BCAN = BCAN
-  deadArg :: BackendClusterArg NativeOp (Out sh e) -> BackendClusterArg NativeOp (Var' sh)
-  deadArg BCAN = BCAN
-
-shrToTypeR :: ShapeR sh -> TypeR sh
-shrToTypeR ShapeRz = TupRunit
-shrToTypeR (ShapeRsnoc shr) = TupRpair (shrToTypeR shr) (TupRsingle scalarType)

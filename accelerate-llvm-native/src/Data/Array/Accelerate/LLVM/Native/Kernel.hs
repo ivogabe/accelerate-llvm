@@ -20,6 +20,7 @@ module Data.Array.Accelerate.LLVM.Native.Kernel (
 
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Kernel
+import Data.Array.Accelerate.AST.Partitioned (ExecCluster(..))
 import Data.Array.Accelerate.AST.Schedule
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Backend
@@ -75,7 +76,7 @@ instance IsKernel NativeKernel where
   type KernelOperation NativeKernel = NativeOp
   type KernelMetadata  NativeKernel = NativeKernelMetadata
 
-  compileKernel env cluster args = unsafePerformIO $ evalLLVM defaultTarget $ do
+  compileKernel env (ExecClustered cluster) args = unsafePerformIO $ evalLLVM defaultTarget $ do
     (sz, module') <- codegen fullName env cluster args
     obj <- compile uid (fromString $ fullName) module'
     funPtr <- link obj
@@ -83,7 +84,7 @@ instance IsKernel NativeKernel where
     where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "-" ++ show uid
-      uid = hashOperation cluster args
+      uid = hashCluster cluster args
 
   kernelMetadata kernel = NativeKernelMetadata $ sizeOfEnv kernel
 
@@ -105,7 +106,7 @@ instance PrettyKernel NativeKernel where
       toString :: ShortByteString -> String
       toString = Char8.unpack . fromShort
 
-operationName :: NativeOp t -> (Int, String, String)
+operationName :: NativeOp f t -> (Int, String, String)
 operationName = \case
   NMap         -> (2, "map", "maps")
   NBackpermute -> (1, "backpermute", "backpermutes")
