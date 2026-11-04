@@ -32,6 +32,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
+import Data.Array.Accelerate.LLVM.Native.Foreign ()
 import Data.Maybe
 import Data.Bits
 

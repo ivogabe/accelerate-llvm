@@ -30,43 +30,26 @@ import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 
 import Data.Array.Accelerate.LLVM.Foreign
 import Data.Array.Accelerate.LLVM.Native.Target
+import Data.Array.Accelerate.LLVM.Native.Operation
 
 import Control.Monad.State
 import Data.Typeable
 
 
 instance CompileForeignExp Native where
-  {- foreignAcc (ff :: asm (a -> b))
-    | Just Refl        <- eqT @asm @ForeignAcc
-    , ForeignAcc _ asm <- ff = Just asm
-    | otherwise              = Nothing -}
-
   foreignExp (ff :: asm (x -> y))
     | Just Refl        <- eqT @asm @ForeignExp
     , ForeignExp _ asm <- ff = Just asm
     | otherwise              = Nothing
 
-instance S.Foreign ForeignAcc where
-  strForeign (ForeignAcc s _) = s
-
 instance S.Foreign ForeignExp where
   strForeign (ForeignExp s _) = s
 
 
--- Foreign functions in the Native backend.
---
--- This is just some arbitrary monadic computation.
---
-data ForeignAcc f where
-  ForeignAcc :: String
-             -- TODO: Fix this type
-             -> (a -> b) -- -> (a -> Par Native (Future b))
-             -> ForeignAcc (a -> b)
-
 -- Foreign expressions in the Native backend.
 --
 -- I'm not sure how useful this is; perhaps we want a way to splice in an
--- arbitrary llvm-hs term, which would give us access to instructions not
+-- arbitrary llvm-pretty term, which would give us access to instructions not
 -- currently encoded in Accelerate (i.e. SIMD operations, struct types, etc.)
 --
 data ForeignExp f where

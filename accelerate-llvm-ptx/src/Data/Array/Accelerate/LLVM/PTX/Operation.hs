@@ -245,7 +245,6 @@ instance SetOpIndices PTXOp where
 instance MakesILP PTXOp where
   type BackendArg PTXOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
   defaultBA = 0
-  data BackendClusterArg PTXOp a = BCAN
 
   mkGraph :: Node Comp
           -> PTXOp args
@@ -367,27 +366,8 @@ instance MakesILP PTXOp where
   labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
   labelLabelledArg _ _ (L x y) = LOp x y 0
 
-  getClusterArg :: LabelledArgOp PTXOp env a -> BackendClusterArg PTXOp a
-  getClusterArg (LOp _ _ _) = BCAN
-  -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
-  finalize :: FusionGraph -> [Constraint]
-  finalize g = map NegativeDirIfManifest $ S.toList $ g^.writeEdges
-
-  encodeBackendClusterArg (BCAN) = intHost $(hashQ ("BCAN" :: String))
-
   combineBackendClusterArg = error "TODO WALL: NO EXPLICIT IMPLEMENTATION"
 
 defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
-
-instance NFData' (BackendClusterArg PTXOp) where
-  rnf' !_ = ()
-
-instance ShrinkArg (BackendClusterArg PTXOp) where
-  shrinkArg _ BCAN = BCAN
-  deadArg BCAN = BCAN
-
-shrToTypeR :: ShapeR sh -> TypeR sh
-shrToTypeR ShapeRz = TupRunit
-shrToTypeR (ShapeRsnoc shr) = TupRpair (shrToTypeR shr) (TupRsingle scalarType)

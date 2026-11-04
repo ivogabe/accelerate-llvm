@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- |
@@ -85,6 +86,15 @@ instance IsKernel NativeKernel where
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "-" ++ show uid
       uid = hashCluster cluster args
+  compileKernel _env (ExecSingle op@(NForeign name _ funPtr)) args = NativeKernel
+      (unsafePerformIO $ newLifetime $ castFunPtr funPtr)
+      (fromString $ fullName)
+      uid
+      0
+      "Foreign function call" "Foreign function call"
+    where
+      fullName = name ++ "-" ++ show uid
+      uid = hashOperation op args
 
   kernelMetadata kernel = NativeKernelMetadata $ sizeOfEnv kernel
 
@@ -100,13 +110,13 @@ instance PrettyKernel NativeKernel where
       go (KernelFunBody (NativeKernel _ name _ _ detail brief))
         = fromString (take 32 $ toString name)
         <+> flatAlt (group $ line' <> "-- " <> desc)
-          ("{- " <> desc <> "-}")
+          ("{- " <> desc <> " -}")
         where desc = group $ flatAlt (fromString brief) (fromString detail)
 
       toString :: ShortByteString -> String
       toString = Char8.unpack . fromShort
 
-operationName :: NativeOp f t -> (Int, String, String)
+operationName :: NativeOp True t -> (Int, String, String)
 operationName = \case
   NMap         -> (2, "map", "maps")
   NBackpermute -> (1, "backpermute", "backpermutes")

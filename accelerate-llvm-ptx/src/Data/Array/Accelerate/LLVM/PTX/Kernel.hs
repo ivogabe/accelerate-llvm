@@ -160,7 +160,7 @@ instance PrettyKernel PTXKernel where
       go (KernelFunBody (PTXKernel _ phase _ _ _ _ _ detail brief))
         = fromString (take 32 $ toString $ kernelPhaseId phase)
         <+> flatAlt (group $ line' <> "-- " <> desc)
-          ("{- " <> desc <> "-}")
+          ("{- " <> desc <> " -}")
         where desc = group $ flatAlt (fromString brief) (fromString detail)
 
       toString :: ShortByteString -> String

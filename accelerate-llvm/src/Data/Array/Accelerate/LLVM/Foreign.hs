@@ -16,9 +16,10 @@ import Data.Array.Accelerate.Sugar.Foreign                          as A
 
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 
-
 -- | Interface for backends to provide foreign function implementations for
--- array and scalar expressions.
+-- scalar expressions.
+--
+-- FFI for array computation operates via mkForeign in type class LowerAcc.
 --
 class CompileForeignExp arch where
   foreignExp :: A.Foreign asm

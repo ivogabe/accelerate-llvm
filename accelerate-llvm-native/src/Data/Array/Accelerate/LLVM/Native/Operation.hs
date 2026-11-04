@@ -26,25 +26,28 @@ import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
-
-
-import Data.Array.Accelerate.Representation.Array (ArrayR(..))
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
+import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Trafo.Operation.Bounds
+import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), rank)
 import Data.Array.Accelerate.Representation.Type (TupR (..))
+import Data.Array.Accelerate.Representation.Ground
 import Data.Array.Accelerate.Type (scalarTypeInt)
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
+import qualified Data.Array.Accelerate.Sugar.Foreign as S
+import qualified Data.Array.Accelerate.LLVM.Native.CodeGen.Base as CodeGen
 import Lens.Micro
 import Lens.Micro.Mtl
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Array.Accelerate.Trafo.Exp.Substitution
+import Foreign.Ptr
 import Control.Monad.State.Strict
-
-import Data.Array.Accelerate.Analysis.Match ((:~:)(Refl))
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
+import Data.Typeable
+import Data.ByteString.Builder
+import Data.String
 
 data NativeOp (fusible :: Bool) t where
   NMap         :: NativeOp True (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
@@ -85,6 +88,14 @@ data NativeOp (fusible :: Bool) t where
                               -> Out sh e
                               -> ())
 
+  -- | Operation via foreign function interface
+  NForeign     :: String
+               -> Bool -- whether this operation allows in-place updates
+               -- TODO: Add 'a' and 'b' somehow to the kernel type
+               -> FunPtr (CodeGen.KernelType ())
+               -> NativeOp False (In sh a -> Out sh b -> ())
+
+
 instance PrettyOp NativeOp where
   prettyOp NMap         = "map"
   prettyOp NBackpermute = "backpermute"
@@ -102,6 +113,7 @@ instance PrettyOp NativeOp where
     RightToLeft -> "scanr'"
   prettyOp NFold        = "fold"
   prettyOp NFold1       = "fold1"
+  prettyOp (NForeign name _ _) = fromString $ "foreign." ++ name
 
 instance NFDataOp NativeOp where
   rnfOp !_ = ()
@@ -133,6 +145,11 @@ instance LowerAcc NativeOp where
   mkFold a (Just seed) b c = Exec (ExecOp Fusible NFold) (a :>: seed :>: b :>: c :>: ArgsNil)
   mkFold a Nothing b c = Exec (ExecOp Fusible NFold1) (a :>: b :>: c :>: ArgsNil)
 
+  mkForeign _ (ff :: asm (as -> bs)) as
+    | Just Refl        <- eqT @asm @ForeignAcc
+    , ForeignAcc _ asm <- ff = Just $ asm as
+    | otherwise              = Nothing
+
 instance SimplifyOperation NativeOp where
   detectCopy NMap         = detectMapCopies
   detectCopy NBackpermute = detectBackpermuteCopies
@@ -158,6 +175,13 @@ instance EncodeOperation NativeOp where
   encodeOperation (NScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
   encodeOperation NFold        = intHost $(hashQ ("Fold" :: String))
   encodeOperation NFold1       = intHost $(hashQ ("Fold1" :: String))
+  encodeOperation (NForeign name inplace' _ptr) =
+    intHost $(hashQ ("Foreign" :: String))
+      <> intHost (length name)
+      <> (int8 $ if inplace' then 1 else 0)
+      <> intHost $(hashQ ("ForeignName" :: String))
+      <> stringUtf8 name
+    -- TODO: Can we use more information from foreign operation, to prevent collisions?
 
 instance SetOpIndices NativeOp where
   setOpIndices _ NGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
@@ -299,8 +323,8 @@ instance MakesILP NativeOp where
     fusionILP.constraints %= (
         <> [SameFoldSize c]
         <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
-    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
-                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsIn))
+    fusionILP.bounds %= (<> foldMap (\v -> lowerUpper (-2) (ReadDir v c) (-1)) bsIn
+                         <> foldMap (equal (-3) . WriteDir c)    bsTargets)
     -- No output, so no in-place paths.
 
   mkGraph c NPermute' (L _ lTargets :>: L _ lIn :>: ArgsNil) = do
@@ -312,7 +336,7 @@ instance MakesILP NativeOp where
     fusionILP.constraints %= (
         <> [SameFoldSize c]
         <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
-    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
+    fusionILP.bounds %= (<> foldMap (\v -> lowerUpper (-2) (ReadDir v c) (-1)) bsIn
                          <> foldMap (equal (-3) . WriteDir c) bsTargets)
     -- No output, so no in-place paths.
 
@@ -371,6 +395,8 @@ instance MakesILP NativeOp where
         <> [SameDirection (S.toList $ S.map (,c) bsIn) (S.toList $ S.map (c,) bsOut)])
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
+  
+  opInplace (NForeign _ inplace' _) = inplace'
 
   labelLabelledArg :: Solution -> Node Comp -> LabelledArg env a -> LabelledArgOp NativeOp env a
   labelLabelledArg vars c (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! ReadDir  (getLabelArrDep y) c)
@@ -384,3 +410,15 @@ instance MakesILP NativeOp where
 defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
+
+-- | Foreign functions in the Native backend.
+--
+-- This is just some arbitrary monadic computation.
+--
+data ForeignAcc f where
+  ForeignAcc :: String
+             -> (forall env. GroundVars env (LoweredArrays as) -> OperationAcc NativeOp env (LoweredArrays bs))
+             -> ForeignAcc (as -> bs)
+
+instance S.Foreign ForeignAcc where
+  strForeign (ForeignAcc s _) = s
