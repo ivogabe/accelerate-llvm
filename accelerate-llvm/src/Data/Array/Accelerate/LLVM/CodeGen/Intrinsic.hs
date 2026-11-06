@@ -51,8 +51,13 @@ class Intrinsic arch where
   trapWithMessage :: Text -> CodeGen arch ()
   trapWithMessage _ = return ()
 
+  -- | Given the size in number of bytes, whether this architecture supports
+  -- atomic compare-and-swap (also known as compare-exchange) on values of
+  -- that size.
   supportsAtomicCAS :: Int -> LLVM arch Bool
 
+  -- | Whether this architecture support the given atomic read-modify-write
+  -- instruction on values of the specified type.
   supportsAtomicRMW :: ScalarType e -> RMWOperation -> LLVM arch Bool
   -- We can overapproximate the set of supported RMW operations by checking if
   -- CAS is supported on the size of the elements. LLVM will convert any
