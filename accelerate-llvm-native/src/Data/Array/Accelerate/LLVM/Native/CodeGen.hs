@@ -32,6 +32,7 @@ import Data.Array.Accelerate.LLVM.CodeGen.Intrinsic
 import Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.LLVM.Native.CodeGen.Base
 import Data.Array.Accelerate.LLVM.Native.Target
+import Data.Array.Accelerate.LLVM.Native.Foreign ()
 import Data.Maybe
 import Data.Bits
 
@@ -56,13 +57,13 @@ import qualified Data.Array.Accelerate.LLVM.Internal.LLVMPretty as LP
 
 codegen :: String
         -> Env AccessGroundR env
-        -> Clustered NativeOp args
+        -> Cluster NativeOp args
         -> Args env args
         -> LLVM Native
            ( Int -- The size of the kernel data, shared by all threads working on this kernel.
            , Module (KernelType env))
 codegen name env cluster args
- | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatClustered cluster args
+ | flat@(FlatCluster shr idxLHS sizes dirs localR localLHS flatOps) <- toFlatCluster cluster args
  , parallelDepth <- flatClusterIndependentLoopDepth flat
  , Exists parallelShr <- shapeRFromRank parallelDepth =
   codeGenFunction linkage name type' (LLVM.Lam argTp "arg" . LLVM.Lam primType "locks_array" . LLVM.Lam primType "thread.index" . LLVM.Lam primType "thread.count") $ do

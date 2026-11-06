@@ -183,6 +183,9 @@ Library
     cbits/queue.cpp
     cbits/parker.cpp
 
+  include-dirs: cbits
+  install-includes: accelerate_llvm_native_ffi.h
+
   cc-options: -O2 -Wall -Wextra
   cxx-options: -O2 -Wall -Wextra -std=c++20
 

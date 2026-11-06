@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- |
@@ -20,6 +21,7 @@ module Data.Array.Accelerate.LLVM.Native.Kernel (
 
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Kernel
+import Data.Array.Accelerate.AST.Partitioned (ExecCluster(..))
 import Data.Array.Accelerate.AST.Schedule
 import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Backend
@@ -75,15 +77,26 @@ instance IsKernel NativeKernel where
   type KernelOperation NativeKernel = NativeOp
   type KernelMetadata  NativeKernel = NativeKernelMetadata
 
-  compileKernel env cluster args = unsafePerformIO $ evalLLVM defaultTarget $ do
-    (sz, module') <- codegen fullName env cluster args
-    obj <- compile uid (fromString $ fullName) module'
-    funPtr <- link obj
-    return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
-    where
+  compileKernel (ExecClustered cluster) = Left $ \env args ->
+    let
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "-" ++ show uid
-      uid = hashOperation cluster args
+      uid = hashCluster cluster args
+    in
+      unsafePerformIO $ evalLLVM defaultTarget $ do
+        (sz, module') <- codegen fullName env cluster args
+        obj <- compile uid (fromString $ fullName) module'
+        funPtr <- link obj
+        return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
+  compileKernel (ExecSingle op@(NForeign name _ funPtr)) = Right $ NativeKernel
+      (unsafePerformIO $ newLifetime $ castFunPtr funPtr)
+      (fromString $ fullName)
+      uid
+      0
+      "Foreign function call" "Foreign function call"
+    where
+      fullName = name ++ "-" ++ show uid
+      uid = hashOperation op
 
   kernelMetadata kernel = NativeKernelMetadata $ sizeOfEnv kernel
 
@@ -99,13 +112,13 @@ instance PrettyKernel NativeKernel where
       go (KernelFunBody (NativeKernel _ name _ _ detail brief))
         = fromString (take 32 $ toString name)
         <+> flatAlt (group $ line' <> "-- " <> desc)
-          ("{- " <> desc <> "-}")
+          ("{- " <> desc <> " -}")
         where desc = group $ flatAlt (fromString brief) (fromString detail)
 
       toString :: ShortByteString -> String
       toString = Char8.unpack . fromShort
 
-operationName :: NativeOp t -> (Int, String, String)
+operationName :: NativeOp True t -> (Int, String, String)
 operationName = \case
   NMap         -> (2, "map", "maps")
   NBackpermute -> (1, "backpermute", "backpermutes")

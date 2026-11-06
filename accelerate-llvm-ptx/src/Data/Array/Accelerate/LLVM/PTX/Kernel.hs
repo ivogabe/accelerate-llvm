@@ -21,9 +21,9 @@ module Data.Array.Accelerate.LLVM.PTX.Kernel (
 
 import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.Exp
+import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.Schedule
-import Data.Array.Accelerate.AST.Schedule.Uniform
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Pretty.Schedule
@@ -115,26 +115,28 @@ instance IsKernel PTXKernel where
   type KernelOperation PTXKernel = PTXOp
   type KernelMetadata  PTXKernel = PTXKernelMetadata
 
-  compileKernel env cluster args = unsafePerformIO $ evalPTX defaultTarget $ do
-    ptxCode <- codegen fullName env cluster args
-
-    phaseInit   <- compilePhase uid 1 `mapM` ptxCodeInit   ptxCode
-    phaseWork   <- compilePhase uid 0  $     ptxCodeWork   ptxCode
-    
-    return $ PTXKernel
-      phaseInit
-      phaseWork
-      (ptxCodeSkipEmpty ptxCode)
-      uid
-      (ptxCodeElements ptxCode)
-      (ptxCodeElementsPerThread ptxCode)
-      (ptxCodeKernelMemory ptxCode)
-      detail
-      brief
-    where
+  compileKernel (ExecClustered cluster) = Left $ \env args ->
+    let
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "_" ++ show uid
-      uid = hashOperation cluster args
+      uid = hashCluster cluster args
+    in
+      unsafePerformIO $ evalPTX defaultTarget $ do
+        ptxCode <- codegen fullName env cluster args
+
+        phaseInit   <- compilePhase uid 1 `mapM` ptxCodeInit   ptxCode
+        phaseWork   <- compilePhase uid 0  $     ptxCodeWork   ptxCode
+        
+        return $ PTXKernel
+          phaseInit
+          phaseWork
+          (ptxCodeSkipEmpty ptxCode)
+          uid
+          (ptxCodeElements ptxCode)
+          (ptxCodeElementsPerThread ptxCode)
+          (ptxCodeKernelMemory ptxCode)
+          detail
+          brief
 
   kernelMetadata kernel = PTXKernelMetadata $ sizeOfEnv kernel
 
@@ -160,13 +162,13 @@ instance PrettyKernel PTXKernel where
       go (KernelFunBody (PTXKernel _ phase _ _ _ _ _ detail brief))
         = fromString (take 32 $ toString $ kernelPhaseId phase)
         <+> flatAlt (group $ line' <> "-- " <> desc)
-          ("{- " <> desc <> "-}")
+          ("{- " <> desc <> " -}")
         where desc = group $ flatAlt (fromString brief) (fromString detail)
 
       toString :: ShortByteString -> String
       toString = Char8.unpack . fromShort
 
-operationName :: PTXOp t -> (Int, String, String)
+operationName :: PTXOp True t -> (Int, String, String)
 operationName = \case
   PTXMap         -> (2, "map", "maps")
   PTXBackpermute -> (1, "backpermute", "backpermutes")
