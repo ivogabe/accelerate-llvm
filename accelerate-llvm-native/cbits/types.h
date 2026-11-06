@@ -163,6 +163,9 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
 // taken from Workers.locks.
 typedef unsigned char KernelFunction(struct KernelLaunch *kernel, uint8_t *locks, uint32_t thread_index, uint32_t max_thread_count);
 struct KernelLaunch {
+
+  // When changing this struct, also change AccelerateKernelHeader in accelerate_llvm_native_ffi.h
+
   KernelFunction *work_function;
   struct Program *program;
   uint32_t program_continuation;
