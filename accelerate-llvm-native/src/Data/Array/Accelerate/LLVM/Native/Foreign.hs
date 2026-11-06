@@ -19,7 +19,7 @@ module Data.Array.Accelerate.LLVM.Native.Foreign (
   -- useful re-exports
   LLVM,
   Native(..),
-  liftIO,
+  module Data.Array.Accelerate.LLVM.Foreign
 
 ) where
 
@@ -32,7 +32,6 @@ import Data.Array.Accelerate.LLVM.Foreign
 import Data.Array.Accelerate.LLVM.Native.Target
 import Data.Array.Accelerate.LLVM.Native.Operation
 
-import Control.Monad.State
 import Data.Typeable
 
 
