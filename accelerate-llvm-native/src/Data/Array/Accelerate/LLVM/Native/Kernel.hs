@@ -77,16 +77,18 @@ instance IsKernel NativeKernel where
   type KernelOperation NativeKernel = NativeOp
   type KernelMetadata  NativeKernel = NativeKernelMetadata
 
-  compileKernel env (ExecClustered cluster) args = unsafePerformIO $ evalLLVM defaultTarget $ do
-    (sz, module') <- codegen fullName env cluster args
-    obj <- compile uid (fromString $ fullName) module'
-    funPtr <- link obj
-    return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
-    where
+  compileKernel (ExecClustered cluster) = Left $ \env args ->
+    let
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "-" ++ show uid
       uid = hashCluster cluster args
-  compileKernel _env (ExecSingle op@(NForeign name _ funPtr)) args = NativeKernel
+    in
+      unsafePerformIO $ evalLLVM defaultTarget $ do
+        (sz, module') <- codegen fullName env cluster args
+        obj <- compile uid (fromString $ fullName) module'
+        funPtr <- link obj
+        return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
+  compileKernel (ExecSingle op@(NForeign name _ funPtr)) = Right $ NativeKernel
       (unsafePerformIO $ newLifetime $ castFunPtr funPtr)
       (fromString $ fullName)
       uid
@@ -94,7 +96,7 @@ instance IsKernel NativeKernel where
       "Foreign function call" "Foreign function call"
     where
       fullName = name ++ "-" ++ show uid
-      uid = hashOperation op args
+      uid = hashOperation op
 
   kernelMetadata kernel = NativeKernelMetadata $ sizeOfEnv kernel
 
