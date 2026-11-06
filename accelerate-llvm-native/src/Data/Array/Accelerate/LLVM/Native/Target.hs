@@ -69,7 +69,7 @@ instance Intrinsic Native where
   -- type (and this is required during code generation).
   -- TODO: We should at some point add 128-bit integers, and this would also
   -- enable CAS on vectors of 128 bits (eg Vec 2 Double, used for complex numbers).
-  supportsAtomicCAS size = return $ size <= 64
+  supportsAtomicCAS size = return $ size <= 8
 
 printf :: IsPrim a => String -> Operand a -> CodeGen Native ()
 printf format val = do

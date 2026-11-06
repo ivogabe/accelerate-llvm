@@ -28,7 +28,7 @@ instance Intrinsic PTX where
   intrinsicForTarget = libdeviceIndex
 
   -- TODO: When we have 128-bit integers, check which GPUs support 128-bit CAS
-  supportsAtomicCAS size = return $ size <= 64
+  supportsAtomicCAS size = return $ size <= 8
 
 -- The list of functions implemented by libdevice. These are all more-or-less
 -- named consistently based on the standard mathematical functions they
