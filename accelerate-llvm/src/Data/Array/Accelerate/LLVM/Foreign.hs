@@ -60,3 +60,32 @@ foreignCallMaplike shr tpIn tpOut fusible op = \case
           :>: ArgsNil)
         $ Return $ TupRpair sh' buffersOut
   TupRsingle v -> pairImpossible $ varType v
+
+-- | Variant of 'foreignCallMaplike' that also provides a Var argument,
+-- assigned with the given constant value.
+foreignCallMaplikeWithConst
+  :: TypeR c
+  -> c
+  -> ShapeR sh
+  -> TypeR e
+  -> TypeR e'
+  -> IsFusible b
+  -> op b (Var' c -> In sh e -> Out sh e' -> ())
+  -> GroundVars env (LoweredArrays (Array sh e))
+  -> OperationAcc op env (LoweredArrays (Array sh e'))
+foreignCallMaplikeWithConst tpC c shr tpIn tpOut fusible op = \case
+  sh `TupRpair` buffersIn
+    | DeclareVars lhsOut kOut valueOut <- declareVars $ buffersR tpOut
+    , DeclareVars lhsC kC valueC <- declareVars tpC
+    , buffersOut <- valueOut kC
+    , sh' <- mapTupR (weaken (kC .> kOut)) sh
+    , buffersIn' <- mapTupR (weaken (kC .> kOut)) buffersIn ->
+      aletUnique lhsOut (lowerAlloc (ArrayR shr tpOut) $ groundToExpVar (shapeType shr) sh) $
+        alet (mapLeftHandSide GroundRscalar lhsC) (Compute $ mkConstant tpC c) $
+        Alet LeftHandSideUnit TupRunit (Exec (ExecOp fusible op) $
+          ArgVar (valueC weakenId)
+          :>: ArgArray In (ArrayR shr tpIn) sh' buffersIn'
+          :>: ArgArray Out (ArrayR shr tpOut) sh' buffersOut
+          :>: ArgsNil)
+        $ Return $ TupRpair sh' buffersOut
+  TupRsingle v -> pairImpossible $ varType v

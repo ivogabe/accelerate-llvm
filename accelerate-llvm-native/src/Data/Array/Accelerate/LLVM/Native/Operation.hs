@@ -21,6 +21,7 @@ module Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Operation
 import Data.Array.Accelerate.AST.Partitioned
+import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.Analysis.Hash.Exp
 import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
@@ -91,10 +92,10 @@ data NativeOp (fusible :: Bool) t where
   -- | Operation via foreign function interface
   NForeign     :: String
                -> Bool -- whether this operation allows in-place updates
-               -- TODO: Add 'a' and 'b' somehow to the kernel type
-               -> FunPtr (CodeGen.KernelType ())
-               -> NativeOp False (In sh a -> Out sh b -> ())
+               -> ForeignAfun f
+               -> NativeOp False f
 
+type ForeignAfun f = FunPtr (CodeGen.KernelType (SFunToEnv (FirstOrderSArgs f)))
 
 instance PrettyOp NativeOp where
   prettyOp NMap         = "map"

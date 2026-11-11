@@ -89,7 +89,7 @@ instance IsKernel NativeKernel where
         funPtr <- link obj
         return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
   compileKernel (ExecSingle op@(NForeign name _ funPtr)) = Right $ NativeKernel
-      (unsafePerformIO $ newLifetime $ castFunPtr funPtr)
+      (unsafePerformIO $ newLifetime funPtr)
       (fromString $ fullName)
       uid
       0
