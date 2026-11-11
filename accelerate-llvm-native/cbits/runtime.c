@@ -8,7 +8,7 @@
 #include <unistd.h>
 #include <sched.h>
 
-// Installed by accelerate-tracy package
+// Installed by accelerate-tracy-lib package
 #include "accelerate_tracy.h"
 
 struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
