@@ -88,11 +88,11 @@ instance IsKernel NativeKernel where
         obj <- compile uid (fromString $ fullName) module'
         funPtr <- link obj
         return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
-  compileKernel (ExecSingle op@(NForeign name _ funPtr)) = Right $ NativeKernel
+  compileKernel (ExecSingle op@(NForeign name _ kernelMem funPtr)) = Right $ NativeKernel
       (unsafePerformIO $ newLifetime funPtr)
       (fromString $ fullName)
       uid
-      0
+      kernelMem
       "Foreign function call" "Foreign function call"
     where
       fullName = name ++ "-" ++ show uid

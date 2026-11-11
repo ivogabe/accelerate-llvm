@@ -34,6 +34,9 @@ struct RuntimeLib {
 };
 extern struct RuntimeLib accelerate_runtime_lib;
 
+extern __thread struct Workers *accelerate_worker_workers;
+extern __thread uint32_t accelerate_worker_thread_idx;
+
 typedef struct KernelLaunch* ProgramFunction(struct RuntimeLib* lib, struct Workers* workers, uint16_t thread_index, struct Program* data, uint32_t location);
 struct Program {
   _Atomic uint64_t reference_count;

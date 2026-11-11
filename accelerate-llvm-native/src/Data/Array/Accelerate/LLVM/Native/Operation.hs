@@ -92,6 +92,7 @@ data NativeOp (fusible :: Bool) t where
   -- | Operation via foreign function interface
   NForeign     :: String
                -> Bool -- whether this operation allows in-place updates
+               -> Int -- size of (word-aligned) kernel memory in bytes
                -> ForeignAfun f
                -> NativeOp False f
 
@@ -114,7 +115,7 @@ instance PrettyOp NativeOp where
     RightToLeft -> "scanr'"
   prettyOp NFold        = "fold"
   prettyOp NFold1       = "fold1"
-  prettyOp (NForeign name _ _) = fromString $ "foreign." ++ name
+  prettyOp (NForeign name _ _ _) = fromString $ "foreign." ++ name
 
 instance NFDataOp NativeOp where
   rnfOp !_ = ()
@@ -176,10 +177,11 @@ instance EncodeOperation NativeOp where
   encodeOperation (NScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
   encodeOperation NFold        = intHost $(hashQ ("Fold" :: String))
   encodeOperation NFold1       = intHost $(hashQ ("Fold1" :: String))
-  encodeOperation (NForeign name inplace' _ptr) =
+  encodeOperation (NForeign name inplace' kernelMem _ptr) =
     intHost $(hashQ ("Foreign" :: String))
       <> intHost (length name)
       <> (int8 $ if inplace' then 1 else 0)
+      <> intHost kernelMem
       <> intHost $(hashQ ("ForeignName" :: String))
       <> stringUtf8 name
     -- TODO: Can we use more information from foreign operation, to prevent collisions?
@@ -396,8 +398,8 @@ instance MakesILP NativeOp where
         <> [SameDirection (S.toList $ S.map (,c) bsIn) (S.toList $ S.map (c,) bsOut)])
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
-  
-  opInplace (NForeign _ inplace' _) = inplace'
+
+  opInplace (NForeign _ inplace' _ _) = inplace'
 
   labelLabelledArg :: Solution -> Node Comp -> LabelledArg env a -> LabelledArgOp NativeOp env a
   labelLabelledArg vars c (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! ReadDir  (getLabelArrDep y) c)

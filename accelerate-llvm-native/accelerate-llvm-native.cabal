@@ -175,6 +175,7 @@ Library
           unix                          >= 2.7.3
 
   c-sources:
+    cbits/ffi.c
     cbits/scheduler.c
     cbits/runtime.c
     cbits/program.c

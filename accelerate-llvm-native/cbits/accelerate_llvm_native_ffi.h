@@ -14,4 +14,6 @@ struct AccelerateKernelHeader {
   void *private4;
 };
 
+void accelerate_llvm_native_ffi_parallel_loop(void (*work)(void*, int64_t), void *ctx, int64_t n);
+
 #endif // __ACCELERATE_LLVM_NATIVE_FFI_H__

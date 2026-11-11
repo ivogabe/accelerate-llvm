@@ -23,6 +23,9 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .hs_try_putmvar = hs_try_putmvar
 };
 
+__thread struct Workers *accelerate_worker_workers = NULL;
+__thread uint32_t accelerate_worker_thread_idx = 0xFFFFFFFF;
+
 // Claims an entry from Workers.work_per_thread_array.
 // Note that this claims one array, to be used for scheduling within a kernel.
 // It does not claim the actual work within that kernel.
@@ -73,6 +76,9 @@ inline void accelerate_work_per_thread_free(struct Workers *workers, _Atomic uin
 void* accelerate_worker(void *data_packed) {
   struct Workers *workers = accelerate_unpack_ptr((uintptr_t) data_packed);
   uint16_t thread_idx = accelerate_unpack_tag((uintptr_t) data_packed);
+
+  accelerate_worker_workers = workers;
+  accelerate_worker_thread_idx = thread_idx;
 
   unsigned int attempts_remaining = ATTEMPTS;
 
@@ -151,7 +157,7 @@ void* accelerate_worker(void *data_packed) {
             uint16_t count = accelerate_unpack_tag(old);
             if (count == 0) {
               // No other thread has assisted. No need to update the reference count.
-              // Since there is no other thread, we know this is also th last thread.
+              // Since there is no other thread, we know this is also the last thread.
               is_last = true;
             } else {
               int32_t remaining_threads = atomic_fetch_add_explicit(
