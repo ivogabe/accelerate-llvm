@@ -10,8 +10,8 @@ struct AccelerateKernelHeader {
   uint32_t private2;
   uint32_t private3;
   _Atomic uint64_t work_index;
-  _Atomic uint64_t *work_per_thread;
   void *private4;
+  void *private5;
 };
 
 void accelerate_llvm_native_ffi_parallel_loop(void (*work)(void*, int64_t), void *ctx, int64_t n);

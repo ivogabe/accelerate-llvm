@@ -161,6 +161,15 @@ inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
 
+struct ___tracy_source_location_data
+{
+    const char* name;
+    const char* function;
+    const char* file;
+    uint32_t line;
+    uint32_t color;
+};
+
 // locks: an array of locks that can be used by any permutes in the kernel.
 // This array is global, i.e. all kernels use the same array of locks, and is
 // taken from Workers.locks.
@@ -185,3 +194,69 @@ struct KernelLaunch {
   // In the future, perhaps also store a uint32_t work_size
   uint8_t args[0]; // Actual type will be different. Only use this field to get a pointer to the arguments.
 };
+
+// Updates the reference count of a task at the end of the task, from the starting thread.
+// Assisting threads should call accelerate_task_end_assisting instead of this function.
+inline bool accelerate_task_end_main(struct Workers *workers, uint16_t thread_idx, struct KernelLaunch *kernel) {
+  // signal_task_empty from the Work Assisting paper,
+  // and end_task
+  // Note that in the paper, the work function calls this function.
+  // In this implementation, this happens here.
+  // This simplifies the code generation for work function (which are compiled via LLVM),
+  // and allows us to combine the decrement of active_threads from end_task.
+  uintptr_t old = atomic_exchange_explicit(
+    &workers->scheduler.activities[thread_idx],
+    accelerate_pack(NULL, 0),
+    memory_order_relaxed
+  );
+  if (accelerate_unpack_ptr(old) == kernel) {
+    // Move the reference count from the pointer to the task object,
+    // and decrement the reference count by one.
+    // This combines the atomic_fetch_add in signal_task_empty with the one in end_task
+    uint16_t count = accelerate_unpack_tag(old);
+    if (count == 0) {
+      // No other thread has assisted. No need to update the reference count.
+      // Since there is no other thread, we know this is also the last thread.
+      return true;
+    } else {
+      int32_t remaining_threads = atomic_fetch_add_explicit(
+        &kernel->active_threads,
+        // The + 1 from signal_task_empty cancels out with the -1 in end_task
+        count,
+        memory_order_acq_rel
+      );
+      return -remaining_threads == count;
+    }
+  } else {
+    // Decrement active_threads (end_task in the Work Assisting paper)
+    int32_t remaining_threads = atomic_fetch_add_explicit(
+      &kernel->active_threads,
+      -1,
+      memory_order_acq_rel
+    );
+    return remaining_threads == 1;
+  }
+}
+
+// Updates the reference count of a task at the end of the task, from an assisting thread.
+// The starting thread should call accelerate_task_end_main instead of this function.
+inline bool accelerate_task_end_assisting(_Atomic(uintptr_t) *ptr, struct KernelLaunch *kernel) {
+  uintptr_t old = atomic_load_explicit(ptr, memory_order_relaxed);
+  while (true) {
+    if (accelerate_unpack_ptr(old) != kernel) {
+      // Another thread has moved the reference count.
+      // We now only need to decrement the reference count for this thread.
+      int32_t remaining_threads = atomic_fetch_add_explicit(
+        &kernel->active_threads,
+        -1,
+        memory_order_acq_rel
+      );
+      return remaining_threads == 1;
+    }
+    if (atomic_compare_exchange_weak_explicit(ptr, &old, accelerate_pack(NULL, 0), memory_order_relaxed, memory_order_relaxed)) {
+      // Move the reference count from the pointer to the task object.
+      int32_t remaining_threads = atomic_fetch_add_explicit(&kernel->active_threads, accelerate_unpack_tag(old), memory_order_acq_rel);
+      return -remaining_threads == accelerate_unpack_tag(old);
+    }
+  }
+}
