@@ -257,7 +257,7 @@ instance MakesILP PTXOp where
   defaultBA = 0
 
   mkGraph :: Node Comp
-          -> PTXOp True args
+          -> PTXOp Fusible args
           -> LabelledArgs env args
           -> State (BackendGraphState PTXOp env) ()
   mkGraph c@(Node _i _) PTXBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do

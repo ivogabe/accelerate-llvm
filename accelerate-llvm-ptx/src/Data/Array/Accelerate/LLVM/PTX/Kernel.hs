@@ -115,7 +115,7 @@ instance IsKernel PTXKernel where
   type KernelOperation PTXKernel = PTXOp
   type KernelMetadata  PTXKernel = PTXKernelMetadata
 
-  compileKernel (ExecClustered cluster) = Left $ \env args ->
+  compileKernel (ExecClustered cluster) = CompactedKernel $ \env args ->
     let
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "_" ++ show uid
@@ -168,7 +168,7 @@ instance PrettyKernel PTXKernel where
       toString :: ShortByteString -> String
       toString = Char8.unpack . fromShort
 
-operationName :: PTXOp True t -> (Int, String, String)
+operationName :: PTXOp Fusible t -> (Int, String, String)
 operationName = \case
   PTXMap         -> (2, "map", "maps")
   PTXBackpermute -> (1, "backpermute", "backpermutes")

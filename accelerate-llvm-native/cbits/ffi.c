@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include "types.h"
 #include "accelerate_llvm_native_ffi.h"
 
