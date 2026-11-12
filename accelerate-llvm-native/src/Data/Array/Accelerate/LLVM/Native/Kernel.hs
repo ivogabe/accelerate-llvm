@@ -1,4 +1,3 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- |
@@ -77,7 +76,7 @@ instance IsKernel NativeKernel where
   type KernelOperation NativeKernel = NativeOp
   type KernelMetadata  NativeKernel = NativeKernelMetadata
 
-  compileKernel (ExecClustered cluster) = Left $ \env args ->
+  compileKernel (ExecClustered cluster) = CompactedKernel $ \env args ->
     let
       (name, detail, brief) = generateKernelNameAndDescription operationName cluster
       fullName = name ++ "-" ++ show uid
@@ -88,7 +87,7 @@ instance IsKernel NativeKernel where
         obj <- compile uid (fromString $ fullName) module'
         funPtr <- link obj
         return $ NativeKernel funPtr (fromString $ fullName) uid sz detail brief
-  compileKernel (ExecSingle op@(NForeign name _ kernelMem funPtr)) = Right $ NativeKernel
+  compileKernel (ExecSingle op@(NForeign name _ kernelMem funPtr)) = FirstOrderKernel $ NativeKernel
       (unsafePerformIO $ newLifetime funPtr)
       (fromString $ fullName)
       uid
@@ -118,7 +117,7 @@ instance PrettyKernel NativeKernel where
       toString :: ShortByteString -> String
       toString = Char8.unpack . fromShort
 
-operationName :: NativeOp True t -> (Int, String, String)
+operationName :: NativeOp Fusible t -> (Int, String, String)
 operationName = \case
   NMap         -> (2, "map", "maps")
   NBackpermute -> (1, "backpermute", "backpermutes")

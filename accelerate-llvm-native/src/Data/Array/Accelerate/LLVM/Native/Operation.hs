@@ -1,4 +1,3 @@
-{-# LANGUAGE DataKinds       #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies    #-}
 {-# LANGUAGE ViewPatterns    #-}
@@ -50,72 +49,72 @@ import Data.Typeable
 import Data.ByteString.Builder
 import Data.String
 
-data NativeOp (fusible :: Bool) t where
-  NMap         :: NativeOp True (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
-  NBackpermute :: NativeOp True (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
-  NGenerate    :: NativeOp True (Fun' (sh -> t)              -> Out sh  t -> ())
-  NPermute     :: NativeOp True (Fun' (e -> e -> e)
-                              -> Mut sh' e
-                              -> In sh (PrimMaybe (sh', e))
-                              -> ())
-  NPermute'    :: NativeOp True (Mut sh' e
-                              -> In sh (PrimMaybe (sh', e))
-                              -> ())
+data NativeOp (fusible :: IsFusible) t where
+  NMap         :: NativeOp Fusible (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
+  NBackpermute :: NativeOp Fusible (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
+  NGenerate    :: NativeOp Fusible (Fun' (sh -> t)              -> Out sh  t -> ())
+  NPermute     :: NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> Mut sh' e
+                                 -> In sh (PrimMaybe (sh', e))
+                                 -> ())
+  NPermute'    :: NativeOp Fusible (Mut sh' e
+                                 -> In sh (PrimMaybe (sh', e))
+                                 -> ())
   NScan        :: !Direction
-               -> NativeOp True (Fun' (e -> e -> e)
-                              -> Exp' e
-                              -> In (sh, Int) e
-                              -> Out (sh, Int) e
-                              -> ())
+               -> NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> Exp' e
+                                 -> In (sh, Int) e
+                                 -> Out (sh, Int) e
+                                 -> ())
   NScan1       :: !Direction
-               -> NativeOp True (Fun' (e -> e -> e)
-                              -> In (sh, Int) e
-                              -> Out (sh, Int) e
-                              -> ())
+               -> NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> In (sh, Int) e
+                                 -> Out (sh, Int) e
+                                 -> ())
   NScan'       :: !Direction
-               -> NativeOp True (Fun' (e -> e -> e)
-                              -> Exp' e
-                              -> In (sh, Int) e
-                              -> Out (sh, Int) e
-                              -> Out sh e
-                              -> ())
-  NFold        :: NativeOp True (Fun' (e -> e -> e)
-                              -> Exp' e
-                              -> In (sh, Int) e
-                              -> Out sh e
-                              -> ())
-  NFold1       :: NativeOp True (Fun' (e -> e -> e)
-                              -> In (sh, Int) e
-                              -> Out sh e
-                              -> ())
+               -> NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> Exp' e
+                                 -> In (sh, Int) e
+                                 -> Out (sh, Int) e
+                                 -> Out sh e
+                                 -> ())
+  NFold        :: NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> Exp' e
+                                 -> In (sh, Int) e
+                                 -> Out sh e
+                                 -> ())
+  NFold1       :: NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> In (sh, Int) e
+                                 -> Out sh e
+                                 -> ())
 
   -- | Operation via foreign function interface
   NForeign     :: String
                -> Bool -- whether this operation allows in-place updates
                -> Int -- size of (word-aligned) kernel memory in bytes
                -> ForeignAfun f
-               -> NativeOp False f
+               -> NativeOp NonFusible f
 
 type ForeignAfun f = FunPtr (CodeGen.KernelType (SFunToEnv (FirstOrderSArgs f)))
 
-instance PrettyOp NativeOp where
-  prettyOp NMap         = "map"
-  prettyOp NBackpermute = "backpermute"
-  prettyOp NGenerate    = "generate"
-  prettyOp NPermute     = "permute"
-  prettyOp NPermute'    = "permuteUnique"
-  prettyOp (NScan dir) = case dir of
+instance PrettyOperation NativeOp where
+  prettyOperation NMap         = "map"
+  prettyOperation NBackpermute = "backpermute"
+  prettyOperation NGenerate    = "generate"
+  prettyOperation NPermute     = "permute"
+  prettyOperation NPermute'    = "permuteUnique"
+  prettyOperation (NScan dir) = case dir of
     LeftToRight -> "scanl"
     RightToLeft -> "scanr"
-  prettyOp (NScan1 dir) = case dir of
+  prettyOperation (NScan1 dir) = case dir of
     LeftToRight -> "scanl1"
     RightToLeft -> "scanr1"
-  prettyOp (NScan' dir) = case dir of
+  prettyOperation (NScan' dir) = case dir of
     LeftToRight -> "scanl'"
     RightToLeft -> "scanr'"
-  prettyOp NFold        = "fold"
-  prettyOp NFold1       = "fold1"
-  prettyOp (NForeign name _ _ _) = fromString $ "foreign." ++ name
+  prettyOperation NFold        = "fold"
+  prettyOperation NFold1       = "fold1"
+  prettyOperation (NForeign name _ _ _) = fromString $ "foreign." ++ name
 
 instance NFDataOp NativeOp where
   rnfOp !_ = ()
@@ -133,19 +132,19 @@ instance OperationBounds NativeOp where
     _ -> boundsOptimizeOpDefault
 
 instance LowerAcc NativeOp where
-  mkMap         a b c   = Exec (ExecOp Fusible NMap)         (a :>: b :>: c :>:       ArgsNil)
-  mkBackpermute a b c   = Exec (ExecOp Fusible NBackpermute) (a :>: b :>: c :>:       ArgsNil)
-  mkGenerate    a b     = Exec (ExecOp Fusible NGenerate)    (a :>: b :>:             ArgsNil)
+  mkMap         a b c   = Exec (ExecOp FusibleR NMap)         (a :>: b :>: c :>:       ArgsNil)
+  mkBackpermute a b c   = Exec (ExecOp FusibleR NBackpermute) (a :>: b :>: c :>:       ArgsNil)
+  mkGenerate    a b     = Exec (ExecOp FusibleR NGenerate)    (a :>: b :>:             ArgsNil)
   mkScan dir f (Just seed) i o
-    = Exec (ExecOp Fusible $ NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
   mkScan dir f Nothing i o
-    = Exec (ExecOp Fusible $ NScan1 dir) (f :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ NScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i o1 o2
-    = Exec (ExecOp Fusible $ NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute (Just a) b c = Exec (ExecOp Fusible NPermute) (a :>: b :>: c :>: ArgsNil)
-  mkPermute Nothing a b = Exec (ExecOp Fusible NPermute') (a :>: b :>: ArgsNil)
-  mkFold a (Just seed) b c = Exec (ExecOp Fusible NFold) (a :>: seed :>: b :>: c :>: ArgsNil)
-  mkFold a Nothing b c = Exec (ExecOp Fusible NFold1) (a :>: b :>: c :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
+  mkPermute (Just a) b c = Exec (ExecOp FusibleR NPermute) (a :>: b :>: c :>: ArgsNil)
+  mkPermute Nothing a b = Exec (ExecOp FusibleR NPermute') (a :>: b :>: ArgsNil)
+  mkFold a (Just seed) b c = Exec (ExecOp FusibleR NFold) (a :>: seed :>: b :>: c :>: ArgsNil)
+  mkFold a Nothing b c = Exec (ExecOp FusibleR NFold1) (a :>: b :>: c :>: ArgsNil)
 
   mkForeign _ (ff :: asm (as -> bs)) as
     | Just Refl        <- eqT @asm @ForeignAcc
@@ -282,7 +281,7 @@ instance MakesILP NativeOp where
   defaultBA = 0
 
   mkGraph :: Node Comp
-          -> NativeOp True args
+          -> NativeOp Fusible args
           -> LabelledArgs env args
           -> State (BackendGraphState NativeOp env) ()
   mkGraph c@(Node _i _) NBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do

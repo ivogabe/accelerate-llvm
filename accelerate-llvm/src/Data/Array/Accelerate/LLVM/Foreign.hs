@@ -43,8 +43,8 @@ foreignCallMaplike
   :: ShapeR sh
   -> TypeR e
   -> TypeR e'
-  -> IsFusible b
-  -> op b (In sh e -> Out sh e' -> ())
+  -> IsFusibleR fusible
+  -> op fusible (In sh e -> Out sh e' -> ())
   -> GroundVars env (LoweredArrays (Array sh e))
   -> OperationAcc op env (LoweredArrays (Array sh e'))
 foreignCallMaplike shr tpIn tpOut fusible op = \case
@@ -69,8 +69,8 @@ foreignCallMaplikeWithConst
   -> ShapeR sh
   -> TypeR e
   -> TypeR e'
-  -> IsFusible b
-  -> op b (Var' c -> In sh e -> Out sh e' -> ())
+  -> IsFusibleR fusible
+  -> op fusible (Var' c -> In sh e -> Out sh e' -> ())
   -> GroundVars env (LoweredArrays (Array sh e))
   -> OperationAcc op env (LoweredArrays (Array sh e'))
 foreignCallMaplikeWithConst tpC c shr tpIn tpOut fusible op = \case

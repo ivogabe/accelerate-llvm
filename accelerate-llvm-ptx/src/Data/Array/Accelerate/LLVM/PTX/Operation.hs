@@ -43,72 +43,72 @@ import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constrai
 
 import Control.Monad.State.Strict
 
-data PTXOp (b :: Bool) t where
-  PTXMap       :: PTXOp True (Fun' (s -> t)
-                           -> In sh s
-                           -> Out sh  t -> ())
+data PTXOp (b :: IsFusible) t where
+  PTXMap       :: PTXOp Fusible (Fun' (s -> t)
+                              -> In sh s
+                              -> Out sh  t -> ())
   PTXBackpermute
-               :: PTXOp True (Fun' (sh' -> sh)
-                           -> In sh t
-                           -> Out sh' t -> ())
-  PTXGenerate  :: PTXOp True (Fun' (sh -> t)
-                           -> Out sh  t -> ())
-  PTXPermute   :: PTXOp True (Fun' (e -> e -> e)
-                           -> Mut sh' e
-                           -> In sh (PrimMaybe (sh', e))
-                           -> ())
-  PTXPermute'  :: PTXOp True (Mut sh' e
-                           -> In sh (PrimMaybe (sh', e))
-                           -> ())
+               :: PTXOp Fusible (Fun' (sh' -> sh)
+                              -> In sh t
+                              -> Out sh' t -> ())
+  PTXGenerate  :: PTXOp Fusible (Fun' (sh -> t)
+                              -> Out sh  t -> ())
+  PTXPermute   :: PTXOp Fusible (Fun' (e -> e -> e)
+                              -> Mut sh' e
+                              -> In sh (PrimMaybe (sh', e))
+                              -> ())
+  PTXPermute'  :: PTXOp Fusible (Mut sh' e
+                              -> In sh (PrimMaybe (sh', e))
+                              -> ())
   PTXScan      :: !Direction
-               -> PTXOp True (Fun' (e -> e -> e)
-                           -> Exp' e
-                           -> In (sh, Int) e
-                           -> Out (sh, Int) e
-                           -> ())
+               -> PTXOp Fusible (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> ())
   PTXScan1     :: !Direction
-               -> PTXOp True (Fun' (e -> e -> e)
-                           -> In (sh, Int) e
-                           -> Out (sh, Int) e
-                           -> ())
+               -> PTXOp Fusible (Fun' (e -> e -> e)
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> ())
   PTXScan'     :: !Direction
-               -> PTXOp True (Fun' (e -> e -> e)
-                           -> Exp' e
-                           -> In (sh, Int) e
-                           -> Out (sh, Int) e
-                           -> Out sh e
-                           -> ())
-  PTXFold      :: PTXOp True (Fun' (e -> e -> e)
-                           -> Exp' e
-                           -> In (sh, Int) e
-                           -> Out sh e
-                           -> ())
-  PTXFold1     :: PTXOp True (Fun' (e -> e -> e)
-                           -> In (sh, Int) e
-                           -> Out sh e
-                           -> ())
+               -> PTXOp Fusible (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> Out sh e
+                              -> ())
+  PTXFold      :: PTXOp Fusible (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out sh e
+                              -> ())
+  PTXFold1     :: PTXOp Fusible (Fun' (e -> e -> e)
+                              -> In (sh, Int) e
+                              -> Out sh e
+                              -> ())
 
   -- TODO: Foreign operations:
   -- PTXForeign :: ...
-  --            -> PTXOp False ..
+  --            -> PTXOp NonFusible ..
 
-instance PrettyOp PTXOp where
-  prettyOp PTXMap         = "map"
-  prettyOp PTXBackpermute = "backpermute"
-  prettyOp PTXGenerate    = "generate"
-  prettyOp PTXPermute     = "permute"
-  prettyOp PTXPermute'    = "permuteUnique"
-  prettyOp (PTXScan dir) = case dir of
+instance PrettyOperation PTXOp where
+  prettyOperation PTXMap         = "map"
+  prettyOperation PTXBackpermute = "backpermute"
+  prettyOperation PTXGenerate    = "generate"
+  prettyOperation PTXPermute     = "permute"
+  prettyOperation PTXPermute'    = "permuteUnique"
+  prettyOperation (PTXScan dir) = case dir of
     LeftToRight -> "scanl"
     RightToLeft -> "scanr"
-  prettyOp (PTXScan1 dir) = case dir of
+  prettyOperation (PTXScan1 dir) = case dir of
     LeftToRight -> "scanl1"
     RightToLeft -> "scanr1"
-  prettyOp (PTXScan' dir) = case dir of
+  prettyOperation (PTXScan' dir) = case dir of
     LeftToRight -> "scanl'"
     RightToLeft -> "scanr'"
-  prettyOp PTXFold        = "fold"
-  prettyOp PTXFold1       = "fold1"
+  prettyOperation PTXFold        = "fold"
+  prettyOperation PTXFold1       = "fold1"
 
 instance NFDataOp PTXOp where
   rnfOp !_ = ()
@@ -126,19 +126,19 @@ instance OperationBounds PTXOp where
     _ -> boundsOptimizeOpDefault
 
 instance LowerAcc PTXOp where
-  mkMap         a b c   = Exec (ExecOp Fusible PTXMap)         (a :>: b :>: c :>:       ArgsNil)
-  mkBackpermute a b c   = Exec (ExecOp Fusible PTXBackpermute) (a :>: b :>: c :>:       ArgsNil)
-  mkGenerate    a b     = Exec (ExecOp Fusible PTXGenerate)    (a :>: b :>:             ArgsNil)
+  mkMap         a b c   = Exec (ExecOp FusibleR PTXMap)         (a :>: b :>: c :>:       ArgsNil)
+  mkBackpermute a b c   = Exec (ExecOp FusibleR PTXBackpermute) (a :>: b :>: c :>:       ArgsNil)
+  mkGenerate    a b     = Exec (ExecOp FusibleR PTXGenerate)    (a :>: b :>:             ArgsNil)
   mkScan dir f (Just seed) i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o
-    = Exec (ExecOp Fusible $ PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
   mkScan dir f Nothing i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o
-    = Exec (ExecOp Fusible $ PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o1 o2
-    = Exec (ExecOp Fusible $ PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute (Just a) b c = Exec (ExecOp Fusible PTXPermute) (a :>: b :>: c :>: ArgsNil)
-  mkPermute Nothing a b = Exec (ExecOp Fusible PTXPermute') (a :>: b :>: ArgsNil)
-  mkFold a (Just seed) b c = Exec (ExecOp Fusible PTXFold) (a :>: seed :>: b :>: c :>: ArgsNil)
-  mkFold a Nothing b c = Exec (ExecOp Fusible PTXFold1) (a :>: b :>: c :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
+  mkPermute (Just a) b c = Exec (ExecOp FusibleR PTXPermute) (a :>: b :>: c :>: ArgsNil)
+  mkPermute Nothing a b = Exec (ExecOp FusibleR PTXPermute') (a :>: b :>: ArgsNil)
+  mkFold a (Just seed) b c = Exec (ExecOp FusibleR PTXFold) (a :>: seed :>: b :>: c :>: ArgsNil)
+  mkFold a Nothing b c = Exec (ExecOp FusibleR PTXFold1) (a :>: b :>: c :>: ArgsNil)
 
 instance SimplifyOperation PTXOp where
   detectCopy PTXMap         = detectMapCopies

@@ -58,6 +58,7 @@ common lang
   -- In addition, OverloadedStrings is enabled by default to ensure that every
   -- module is compatible with it, to support use of GHCi with it enabled.
   default-extensions:
+    DataKinds
     GADTs
     LambdaCase
     OverloadedStrings
