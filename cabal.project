@@ -1,4 +1,44 @@
 packages:
-    accelerate-llvm
-    accelerate-llvm-native
-    accelerate-llvm-ptx
+  accelerate-llvm
+  accelerate-llvm-native
+  accelerate-llvm-ptx
+
+--------------------------------------------------------------------------------
+-- accelerate-tracy-*
+--
+-- The following configuration is required until these packages are released to
+-- Hackage.  When developing these packages locally, comment this configuration
+-- out and configure your local packages in the cabal.project.local
+-- configuration file.  See cabal.project.local.template for details.
+
+source-repository-package
+  type:     git
+  location: https://github.com/AccelerateHS/accelerate-tracy.git
+  tag:      072f54535091f949e504d3ca68ce002e0f812ed9
+  subdir:   accelerate-tracy-lib
+
+source-repository-package
+  type:     git
+  location: https://github.com/AccelerateHS/accelerate-tracy.git
+  tag:      072f54535091f949e504d3ca68ce002e0f812ed9
+  subdir:   accelerate-tracy-capture
+
+source-repository-package
+  type:     git
+  location: https://github.com/AccelerateHS/accelerate-tracy.git
+  tag:      072f54535091f949e504d3ca68ce002e0f812ed9
+  subdir:   accelerate-tracy-profiler
+
+--------------------------------------------------------------------------------
+-- accelerate
+--
+-- The following configuration is required until we merge new-pipeline and
+-- release a new version of Accelerate.  When developing this package locally,
+-- comment this configuration out and configure your local package in the
+-- cabal.project.local configuration file.  See cabal.project.local.template for
+-- details.
+
+source-repository-package
+  type:     git
+  location: https://github.com/ivogabe/accelerate.git
+  tag:      c311e269cdef132901f4f3c2d394d47a4b5d24e6

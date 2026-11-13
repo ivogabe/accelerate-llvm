@@ -1,55 +1,69 @@
-# Some commonly used options have been documented as comments in this file.
-# For advanced use and comprehensive documentation of the format, please see:
-# https://docs.haskellstack.org/en/stable/yaml_configuration/
-
-resolver: lts-21.25
+snapshot: lts-21.25
 
 packages:
-- accelerate-llvm
-- accelerate-llvm-native
-- accelerate-llvm-ptx
+  - accelerate-llvm
+  - accelerate-llvm-native
+  - accelerate-llvm-ptx
+
+  # Adjust the following to install tracy-capture (Tracy CLI program) and/or
+  # tracy-profiler (Tracy GUI program), referencing a local copy of the Stack
+  # packages from <https://github.com/AccelerateHS/accelerate-tracy>, adjusting
+  # paths if necessary.
+
+  #- ../accelerate-tracy/accelerate-tracy-capture-stack
+  #- ../accelerate-tracy/accelerate-tracy-profiler-stack
 
 extra-deps:
-- cuda-0.13.0.0
-- OptDir-0.0.4
-- bytestring-encoding-0.1.2.0
-- ../accelerate
-- MIP-0.2.0.0
-- hashtables-1.4.2
 
-# newer versions required to parse modern CUDA headers
-- c2hs-0.28.8@rev:3
-- language-c-0.10.2
+  # accelerate
+  - bytestring-encoding-0.1.2.0
+  - hashtables-1.4.2
+  - MIP-0.2.0.1
+  - OptDir-0.1.0
 
-# for llvm-pretty:
-- monadLib-3.10.3
+  # accelerate-llvm
+  - monadLib-3.10.3
 
-# Override default flag values for local packages and extra-deps
-# flags:
+  # accelerate-llvm-ptx
+  - cuda-0.13.0.0
 
-# Extra per-package and global ghc options
-# ghc-options:
-#   llvm-hs: -optcxx=-std=c++14 -optcxx=-lstdc++ -optcxx=-fno-rtti
+  # newer versions required to parse modern CUDA headers
+  - c2hs-0.28.8@rev:3
+  - language-c-0.10.2
 
-# Extra package databases containing global packages
-# extra-package-dbs: []
+  # Comment out the following when developing the Tracy packages locally.
 
-# Control whether we use the GHC we find on the path
-# system-ghc: true
-#
-# Require a specific version of stack, using version ranges
-# require-stack-version: -any # Default
-# require-stack-version: ">=1.9"
-#
-# Override the architecture used by stack, especially useful on Windows
-# arch: i386
-# arch: x86_64
-#
-# Extra directories used by stack for building
-# extra-include-dirs: [/path/to/dir]
-# extra-lib-dirs: [/path/to/dir]
-#
-# Allow a newer minor version of GHC than the snapshot specifies
-# compiler-check: newer-minor
-#
-# vim: nospell
+  - git: https://github.com/AccelerateHS/accelerate-tracy.git
+    commit: '072f54535091f949e504d3ca68ce002e0f812ed9'
+    subdirs:
+      - accelerate-tracy-lib
+      - accelerate-tracy-capture
+      - accelerate-tracy-profiler
+
+  # Uncomment the following when developing the Tracy packages locally,
+  # adjusting paths if necessary.
+
+  #- ../accelerate-tracy/accelerate-tracy-lib
+  #- ../accelerate-tracy/accelerate-tracy-capture
+  #- ../accelerate-tracy/accelerate-tracy-profiler
+
+  # Comment out the following when developing the accelerate package locally.
+
+  - git: https://github.com/ivogabe/accelerate.git
+    commit: 'c311e269cdef132901f4f3c2d394d47a4b5d24e6'
+
+  # Uncomment the following when developing the accelerate package locally,
+  # adjusting paths if necessary.
+
+  #- ../accelerate
+
+# Adjust the following configuration to enable flags.
+
+#flags:
+  #accelerate-tracy-lib:
+    #tracy: true
+  #accelerate:
+    #debug: true
+    #bounds-checks: true
+    #memory-counter: true
+    #internal-checks: true

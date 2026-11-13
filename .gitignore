@@ -8,7 +8,8 @@ cabal-dev/
 .virthualenv
 *.swp
 .cabal-sandbox
-cabal.project.local*
+cabal.project.local
+cabal.project.local~
 cabal.sandbox.config
 .stack-work
 tags

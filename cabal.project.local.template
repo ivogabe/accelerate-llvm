@@ -1,0 +1,75 @@
+--------------------------------------------------------------------------------
+-- GHC version
+--
+-- Uncomment one of the following to use a specific version of GHC.
+
+--with-compiler: ghc-9.4.8
+--with-compiler: ghc-9.6.7
+--with-compiler: ghc-9.8.4
+--with-compiler: ghc-9.10.3
+--with-compiler: ghc-9.12.4
+--with-compiler: ghc-9.14.1
+
+--------------------------------------------------------------------------------
+-- Flags
+--
+-- Adjust the following configuration to enable flags.
+
+--package accelerate-tracy-lib
+  --flags: +tracy
+
+--package accelerate
+  --flags: +debug
+  --flags: +bounds-checks
+  --flags: +memory-counter
+  --flags: +internal-checks
+  --flags: +debug +tracy +bounds-checks +memory-counter +internal-checks
+
+--------------------------------------------------------------------------------
+-- Tracy executables
+--
+-- Adjust the following to install tracy-capture (Tracy CLI program) and/or
+-- tracy-profiler (Tracy GUI program).
+
+--extra-packages:
+  --accelerate-tracy-capture
+  --accelerate-tracy-profiler
+
+--------------------------------------------------------------------------------
+-- accelerate-tracy-*
+--
+-- When developing these packages locally, uncomment the following configuration
+-- and change the locations to absolute paths to your repository.  Specifying a
+-- tag is optional.  Also, comment out the default configuration for these
+-- packages in the cabal.project configuration file.
+
+--source-repository-package
+  --type:     git
+  --location: /path/to/accelerate-tracy
+  --tag:      OPTIONAL
+  --subdir:   accelerate-tracy-lib
+
+--source-repository-package
+  --type:     git
+  --location: /path/to/accelerate-tracy
+  --tag:      OPTIONAL
+  --subdir:   accelerate-tracy-capture
+
+--source-repository-package
+  --type:     git
+  --location: /path/to/accelerate-tracy
+  --tag:      OPTIONAL
+  --subdir:   accelerate-tracy-profiler
+
+--------------------------------------------------------------------------------
+-- accelerate
+--
+-- When developing this packages locally, uncomment the following configuration
+-- and change the location to an absolute path to your repository.  Specifying a
+-- tag is optional.  Also, comment out the default configuration for this
+-- package in the cabal.project configuration file.
+
+--source-repository-package
+  --type:     git
+  --location: /path/to/accelerate
+  --tag:      OPTIONAL
