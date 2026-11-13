@@ -159,7 +159,11 @@ void* accelerate_worker(void *data_packed) {
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE, workers->thread_count);
           TRACY_ZONE_END(final_ctx);
           // Recycle work_per_thread for later kernels
-          accelerate_work_per_thread_free(workers, work_per_thread);
+          if (work_per_thread != NULL) {
+            // For kernels started via accelerate_llvm_native_ffi_parallel_loop,
+            // work_per_thread is NULL.
+            accelerate_work_per_thread_free(workers, work_per_thread);
+          }
           // Then continue the program after this kernel, via
           // program_continuation in the KernelLaunch structure.
           // task.program and task.location were set just before kernel finalization.
