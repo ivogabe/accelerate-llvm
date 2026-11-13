@@ -23,6 +23,9 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .hs_try_putmvar = hs_try_putmvar
 };
 
+__thread struct Workers *accelerate_worker_workers = NULL;
+__thread uint32_t accelerate_worker_thread_idx = 0xFFFFFFFF;
+
 // Claims an entry from Workers.work_per_thread_array.
 // Note that this claims one array, to be used for scheduling within a kernel.
 // It does not claim the actual work within that kernel.
@@ -73,6 +76,9 @@ inline void accelerate_work_per_thread_free(struct Workers *workers, _Atomic uin
 void* accelerate_worker(void *data_packed) {
   struct Workers *workers = accelerate_unpack_ptr((uintptr_t) data_packed);
   uint16_t thread_idx = accelerate_unpack_tag((uintptr_t) data_packed);
+
+  accelerate_worker_workers = workers;
+  accelerate_worker_thread_idx = thread_idx;
 
   unsigned int attempts_remaining = ATTEMPTS;
 
@@ -133,61 +139,34 @@ void* accelerate_worker(void *data_packed) {
         // Keep track of whether this was the last thread working on the kernel
         bool is_last;
         if (parallel == 1) {
-          // signal_task_empty from the Work Assisting paper,
-          // and end_task
-          // Note that in the paper, the work function calls this function.
-          // In this implementation, this happens here.
-          // This simplifies the code generation for work function (which are compiled via LLVM),
-          // and allows us to combine the decrement of active_threads from end_task.
-          uintptr_t old = atomic_exchange_explicit(
-            &workers->scheduler.activities[thread_idx],
-            accelerate_pack(NULL, 0),
-            memory_order_relaxed
-          );
-          if (accelerate_unpack_ptr(old) == kernel) {
-            // Move the reference count from the pointer to the task object,
-            // and decrement the reference count by one.
-            // This combines the atomic_fetch_add in signal_task_empty with the one in end_task
-            uint16_t count = accelerate_unpack_tag(old);
-            if (count == 0) {
-              // No other thread has assisted. No need to update the reference count.
-              // Since there is no other thread, we know this is also th last thread.
-              is_last = true;
-            } else {
-              int32_t remaining_threads = atomic_fetch_add_explicit(
-                &kernel->active_threads,
-                // The + 1 from signal_task_empty cancels out with the -1 in end_task
-                count,
-                memory_order_acq_rel
-              );
-              is_last = -remaining_threads == count;
-            }
-          } else {
-            // Decrement active_threads (end_task in the Work Assisting paper)
-            int32_t remaining_threads = atomic_fetch_add_explicit(
-              &kernel->active_threads,
-              -1,
-              memory_order_acq_rel
-            );
-            is_last = remaining_threads == 1;
-          }
+          is_last = accelerate_task_end_main(workers, thread_idx, kernel);
         } else {
           // This kernel was executed by a single thread, so this is definitely the last thread.
           is_last = true;
         }
 
         if (is_last) {
+          // Read values from 'kernel', as that object may be deallocated
+          // (indirectly) by the work_function in case the kernel originates
+          // from accelerate_llvm_native_ffi_parallel_loop.
+          task.program = kernel->program;
+          task.location = kernel->program_continuation;
+          _Atomic uint64_t *work_per_thread = kernel->work_per_thread;
+
           // The last thread executes the finish function.
           // First, execute the finish procedure of the kernel:
           TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE, workers->thread_count);
           TRACY_ZONE_END(final_ctx);
           // Recycle work_per_thread for later kernels
-          accelerate_work_per_thread_free(workers, kernel->work_per_thread);
+          if (work_per_thread != NULL) {
+            // For kernels started via accelerate_llvm_native_ffi_parallel_loop,
+            // work_per_thread is NULL.
+            accelerate_work_per_thread_free(workers, work_per_thread);
+          }
           // Then continue the program after this kernel, via
           // program_continuation in the KernelLaunch structure.
-          task.program = kernel->program;
-          task.location = kernel->program_continuation;
+          // task.program and task.location were set just before kernel finalization.
         } else {
           task.program = NULL;
           task.location = 0;
@@ -226,27 +205,7 @@ void* accelerate_worker(void *data_packed) {
       // and end_task
       // Similar to above, signal_task_empty happens here instead of in the work function.
       // The same reasoning as above applies here.
-      uintptr_t old = atomic_load_explicit(ptr, memory_order_relaxed);
-      bool is_last;
-      while (true) {
-        if (accelerate_unpack_ptr(old) != kernel) {
-          // Another thread has moved the reference count.
-          // We now only need to decrement the reference count for this thread.
-          int32_t remaining_threads = atomic_fetch_add_explicit(
-            &kernel->active_threads,
-            -1,
-            memory_order_acq_rel
-          );
-          is_last = remaining_threads == 1;
-          break;
-        }
-        if (atomic_compare_exchange_weak_explicit(ptr, &old, accelerate_pack(NULL, 0), memory_order_relaxed, memory_order_relaxed)) {
-          // Move the reference count from the pointer to the task object.
-          int32_t remaining_threads = atomic_fetch_add_explicit(&kernel->active_threads, accelerate_unpack_tag(old), memory_order_acq_rel);
-          is_last = -remaining_threads == accelerate_unpack_tag(old);
-          break;
-        }
-      }
+      bool is_last = accelerate_task_end_assisting(ptr, kernel);
       if (is_last) {
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
