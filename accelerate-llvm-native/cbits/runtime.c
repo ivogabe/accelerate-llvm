@@ -146,27 +146,17 @@ void* accelerate_worker(void *data_packed) {
         }
 
         if (is_last) {
-          // Read values from 'kernel', as that object may be deallocated
-          // (indirectly) by the work_function in case the kernel originates
-          // from accelerate_llvm_native_ffi_parallel_loop.
-          task.program = kernel->program;
-          task.location = kernel->program_continuation;
-          _Atomic uint64_t *work_per_thread = kernel->work_per_thread;
-
           // The last thread executes the finish function.
           // First, execute the finish procedure of the kernel:
           TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_LIGHT);
           kernel->work_function(kernel, workers->locks, 0xFFFFFFFE, workers->thread_count);
           TRACY_ZONE_END(final_ctx);
           // Recycle work_per_thread for later kernels
-          if (work_per_thread != NULL) {
-            // For kernels started via accelerate_llvm_native_ffi_parallel_loop,
-            // work_per_thread is NULL.
-            accelerate_work_per_thread_free(workers, work_per_thread);
-          }
+          accelerate_work_per_thread_free(workers, kernel->work_per_thread);
           // Then continue the program after this kernel, via
           // program_continuation in the KernelLaunch structure.
-          // task.program and task.location were set just before kernel finalization.
+          task.program = kernel->program;
+          task.location = kernel->program_continuation;
         } else {
           task.program = NULL;
           task.location = 0;
@@ -207,17 +197,27 @@ void* accelerate_worker(void *data_packed) {
       // The same reasoning as above applies here.
       bool is_last = accelerate_task_end_assisting(ptr, kernel);
       if (is_last) {
+          // Read values from 'kernel', as that object may be deallocated
+          // (indirectly) by the work_function in case the kernel originates
+          // from accelerate_llvm_native_ffi_parallel_loop.
+          task.program = kernel->program;
+          task.location = kernel->program_continuation;
+          _Atomic uint64_t *work_per_thread = kernel->work_per_thread;
+
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
         TRACY_ZONE_BEGIN(final_ctx, kernel->tracy_srcloc, COLOR_DARK);
         kernel->work_function(kernel, workers->locks, 0xFFFFFFFE, workers->thread_count);
         TRACY_ZONE_END(final_ctx);
         // Recycle work_per_thread for later kernels
-        accelerate_work_per_thread_free(workers, kernel->work_per_thread);
+        if (work_per_thread != NULL) {
+          // For kernels started via accelerate_llvm_native_ffi_parallel_loop,
+          // work_per_thread is NULL.
+          accelerate_work_per_thread_free(workers, work_per_thread);
+        }
         // Then continue the program after this kernel, via
         // program_continuation in the KernelLaunch structure.
-        task.program = kernel->program;
-        task.location = kernel->program_continuation;
+        // task.program and task.location were set just before kernel finalization.
       }
       attempts_remaining = ATTEMPTS;
       workassisting_found = true;
