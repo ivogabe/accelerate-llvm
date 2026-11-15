@@ -197,12 +197,12 @@ void* accelerate_worker(void *data_packed) {
       // The same reasoning as above applies here.
       bool is_last = accelerate_task_end_assisting(ptr, kernel);
       if (is_last) {
-          // Read values from 'kernel', as that object may be deallocated
-          // (indirectly) by the work_function in case the kernel originates
-          // from accelerate_llvm_native_ffi_parallel_loop.
-          task.program = kernel->program;
-          task.location = kernel->program_continuation;
-          _Atomic uint64_t *work_per_thread = kernel->work_per_thread;
+        // Read values from 'kernel', as that object may be deallocated
+        // (indirectly) by the work_function in case the kernel originates
+        // from accelerate_llvm_native_ffi_parallel_loop.
+        task.program = kernel->program;
+        task.location = kernel->program_continuation;
+        _Atomic uint64_t *work_per_thread = kernel->work_per_thread;
 
         // The last thread executes the finish function.
         // First, execute the finish procedure of the kernel:
