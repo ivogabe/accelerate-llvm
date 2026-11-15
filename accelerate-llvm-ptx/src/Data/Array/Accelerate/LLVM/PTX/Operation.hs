@@ -29,7 +29,7 @@ import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
 import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Operation.Bounds
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), rank)
-import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
+import Data.Array.Accelerate.Representation.Type (TupR (..))
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
@@ -43,65 +43,75 @@ import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constrai
 
 import Control.Monad.State.Strict
 
-data PTXOp t where
-  PTXMap       :: PTXOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
-  PTXBackpermute :: PTXOp (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
-  PTXGenerate  :: PTXOp (Fun' (sh -> t)              -> Out sh  t -> ())
-  PTXPermute   :: PTXOp (Fun' (e -> e -> e)
-                         -> Mut sh' e
-                         -> In sh (PrimMaybe (sh', e))
-                         -> ())
-  PTXPermute'  :: PTXOp (Mut sh' e
-                         -> In sh (PrimMaybe (sh', e))
-                         -> ())
-  PTXScan      :: Direction
-               -> PTXOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> ())
-  PTXScan1     :: Direction
-               -> PTXOp (Fun' (e -> e -> e)
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> ())
-  PTXScan'     :: Direction
-               -> PTXOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> Out sh e
-                         -> ())
-  PTXFold      :: PTXOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out sh e
-                         -> ())
-  PTXFold1     :: PTXOp (Fun' (e -> e -> e)
-                         -> In (sh, Int) e
-                         -> Out sh e
-                         -> ())
+data PTXOp (b :: IsFusible) t where
+  PTXMap       :: PTXOp Fusible (Fun' (s -> t)
+                              -> In sh s
+                              -> Out sh  t -> ())
+  PTXBackpermute
+               :: PTXOp Fusible (Fun' (sh' -> sh)
+                              -> In sh t
+                              -> Out sh' t -> ())
+  PTXGenerate  :: PTXOp Fusible (Fun' (sh -> t)
+                              -> Out sh  t -> ())
+  PTXPermute   :: PTXOp Fusible (Fun' (e -> e -> e)
+                              -> Mut sh' e
+                              -> In sh (PrimMaybe (sh', e))
+                              -> ())
+  PTXPermute'  :: PTXOp Fusible (Mut sh' e
+                              -> In sh (PrimMaybe (sh', e))
+                              -> ())
+  PTXScan      :: !Direction
+               -> PTXOp Fusible (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> ())
+  PTXScan1     :: !Direction
+               -> PTXOp Fusible (Fun' (e -> e -> e)
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> ())
+  PTXScan'     :: !Direction
+               -> PTXOp Fusible (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out (sh, Int) e
+                              -> Out sh e
+                              -> ())
+  PTXFold      :: PTXOp Fusible (Fun' (e -> e -> e)
+                              -> Exp' e
+                              -> In (sh, Int) e
+                              -> Out sh e
+                              -> ())
+  PTXFold1     :: PTXOp Fusible (Fun' (e -> e -> e)
+                              -> In (sh, Int) e
+                              -> Out sh e
+                              -> ())
 
-instance PrettyOp PTXOp where
-  prettyOp PTXMap         = "map"
-  prettyOp PTXBackpermute = "backpermute"
-  prettyOp PTXGenerate    = "generate"
-  prettyOp PTXPermute     = "permute"
-  prettyOp PTXPermute'    = "permuteUnique"
-  prettyOp (PTXScan dir) = case dir of
+  -- TODO: Foreign operations:
+  -- PTXForeign :: ...
+  --            -> PTXOp NonFusible ..
+
+instance PrettyOperation PTXOp where
+  prettyOperation PTXMap         = "map"
+  prettyOperation PTXBackpermute = "backpermute"
+  prettyOperation PTXGenerate    = "generate"
+  prettyOperation PTXPermute     = "permute"
+  prettyOperation PTXPermute'    = "permuteUnique"
+  prettyOperation (PTXScan dir) = case dir of
     LeftToRight -> "scanl"
     RightToLeft -> "scanr"
-  prettyOp (PTXScan1 dir) = case dir of
+  prettyOperation (PTXScan1 dir) = case dir of
     LeftToRight -> "scanl1"
     RightToLeft -> "scanr1"
-  prettyOp (PTXScan' dir) = case dir of
+  prettyOperation (PTXScan' dir) = case dir of
     LeftToRight -> "scanl'"
     RightToLeft -> "scanr'"
-  prettyOp PTXFold        = "fold"
-  prettyOp PTXFold1       = "fold1"
+  prettyOperation PTXFold        = "fold"
+  prettyOperation PTXFold1       = "fold1"
 
-instance NFData' PTXOp where
-  rnf' !_ = ()
+instance NFDataOp PTXOp where
+  rnfOp !_ = ()
 
 instance OperationBounds PTXOp where
   boundsOptimizeOp = \case
@@ -116,19 +126,19 @@ instance OperationBounds PTXOp where
     _ -> boundsOptimizeOpDefault
 
 instance LowerAcc PTXOp where
-  mkMap         a b c   = Exec PTXMap         (a :>: b :>: c :>:       ArgsNil)
-  mkBackpermute a b c   = Exec PTXBackpermute (a :>: b :>: c :>:       ArgsNil)
-  mkGenerate    a b     = Exec PTXGenerate    (a :>: b :>:             ArgsNil)
+  mkMap         a b c   = Exec (ExecOp FusibleR PTXMap)         (a :>: b :>: c :>:       ArgsNil)
+  mkBackpermute a b c   = Exec (ExecOp FusibleR PTXBackpermute) (a :>: b :>: c :>:       ArgsNil)
+  mkGenerate    a b     = Exec (ExecOp FusibleR PTXGenerate)    (a :>: b :>:             ArgsNil)
   mkScan dir f (Just seed) i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o
-    = Exec (PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ PTXScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
   mkScan dir f Nothing i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o
-    = Exec (PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ PTXScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i@(ArgArray In (ArrayR _shr _ty) _sh _buf) o1 o2
-    = Exec (PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute (Just a) b c = Exec PTXPermute (a :>: b :>: c :>: ArgsNil)
-  mkPermute Nothing a b = Exec PTXPermute' (a :>: b :>: ArgsNil)
-  mkFold a (Just seed) b c = Exec PTXFold (a :>: seed :>: b :>: c :>: ArgsNil)
-  mkFold a Nothing b c = Exec PTXFold1 (a :>: b :>: c :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ PTXScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
+  mkPermute (Just a) b c = Exec (ExecOp FusibleR PTXPermute) (a :>: b :>: c :>: ArgsNil)
+  mkPermute Nothing a b = Exec (ExecOp FusibleR PTXPermute') (a :>: b :>: ArgsNil)
+  mkFold a (Just seed) b c = Exec (ExecOp FusibleR PTXFold) (a :>: seed :>: b :>: c :>: ArgsNil)
+  mkFold a Nothing b c = Exec (ExecOp FusibleR PTXFold1) (a :>: b :>: c :>: ArgsNil)
 
 instance SimplifyOperation PTXOp where
   detectCopy PTXMap         = detectMapCopies
@@ -245,10 +255,9 @@ instance SetOpIndices PTXOp where
 instance MakesILP PTXOp where
   type BackendArg PTXOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
   defaultBA = 0
-  data BackendClusterArg PTXOp a = BCAN
 
   mkGraph :: Node Comp
-          -> PTXOp args
+          -> PTXOp Fusible args
           -> LabelledArgs env args
           -> State (BackendGraphState PTXOp env) ()
   mkGraph c@(Node _i _) PTXBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
@@ -367,27 +376,10 @@ instance MakesILP PTXOp where
   labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
   labelLabelledArg _ _ (L x y) = LOp x y 0
 
-  getClusterArg :: LabelledArgOp PTXOp env a -> BackendClusterArg PTXOp a
-  getClusterArg (LOp _ _ _) = BCAN
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
   finalize :: FusionGraph -> [Constraint]
   finalize g = map NegativeDirIfManifest $ S.toList $ g^.writeEdges
 
-  encodeBackendClusterArg (BCAN) = intHost $(hashQ ("BCAN" :: String))
-
-  combineBackendClusterArg = error "TODO WALL: NO EXPLICIT IMPLEMENTATION"
-
 defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
-
-instance NFData' (BackendClusterArg PTXOp) where
-  rnf' !_ = ()
-
-instance ShrinkArg (BackendClusterArg PTXOp) where
-  shrinkArg _ BCAN = BCAN
-  deadArg BCAN = BCAN
-
-shrToTypeR :: ShapeR sh -> TypeR sh
-shrToTypeR ShapeRz = TupRunit
-shrToTypeR (ShapeRsnoc shr) = TupRpair (shrToTypeR shr) (TupRsingle scalarType)

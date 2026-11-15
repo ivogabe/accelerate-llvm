@@ -20,90 +20,104 @@ module Data.Array.Accelerate.LLVM.Native.Operation
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Operation
 import Data.Array.Accelerate.AST.Partitioned
+import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.Analysis.Hash.Exp
 import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
-
-
-import Data.Array.Accelerate.Representation.Array (ArrayR(..))
+import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
+import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Trafo.Operation.Bounds
+import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), rank)
-import Data.Array.Accelerate.Representation.Type (TypeR, TupR (..))
-import Data.Array.Accelerate.Type (scalarType, scalarTypeInt)
+import Data.Array.Accelerate.Representation.Type (TupR (..))
+import Data.Array.Accelerate.Representation.Ground
+import Data.Array.Accelerate.Type (scalarTypeInt)
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
+import qualified Data.Array.Accelerate.Sugar.Foreign as S
+import qualified Data.Array.Accelerate.LLVM.Native.CodeGen.Base as CodeGen
 import Lens.Micro
 import Lens.Micro.Mtl
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Array.Accelerate.Trafo.Exp.Substitution
+import Foreign.Ptr
 import Control.Monad.State.Strict
+import Data.Typeable
+import Data.ByteString.Builder
+import Data.String
 
-import Data.Array.Accelerate.Analysis.Match ((:~:)(Refl))
-import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
+data NativeOp (fusible :: IsFusible) t where
+  NMap         :: NativeOp Fusible (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
+  NBackpermute :: NativeOp Fusible (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
+  NGenerate    :: NativeOp Fusible (Fun' (sh -> t)              -> Out sh  t -> ())
+  NPermute     :: NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> Mut sh' e
+                                 -> In sh (PrimMaybe (sh', e))
+                                 -> ())
+  NPermute'    :: NativeOp Fusible (Mut sh' e
+                                 -> In sh (PrimMaybe (sh', e))
+                                 -> ())
+  NScan        :: !Direction
+               -> NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> Exp' e
+                                 -> In (sh, Int) e
+                                 -> Out (sh, Int) e
+                                 -> ())
+  NScan1       :: !Direction
+               -> NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> In (sh, Int) e
+                                 -> Out (sh, Int) e
+                                 -> ())
+  NScan'       :: !Direction
+               -> NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> Exp' e
+                                 -> In (sh, Int) e
+                                 -> Out (sh, Int) e
+                                 -> Out sh e
+                                 -> ())
+  NFold        :: NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> Exp' e
+                                 -> In (sh, Int) e
+                                 -> Out sh e
+                                 -> ())
+  NFold1       :: NativeOp Fusible (Fun' (e -> e -> e)
+                                 -> In (sh, Int) e
+                                 -> Out sh e
+                                 -> ())
 
-data NativeOp t where
-  NMap         :: NativeOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
-  NBackpermute :: NativeOp (Fun' (sh' -> sh) -> In sh t -> Out sh' t -> ())
-  NGenerate    :: NativeOp (Fun' (sh -> t)              -> Out sh  t -> ())
-  NPermute     :: NativeOp (Fun' (e -> e -> e)
-                         -> Mut sh' e
-                         -> In sh (PrimMaybe (sh', e))
-                         -> ())
-  NPermute'    :: NativeOp (Mut sh' e
-                         -> In sh (PrimMaybe (sh', e))
-                         -> ())
-  NScan        :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> ())
-  NScan1       :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> ())
-  NScan'       :: Direction
-               -> NativeOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out (sh, Int) e
-                         -> Out sh e
-                         -> ())
-  NFold        :: NativeOp (Fun' (e -> e -> e)
-                         -> Exp' e
-                         -> In (sh, Int) e
-                         -> Out sh e
-                         -> ())
-  NFold1       :: NativeOp (Fun' (e -> e -> e)
-                         -> In (sh, Int) e
-                         -> Out sh e
-                         -> ())
+  -- | Operation via foreign function interface
+  NForeign     :: String
+               -> Bool -- whether this operation allows in-place updates
+               -> Int -- size of (word-aligned) kernel memory in bytes
+               -> ForeignAfun f
+               -> NativeOp NonFusible f
 
-instance PrettyOp NativeOp where
-  prettyOp NMap         = "map"
-  prettyOp NBackpermute = "backpermute"
-  prettyOp NGenerate    = "generate"
-  prettyOp NPermute     = "permute"
-  prettyOp NPermute'    = "permuteUnique"
-  prettyOp (NScan dir) = case dir of
+type ForeignAfun f = FunPtr (CodeGen.KernelType (SFunToEnv (FirstOrderSArgs f)))
+
+instance PrettyOperation NativeOp where
+  prettyOperation NMap         = "map"
+  prettyOperation NBackpermute = "backpermute"
+  prettyOperation NGenerate    = "generate"
+  prettyOperation NPermute     = "permute"
+  prettyOperation NPermute'    = "permuteUnique"
+  prettyOperation (NScan dir) = case dir of
     LeftToRight -> "scanl"
     RightToLeft -> "scanr"
-  prettyOp (NScan1 dir) = case dir of
+  prettyOperation (NScan1 dir) = case dir of
     LeftToRight -> "scanl1"
     RightToLeft -> "scanr1"
-  prettyOp (NScan' dir) = case dir of
+  prettyOperation (NScan' dir) = case dir of
     LeftToRight -> "scanl'"
     RightToLeft -> "scanr'"
-  prettyOp NFold        = "fold"
-  prettyOp NFold1       = "fold1"
+  prettyOperation NFold        = "fold"
+  prettyOperation NFold1       = "fold1"
+  prettyOperation (NForeign name _ _ _) = fromString $ "foreign." ++ name
 
-instance NFData' NativeOp where
-  rnf' !_ = ()
+instance NFDataOp NativeOp where
+  rnfOp !_ = ()
 
 instance OperationBounds NativeOp where
   boundsOptimizeOp = \case
@@ -118,19 +132,24 @@ instance OperationBounds NativeOp where
     _ -> boundsOptimizeOpDefault
 
 instance LowerAcc NativeOp where
-  mkMap         a b c   = Exec NMap         (a :>: b :>: c :>:       ArgsNil)
-  mkBackpermute a b c   = Exec NBackpermute (a :>: b :>: c :>:       ArgsNil)
-  mkGenerate    a b     = Exec NGenerate    (a :>: b :>:             ArgsNil)
+  mkMap         a b c   = Exec (ExecOp FusibleR NMap)         (a :>: b :>: c :>:       ArgsNil)
+  mkBackpermute a b c   = Exec (ExecOp FusibleR NBackpermute) (a :>: b :>: c :>:       ArgsNil)
+  mkGenerate    a b     = Exec (ExecOp FusibleR NGenerate)    (a :>: b :>:             ArgsNil)
   mkScan dir f (Just seed) i o
-    = Exec (NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ NScan dir) (f :>: seed :>: i :>: o :>: ArgsNil)
   mkScan dir f Nothing i o
-    = Exec (NScan1 dir) (f :>: i :>: o :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ NScan1 dir) (f :>: i :>: o :>: ArgsNil)
   mkScan' dir f seed i o1 o2
-    = Exec (NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
-  mkPermute (Just a) b c = Exec NPermute (a :>: b :>: c :>: ArgsNil)
-  mkPermute Nothing a b = Exec NPermute' (a :>: b :>: ArgsNil)
-  mkFold a (Just seed) b c = Exec NFold (a :>: seed :>: b :>: c :>: ArgsNil)
-  mkFold a Nothing b c = Exec NFold1 (a :>: b :>: c :>: ArgsNil)
+    = Exec (ExecOp FusibleR $ NScan' dir) (f :>: seed :>: i :>: o1 :>: o2 :>: ArgsNil)
+  mkPermute (Just a) b c = Exec (ExecOp FusibleR NPermute) (a :>: b :>: c :>: ArgsNil)
+  mkPermute Nothing a b = Exec (ExecOp FusibleR NPermute') (a :>: b :>: ArgsNil)
+  mkFold a (Just seed) b c = Exec (ExecOp FusibleR NFold) (a :>: seed :>: b :>: c :>: ArgsNil)
+  mkFold a Nothing b c = Exec (ExecOp FusibleR NFold1) (a :>: b :>: c :>: ArgsNil)
+
+  mkForeign _ (ff :: asm (as -> bs)) as
+    | Just Refl        <- eqT @asm @ForeignAcc
+    , ForeignAcc _ asm <- ff = Just $ asm as
+    | otherwise              = Nothing
 
 instance SimplifyOperation NativeOp where
   detectCopy NMap         = detectMapCopies
@@ -157,6 +176,14 @@ instance EncodeOperation NativeOp where
   encodeOperation (NScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
   encodeOperation NFold        = intHost $(hashQ ("Fold" :: String))
   encodeOperation NFold1       = intHost $(hashQ ("Fold1" :: String))
+  encodeOperation (NForeign name inplace' kernelMem _ptr) =
+    intHost $(hashQ ("Foreign" :: String))
+      <> intHost (length name)
+      <> (int8 $ if inplace' then 1 else 0)
+      <> intHost kernelMem
+      <> intHost $(hashQ ("ForeignName" :: String))
+      <> stringUtf8 name
+    -- TODO: Can we use more information from foreign operation, to prevent collisions?
 
 instance SetOpIndices NativeOp where
   setOpIndices _ NGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
@@ -252,14 +279,9 @@ instance MakesILP NativeOp where
   type BackendArg NativeOp = Int -- direction: used to separate clusters later, preventing accidental horizontal fusion of backpermutes
   defaultBA :: BackendArg NativeOp
   defaultBA = 0
-  data BackendClusterArg NativeOp a = BCAN
-  combineBackendClusterArg :: BackendClusterArg NativeOp (Out  sh e)
-                           -> BackendClusterArg NativeOp (In   sh e)
-                           -> BackendClusterArg NativeOp (Var' sh)
-  combineBackendClusterArg _ _ = error "combineBackendClusterArg: Shouldn't be able to fuse."
 
   mkGraph :: Node Comp
-          -> NativeOp args
+          -> NativeOp Fusible args
           -> LabelledArgs env args
           -> State (BackendGraphState NativeOp env) ()
   mkGraph c@(Node _i _) NBackpermute (_fun :>: L _ lIn :>: L _ lOut :>: ArgsNil) = do
@@ -303,8 +325,8 @@ instance MakesILP NativeOp where
     fusionILP.constraints %= (
         <> [SameFoldSize c]
         <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
-    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
-                         <> foldMap (equal (-3) . WriteDir c)    (bsTargets <> bsIn))
+    fusionILP.bounds %= (<> foldMap (\v -> lowerUpper (-2) (ReadDir v c) (-1)) bsIn
+                         <> foldMap (equal (-3) . WriteDir c)    bsTargets)
     -- No output, so no in-place paths.
 
   mkGraph c NPermute' (L _ lTargets :>: L _ lIn :>: ArgsNil) = do
@@ -316,7 +338,7 @@ instance MakesILP NativeOp where
     fusionILP.constraints %= (
         <> [SameFoldSize c]
         <> [SameFoldSizeIfFused w c | w <- S.toList wsIn])
-    fusionILP.bounds %= (<> foldMap (equal (-2) . (`ReadDir` c)) (bsTargets <> bsIn)
+    fusionILP.bounds %= (<> foldMap (\v -> lowerUpper (-2) (ReadDir v c) (-1)) bsIn
                          <> foldMap (equal (-3) . WriteDir c) bsTargets)
     -- No output, so no in-place paths.
 
@@ -376,34 +398,29 @@ instance MakesILP NativeOp where
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
 
+  opInplace (NForeign _ inplace' _ _) = inplace'
+
   labelLabelledArg :: Solution -> Node Comp -> LabelledArg env a -> LabelledArgOp NativeOp env a
   labelLabelledArg vars c (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! ReadDir  (getLabelArrDep y) c)
   labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
   labelLabelledArg _ _ (L x y) = LOp x y 0
 
-  getClusterArg :: LabelledArgOp NativeOp env a -> BackendClusterArg NativeOp a
-  getClusterArg LOp{} = BCAN
-
   -- For each label: If the output is manifest, then its direction is negative (i.e. not in a backpermuted order)
   finalize :: FusionGraph -> [Constraint]
   finalize g = map NegativeDirIfManifest $ S.toList $ g^.writeEdges
-
-  encodeBackendClusterArg BCAN = intHost $(hashQ ("BCAN" :: String))
 
 defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
 
-instance NFData' (BackendClusterArg NativeOp) where
-  rnf' :: BackendClusterArg NativeOp a -> ()
-  rnf' !_ = ()
+-- | Foreign functions in the Native backend.
+--
+-- This is just some arbitrary monadic computation.
+--
+data ForeignAcc f where
+  ForeignAcc :: String
+             -> (forall env. GroundVars env (LoweredArrays as) -> OperationAcc NativeOp env (LoweredArrays bs))
+             -> ForeignAcc (as -> bs)
 
-instance ShrinkArg (BackendClusterArg NativeOp) where
-  shrinkArg :: SubArg t t' -> BackendClusterArg NativeOp t -> BackendClusterArg NativeOp t'
-  shrinkArg _ BCAN = BCAN
-  deadArg :: BackendClusterArg NativeOp (Out sh e) -> BackendClusterArg NativeOp (Var' sh)
-  deadArg BCAN = BCAN
-
-shrToTypeR :: ShapeR sh -> TypeR sh
-shrToTypeR ShapeRz = TupRunit
-shrToTypeR (ShapeRsnoc shr) = TupRpair (shrToTypeR shr) (TupRsingle scalarType)
+instance S.Foreign ForeignAcc where
+  strForeign (ForeignAcc s _) = s

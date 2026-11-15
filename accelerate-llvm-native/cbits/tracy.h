@@ -2,15 +2,6 @@
 
 #ifdef ACCELERATE_TRACY
 
-struct ___tracy_source_location_data
-{
-    const char* name;
-    const char* function;
-    const char* file;
-    uint32_t line;
-    uint32_t color;
-};
-
 typedef const void* TracyCZoneCtx;
 
 static const struct ___tracy_source_location_data program_run_srcloc = {
@@ -31,9 +22,9 @@ typedef enum {
   COLOR_LIGHT,
 } ColorVariant;
 
-uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
+inline uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
 
-uint32_t get_color_variant(uint32_t color, ColorVariant variant) {
+inline uint32_t get_color_variant(uint32_t color, ColorVariant variant) {
   uint32_t r = (color >> 16) & 0xFF;
   uint32_t g = (color >> 8)  & 0xFF;
   uint32_t b = color         & 0xFF;

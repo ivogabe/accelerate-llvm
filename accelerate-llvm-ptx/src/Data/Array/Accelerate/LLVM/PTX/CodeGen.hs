@@ -78,7 +78,7 @@ data PTXCode env = PTXCode
 codegen :: forall env args.
            String
         -> Env AccessGroundR env
-        -> Clustered PTXOp args
+        -> Cluster PTXOp args
         -> Args env args
         -> LLVM PTX (PTXCode env)
 codegen name env cluster args
@@ -93,7 +93,7 @@ codegen name env cluster args
     | otherwise ->
       codegenIndependent name env flat independentLoopDepth
   where
-    flat = toFlatClustered cluster args
+    flat = toFlatCluster cluster args
     independentLoopDepth = flatClusterIndependentLoopDepth flat
     loopDepth = flatClusterLoopDepth flat
 

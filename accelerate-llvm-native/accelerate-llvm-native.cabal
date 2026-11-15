@@ -58,6 +58,7 @@ common lang
   -- In addition, OverloadedStrings is enabled by default to ensure that every
   -- module is compatible with it, to support use of GHCi with it enabled.
   default-extensions:
+    DataKinds
     GADTs
     LambdaCase
     OverloadedStrings
@@ -175,6 +176,7 @@ Library
           unix                          >= 2.7.3
 
   c-sources:
+    cbits/ffi.c
     cbits/scheduler.c
     cbits/runtime.c
     cbits/program.c
@@ -182,6 +184,9 @@ Library
   cxx-sources:
     cbits/queue.cpp
     cbits/parker.cpp
+
+  include-dirs: cbits
+  install-includes: accelerate_llvm_native_ffi.h
 
   cc-options: -O2 -Wall -Wextra
   cxx-options: -O2 -Wall -Wextra -std=c++20
