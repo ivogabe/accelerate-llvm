@@ -313,8 +313,8 @@ defaultCodeGenScan' dir flatOp
     )
     (\var envs -> do
       accum <- tupleLoad tp var
-      writeArray' envs output outputIdx accum
       x <- readArray' envs input inputIdx
+      writeArray' envs output outputIdx accum
       new <-
         if envsDescending envs then do
           when (dir /= RightToLeft) $ internalError "Wrong direction in scan'"
@@ -352,11 +352,7 @@ defaultCodeGenScan LeftToRight flatOp
       accum <- tupleLoad tp var
       writeArray' envs output inputIdx accum
       x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      new <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
       tupleStore tp var new
     )
     (\var envs -> do
@@ -392,11 +388,7 @@ defaultCodeGenScan RightToLeft flatOp
       unless (envsDescending envs) $ internalError "Wrong direction in scan"
       accum <- tupleLoad tp var
       x <- readArray' envs input inputIdx
-      new <-
-        if envsDescending envs then
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
-        else
-          app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) accum x
+      new <- app2 (llvmOfFun2 (compileArrayInstrEnvs envs) fun) x accum
       tupleStore tp var new
       writeArray' envs output inputIdx new
     )
