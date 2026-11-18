@@ -25,6 +25,7 @@ struct RuntimeLib accelerate_runtime_lib = (struct RuntimeLib){
   .hs_try_putmvar = hs_try_putmvar
 };
 
+#ifdef ACCELERATE_TRACY
 static const struct ___tracy_source_location_data program_run_srcloc = {
   .name = "program.run()",
   .function = "-",
@@ -32,6 +33,7 @@ static const struct ___tracy_source_location_data program_run_srcloc = {
   .line = 0,
   .color = 0x00FFFF,
 };
+#endif
 
 __thread struct Workers *accelerate_worker_workers = NULL;
 __thread uint32_t accelerate_worker_thread_idx = 0xFFFFFFFF;

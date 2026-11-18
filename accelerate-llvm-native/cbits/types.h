@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include "accelerate_tracy.h"
 
 #define ACCELERATE_LOCK_ARRAY_SIZE (16 * 1024 * 8)
 // Stride used in KernelLaunch.work_per_thread.
@@ -160,15 +161,6 @@ inline void* accelerate_unpack_ptr(uintptr_t packed) {
 inline uint16_t accelerate_unpack_tag(uintptr_t packed) {
   return packed >> 48;
 }
-
-struct ___tracy_source_location_data
-{
-    const char* name;
-    const char* function;
-    const char* file;
-    uint32_t line;
-    uint32_t color;
-};
 
 // locks: an array of locks that can be used by any permutes in the kernel.
 // This array is global, i.e. all kernels use the same array of locks, and is
