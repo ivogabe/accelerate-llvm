@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Plugin.Annotation
 -- Copyright   : [2017..2020] The Accelerate Team
@@ -19,7 +18,3 @@ import Data.Data
 
 data Object = Object FilePath
   deriving (Show, Data)
-
-#if __GLASGOW_HASKELL__ < 912
-deriving instance Typeable Object
-#endif
