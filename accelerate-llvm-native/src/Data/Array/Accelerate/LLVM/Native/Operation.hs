@@ -36,7 +36,7 @@ import Data.Array.Accelerate.Representation.Ground
 import Data.Array.Accelerate.Type (scalarTypeInt)
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
-import qualified Data.Array.Accelerate.Sugar.Foreign as S
+import qualified Data.Array.Accelerate.Sugar.Foreign as Sugar
 import qualified Data.Array.Accelerate.LLVM.Native.CodeGen.Base as CodeGen
 import Lens.Micro
 import Lens.Micro.Mtl
@@ -89,10 +89,10 @@ data NativeOp (fusible :: IsFusible) t where
                                  -> ())
 
   -- | Operation via foreign function interface
-  NForeign     :: String
-               -> Bool -- whether this operation allows in-place updates
-               -> Int -- size of (word-aligned) kernel memory in bytes
-               -> ForeignAfun f
+  NForeign     :: !String
+               -> !Bool -- whether this operation allows in-place updates
+               -> !Int -- size of (word-aligned) kernel memory in bytes
+               -> !(ForeignAfun f)
                -> NativeOp NonFusible f
 
 type ForeignAfun f = FunPtr (CodeGen.KernelType (SFunToEnv (FirstOrderSArgs f)))
@@ -178,12 +178,10 @@ instance EncodeOperation NativeOp where
   encodeOperation NFold1       = intHost $(hashQ ("Fold1" :: String))
   encodeOperation (NForeign name inplace' kernelMem _ptr) =
     intHost $(hashQ ("Foreign" :: String))
-      <> intHost (length name)
       <> (int8 $ if inplace' then 1 else 0)
       <> intHost kernelMem
-      <> intHost $(hashQ ("ForeignName" :: String))
+      <> intHost (length name)
       <> stringUtf8 name
-    -- TODO: Can we use more information from foreign operation, to prevent collisions?
 
 instance SetOpIndices NativeOp where
   setOpIndices _ NGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
@@ -415,12 +413,13 @@ defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
 
 -- | Foreign functions in the Native backend.
 --
--- This is just some arbitrary monadic computation.
---
+-- TODO: Could we generalize this data type and move it to Accelerate, by
+-- adding a 'target' type parameter? The Typeable checks could then be done
+-- on target
 data ForeignAcc f where
   ForeignAcc :: String
              -> (forall env. GroundVars env (LoweredArrays as) -> OperationAcc NativeOp env (LoweredArrays bs))
              -> ForeignAcc (as -> bs)
 
-instance S.Foreign ForeignAcc where
+instance Sugar.Foreign ForeignAcc where
   strForeign (ForeignAcc s _) = s

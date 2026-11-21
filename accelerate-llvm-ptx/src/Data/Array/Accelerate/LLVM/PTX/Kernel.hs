@@ -1,3 +1,4 @@
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -- |
@@ -12,9 +13,12 @@
 
 module Data.Array.Accelerate.LLVM.PTX.Kernel (
   PTXKernel(..),
+  PTXGpuKernel(..),
+  PTXForeignKernel(..),
   PTXKernelPhase(..),
   PTXKernelMetadata(..),
-  KernelType
+  KernelType,
+  ForeignAfun, ForeignArgs, ForeignArg, foreignArgScalar, ForeignCleanup(..),
 ) where
 
 -- accelerate
@@ -24,6 +28,7 @@ import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.Schedule
+import Data.Array.Accelerate.Analysis.Hash.Exp
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Lifetime
 import Data.Array.Accelerate.Pretty.Schedule
@@ -39,7 +44,9 @@ import Data.Array.Accelerate.LLVM.PTX.State
 import Data.Array.Accelerate.LLVM.PTX.Target
 import Data.Array.Accelerate.LLVM.PTX.Link
 import Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
+
 import Crypto.Hash.XKCP
+import Data.ByteString.Builder
 import Data.ByteString.Short                                        ( ShortByteString, fromShort )
 import qualified Data.ByteString.Char8 as Char8
 import System.IO.Unsafe
@@ -49,8 +56,10 @@ import Prettyprinter
 import Data.String
 import LLVM.AST.Type.Module
 
-data PTXKernel env where
-  PTXKernel
+data PTXKernel env = PTXKernelGpu (PTXGpuKernel env) | PTXKernelForeign (PTXForeignKernel env)
+
+data PTXGpuKernel env where
+  PTXGpuKernel
     :: { kernelInit       :: !(Maybe (PTXKernelPhase env))
        , kernelMain       :: !(PTXKernelPhase env)
        -- | Whether this kernel may be skipped if the input is empty.
@@ -80,7 +89,7 @@ data PTXKernel env where
        , kernelDescDetail :: String
        , kernelDescBrief  :: String
        }
-    -> PTXKernel env
+    -> PTXGpuKernel env
 
 -- There are two notions of 'kernels' in this file. From the Accelerate side, a
 -- kernel the compiled variant of a cluster of array operations. Since an array
@@ -96,13 +105,28 @@ data PTXKernelPhase env where
        }
     -> PTXKernelPhase env
 
+data PTXForeignKernel env where
+  -- | A foreign kernel, represented by an arbitrary host-side function
+  -- (@ForeignAfun@).
+  PTXForeignKernel
+    :: String
+    -> ForeignAfun env
+    -> PTXForeignKernel env
+
 instance NFData' PTXKernel where
-  rnf' (PTXKernel p1 p2 !_ !_ sz !_ !_ s l) =
+  rnf' (PTXKernelGpu k) = rnf' k
+  rnf' (PTXKernelForeign k) = rnf' k
+
+instance NFData' PTXGpuKernel where
+  rnf' (PTXGpuKernel p1 p2 !_ !_ sz !_ !_ s l) =
     maybe () rnf' p1 `seq` rnf' p2
       `seq` rnf sz `seq` rnf s `seq` rnf l
 
 instance NFData' PTXKernelPhase where
   rnf' (PTXKernelPhase obj !_ !_) = rnf' obj
+
+instance NFData' PTXForeignKernel where
+  rnf' (PTXForeignKernel name f) = f `seq` rnf name
 
 newtype PTXKernelMetadata f =
   PTXKernelMetadata { kernelArgsSize :: Int }
@@ -126,8 +150,8 @@ instance IsKernel PTXKernel where
 
         phaseInit   <- compilePhase uid 1 `mapM` ptxCodeInit   ptxCode
         phaseWork   <- compilePhase uid 0  $     ptxCodeWork   ptxCode
-        
-        return $ PTXKernel
+
+        return $ PTXKernelGpu $ PTXGpuKernel
           phaseInit
           phaseWork
           (ptxCodeSkipEmpty ptxCode)
@@ -137,10 +161,17 @@ instance IsKernel PTXKernel where
           (ptxCodeKernelMemory ptxCode)
           detail
           brief
+  compileKernel (ExecSingle (PTXForeign name _ fun)) = FirstOrderKernel
+    $ PTXKernelForeign
+    $ PTXForeignKernel name fun
 
   kernelMetadata kernel = PTXKernelMetadata $ sizeOfEnv kernel
 
-  encodeKernel = Left . kernelUID
+  encodeKernel (PTXKernelGpu k) = Left $ kernelUID k
+  encodeKernel (PTXKernelForeign (PTXForeignKernel name _)) = Right $
+    intHost $(hashQ ("PTXForeignKernel" :: String))
+      <> intHost (length name)
+      <> stringUtf8 name
 
 compilePhase :: UID -> Int -> Module (KernelType env) -> LLVM PTX (PTXKernelPhase env)
 compilePhase uid variant m = do
@@ -157,13 +188,15 @@ instance PrettyKernel PTXKernel where
     where
       go :: OpenKernelFun PTXKernel env t -> Adoc
       go (KernelFunLam _ f) = go f
-      go (KernelFunBody (PTXKernel _ phase _ _ _ _ _ "" _))
+      go (KernelFunBody (PTXKernelGpu (PTXGpuKernel _ phase _ _ _ _ _ "" _)))
         = fromString $ take 32 $ toString $ kernelPhaseId phase
-      go (KernelFunBody (PTXKernel _ phase _ _ _ _ _ detail brief))
+      go (KernelFunBody (PTXKernelGpu (PTXGpuKernel _ phase _ _ _ _ _ detail brief)))
         = fromString (take 32 $ toString $ kernelPhaseId phase)
         <+> flatAlt (group $ line' <> "-- " <> desc)
           ("{- " <> desc <> " -}")
         where desc = group $ flatAlt (fromString brief) (fromString detail)
+      go (KernelFunBody (PTXKernelForeign (PTXForeignKernel name _)))
+        = fromString $ "foreign." ++ name
 
       toString :: ShortByteString -> String
       toString = Char8.unpack . fromShort

@@ -19,17 +19,19 @@ module Data.Array.Accelerate.LLVM.PTX.Operation
 
 import Data.Array.Accelerate.AST.Exp
 import Data.Array.Accelerate.AST.Operation
+import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.Partitioned
 import Data.Array.Accelerate.Analysis.Hash.Exp
 import Data.Array.Accelerate.Analysis.Hash.Operation
 import Data.Array.Accelerate.Backend
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Graph
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.Labels
-
-import Data.Array.Accelerate.Representation.Array (ArrayR(..))
 import Data.Array.Accelerate.Trafo.Operation.Bounds
+import Data.Array.Accelerate.Representation.Array
 import Data.Array.Accelerate.Representation.Shape (ShapeR (..), rank)
-import Data.Array.Accelerate.Representation.Type (TupR (..))
+import Data.Array.Accelerate.Representation.Ground
+import Data.Array.Accelerate.Representation.Type
+import Data.Array.Accelerate.Sugar.Foreign as Sugar
 import Data.Array.Accelerate.Type
 import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.LinearConstraint
@@ -42,6 +44,12 @@ import Data.Array.Accelerate.Trafo.Exp.Substitution
 import Data.Array.Accelerate.Trafo.Partitioning.ILP.ConstraintLanguage (Constraint (..))
 
 import Control.Monad.State.Strict
+import Data.Typeable
+import Data.ByteString.Builder
+import Data.String
+import Control.DeepSeq
+import qualified Foreign.CUDA.Ptr as CUDA
+import qualified Foreign.CUDA.Driver.Stream as CUDA
 
 data PTXOp (b :: IsFusible) t where
   PTXMap       :: PTXOp Fusible (Fun' (s -> t)
@@ -88,9 +96,41 @@ data PTXOp (b :: IsFusible) t where
                               -> Out sh e
                               -> ())
 
-  -- TODO: Foreign operations:
-  -- PTXForeign :: ...
-  --            -> PTXOp NonFusible ..
+  PTXForeign   :: !String
+               -> !Bool -- whether this operation allows in-place updates
+               -> !(ForeignAfun (SFunToEnv (FirstOrderSArgs f)))
+               -> PTXOp NonFusible f
+
+type ForeignAfun env = CUDA.Stream -> ForeignArgs env -> IO ForeignCleanup
+
+type family ForeignArgs f where
+  ForeignArgs () = ()
+  ForeignArgs (env, a) = (ForeignArgs env, ForeignArg a)
+
+type family ForeignArg a where
+  ForeignArg (Buffer e) = CUDA.DevicePtr e
+  ForeignArg e = e
+
+foreignArgScalar :: ScalarType e -> ForeignArg e :~: e
+foreignArgScalar (VectorScalarType _) = Refl
+foreignArgScalar (SingleScalarType (NumSingleType tp)) = case tp of
+  IntegralNumType t -> case t of
+    TypeInt    -> Refl
+    TypeInt8   -> Refl
+    TypeInt16  -> Refl
+    TypeInt32  -> Refl
+    TypeInt64  -> Refl
+    TypeWord   -> Refl
+    TypeWord8  -> Refl
+    TypeWord16 -> Refl
+    TypeWord32 -> Refl
+    TypeWord64 -> Refl
+  FloatingNumType t -> case t of
+    TypeHalf   -> Refl
+    TypeFloat  -> Refl
+    TypeDouble -> Refl
+
+data ForeignCleanup = ForeignCleanup (Maybe (IO ()))
 
 instance PrettyOperation PTXOp where
   prettyOperation PTXMap         = "map"
@@ -109,8 +149,12 @@ instance PrettyOperation PTXOp where
     RightToLeft -> "scanr'"
   prettyOperation PTXFold        = "fold"
   prettyOperation PTXFold1       = "fold1"
+  prettyOperation (PTXForeign name _ _) = fromString $ "foreign." ++ name
 
 instance NFDataOp PTXOp where
+  -- All fields of PTXOp constructors are strict. We only need to explicitly
+  -- handle the String in PTXForeign here.
+  rnfOp (PTXForeign name _ _) = rnf name
   rnfOp !_ = ()
 
 instance OperationBounds PTXOp where
@@ -140,6 +184,11 @@ instance LowerAcc PTXOp where
   mkFold a (Just seed) b c = Exec (ExecOp FusibleR PTXFold) (a :>: seed :>: b :>: c :>: ArgsNil)
   mkFold a Nothing b c = Exec (ExecOp FusibleR PTXFold1) (a :>: b :>: c :>: ArgsNil)
 
+  mkForeign _ (ff :: asm (as -> bs)) as
+    | Just Refl        <- eqT @asm @ForeignAcc
+    , ForeignAcc _ asm <- ff = Just $ asm as
+    | otherwise              = Nothing
+
 instance SimplifyOperation PTXOp where
   detectCopy PTXMap         = detectMapCopies
   detectCopy PTXBackpermute = detectBackpermuteCopies
@@ -165,6 +214,11 @@ instance EncodeOperation PTXOp where
   encodeOperation (PTXScan' RightToLeft) = intHost $(hashQ ("Scanr'" :: String))
   encodeOperation PTXFold        = intHost $(hashQ ("Fold" :: String))
   encodeOperation PTXFold1       = intHost $(hashQ ("Fold1" :: String))
+  encodeOperation (PTXForeign name inplace' _fun) =
+    intHost $(hashQ ("Foreign" :: String))
+      <> (int8 $ if inplace' then 1 else 0)
+      <> intHost (length name)
+      <> stringUtf8 name
 
 instance SetOpIndices PTXOp where
   setOpIndices _ PTXGenerate _ idxArgs = Just $ Right idxArgs -- Generate has no In arrays
@@ -371,6 +425,8 @@ instance MakesILP PTXOp where
     fusionILP.bounds %= (<> defaultBounds bsIn c bsOut)
     -- Not the same shape, so no in-place paths.
 
+  opInplace (PTXForeign _ inplace' _) = inplace'
+
   labelLabelledArg :: Solution -> Node Comp -> LabelledArg env a -> LabelledArgOp PTXOp env a
   labelLabelledArg vars c (L x@(ArgArray In  _ _ _) y) = LOp x y (vars M.! ReadDir  (getLabelArrDep y) c)
   labelLabelledArg vars c (L x@(ArgArray Out _ _ _) y) = LOp x y (vars M.! WriteDir c (getLabelArrDep y))
@@ -383,3 +439,13 @@ instance MakesILP PTXOp where
 defaultBounds :: Nodes GVal -> Node Comp -> Nodes GVal -> Bounds
 defaultBounds bsIn c bsOut = foldMap (lower (-2) . (`ReadDir` c)) bsIn
                           <> foldMap (lower (-2) . WriteDir c) bsOut
+
+-- | Foreign functions in the PTX backend.
+--
+data ForeignAcc f where
+  ForeignAcc :: String
+             -> (forall env. GroundVars env (LoweredArrays as) -> OperationAcc PTXOp env (LoweredArrays bs))
+             -> ForeignAcc (as -> bs)
+
+instance Sugar.Foreign ForeignAcc where
+  strForeign (ForeignAcc s _) = s

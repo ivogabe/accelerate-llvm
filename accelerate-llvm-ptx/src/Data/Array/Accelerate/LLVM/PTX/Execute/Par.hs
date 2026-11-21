@@ -11,6 +11,7 @@
 module Data.Array.Accelerate.LLVM.PTX.Execute.Par (
   Par, evalPar, ptxStream, liftPar, spawnPar, block,
   cleanUpTouchLifetime, cleanUpTouchForeignPtr, cleanUpUnregisterHostPtr,
+  cleanUpIO,
 ) where
 
 import Data.Array.Accelerate.Lifetime
@@ -46,6 +47,7 @@ data CleanUp where
   TouchLifetime :: Lifetime t -> CleanUp
   TouchForeignPtr :: ForeignPtr t -> CleanUp
   Unregister :: CUDA.HostPtr t -> CleanUp
+  CleanUpIO :: IO () -> CleanUp
 
 -- | Evaluate a parallel computation
 --
@@ -86,6 +88,10 @@ cleanUpUnregisterHostPtr :: CUDA.HostPtr t -> Par ()
 cleanUpUnregisterHostPtr hostPtr =
   State.modify' (Unregister hostPtr :)
 
+cleanUpIO :: IO () -> Par ()
+cleanUpIO action =
+  State.modify' (CleanUpIO action :)
+
 runCleanUp :: Par ()
 runCleanUp = do
   list <- State.get
@@ -95,6 +101,7 @@ runCleanUp = do
     TouchLifetime lifetime -> touchLifetime lifetime
     TouchForeignPtr ptr -> touchForeignPtr ptr
     Unregister hostPtr -> void $ CUDA.unregisterArray hostPtr
+    CleanUpIO action -> action
 
 -- Synchronises the CPU with the GPU. Blocks execution on the CPU until all
 -- operations submitted to the GPU, from this Par instance, have been completed.

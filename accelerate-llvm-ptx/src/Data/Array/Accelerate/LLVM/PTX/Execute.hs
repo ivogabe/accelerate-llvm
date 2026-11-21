@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 -- |
@@ -150,10 +151,11 @@ executeBinding env baseTp = \case
     expectScalarType (BaseRground (GroundRscalar tp)) = tp
     expectScalarType _ = internalError "Expected scalar type"
 
-executeEffect :: Gamma env -> Effect PTXKernel env -> Par ()
+executeEffect :: forall env. Gamma env -> Effect PTXKernel env -> Par ()
 executeEffect env = \case
-  Exec _ kernelFun args
-    | Exists kernel <- kernelFunKernel kernelFun -> do
+  Exec _ kernelFun (args :: SArgs env fun) -> case kernelFunKernel kernelFun of
+    PTXKernelGpu kernel -> do
+      -- Execute a kernel on the GPU (not a foreign kernel)
       stream <- asks ptxStream
 
       -- Allocate kernel memory
@@ -202,6 +204,15 @@ executeEffect env = \case
         Just l -> cleanUpTouchLifetime l
         Nothing -> return ()
       liftPar (asks ptxLocks) >>= cleanUpTouchLifetime
+    PTXKernelForeign (PTXForeignKernel _ fun) -> do
+      -- Execute a foreign kernel.
+      -- These 'kernels' are represented as host-side functions, and these may
+      -- start any actual GPU kernels on the CUDA Stream passed to them.
+      stream <- asks ptxStream
+      let (args', lifetimes) = kernelForeignArgs @() env args ()
+      ForeignCleanup cleanUp <- liftIO $ fun stream args'
+      mapM_ (\(Exists l) -> cleanUpTouchLifetime l) lifetimes
+      mapM_ cleanUpIO cleanUp
   SignalAwait signals -> do
     stream <- asks ptxStream
     liftIO $ forM_ signals $ \signal -> case prj' signal env of
@@ -265,6 +276,21 @@ kernelArgs env (SArgBuffer _ (Var _ idx) :>: args) = case prj' idx env of
   ValueScalar _ _ -> internalError "Scalar impossible"
   where
     (lifetimes, intArgs, args') = kernelArgs env args
+
+-- @accum@ is ambiguous; explicit type applications are needed.
+kernelForeignArgs :: forall accum env f. Gamma env -> SArgs env f -> ForeignArgs accum -> (ForeignArgs (SFunToEnv' f accum), [Exists Lifetime])
+kernelForeignArgs _ ArgsNil accum = (accum, [])
+kernelForeignArgs env (SArgScalar (Var (tp :: ScalarType e) idx) :>: args) accum =
+  case prj' idx env of
+    ValueScalar _ value
+      | Refl <- foreignArgScalar tp -> kernelForeignArgs @(accum, e) env args (accum, value)
+    _ -> internalError "Scalar impossible"
+kernelForeignArgs env (SArgBuffer _ (Var (_ :: GroundR (Buffer e)) idx) :>: args) accum =
+  case prj' idx env of
+    ValueBuffer (PTXBuffer _ lifetime) ->
+      (Exists lifetime :) <$>
+        kernelForeignArgs @(accum, Buffer e) env args (accum, unsafeGetValue lifetime)
+    ValueScalar _ _ -> internalError "Scalar impossible"
 
 evalArrayInstr :: Gamma env -> EvalArrayInstr Par (ArrayInstr env)
 evalArrayInstr env = EvalArrayInstr $ \instr arg -> case instr of
