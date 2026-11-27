@@ -12,19 +12,13 @@
 module Data.Array.Accelerate.LLVM.PTX.Foreign (
 
   -- Foreign functions
-  -- ForeignAcc(..),
+  ForeignAcc(..), ForeignAfun, ForeignArg,
   ForeignExp(..),
 
   -- useful re-exports
   LLVM,
   PTX(..),
-  Context(..),
-  liftIO,
-  -- withDevicePtr,
-  -- module Data.Array.Accelerate.LLVM.PTX.Array.Data,
-  -- module Data.Array.Accelerate.LLVM.PTX.Execute.Async,
-  -- module Data.Array.Accelerate.LLVM.PTX.Execute.Event,
-  -- module Data.Array.Accelerate.LLVM.PTX.Execute.Stream,
+  module Data.Array.Accelerate.LLVM.Foreign
 
 ) where
 
@@ -34,15 +28,9 @@ import Data.Array.Accelerate.LLVM.State
 import Data.Array.Accelerate.LLVM.CodeGen.Sugar
 
 import Data.Array.Accelerate.LLVM.Foreign
--- import Data.Array.Accelerate.LLVM.PTX.Array.Data
--- import Data.Array.Accelerate.LLVM.PTX.Array.Prim
-import Data.Array.Accelerate.LLVM.PTX.Context
--- import Data.Array.Accelerate.LLVM.PTX.Execute.Async
+import Data.Array.Accelerate.LLVM.PTX.Operation
 import Data.Array.Accelerate.LLVM.PTX.Target
--- import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
--- import Data.Array.Accelerate.LLVM.PTX.Execute.Event                 ( Event, waypoint, query )
 
-import Control.Monad.State
 import Data.Typeable
 
 

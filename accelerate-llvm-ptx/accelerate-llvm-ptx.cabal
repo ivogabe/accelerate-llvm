@@ -63,10 +63,10 @@ Library
 
   exposed-modules:
     Data.Array.Accelerate.LLVM.PTX
+    Data.Array.Accelerate.LLVM.PTX.Operation
     Data.Array.Accelerate.LLVM.PTX.Foreign
 
   other-modules:
-    Data.Array.Accelerate.LLVM.PTX.Operation
     Data.Array.Accelerate.LLVM.PTX.Analysis.Device
     Data.Array.Accelerate.LLVM.PTX.Analysis.Launch
     -- Data.Array.Accelerate.LLVM.PTX.Array.Data
