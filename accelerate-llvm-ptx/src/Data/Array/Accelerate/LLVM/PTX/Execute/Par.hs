@@ -10,10 +10,12 @@
 
 module Data.Array.Accelerate.LLVM.PTX.Execute.Par (
   Par, evalPar, ptxStream, liftPar, spawnPar, block,
-  cleanUpTouchLifetime, cleanUpTouchForeignPtr, cleanUpUnregisterHostPtr,
+  cleanUpTouchLifetime, cleanUpTouchForeignPtr, cleanUpUnregisterBuffer,
   cleanUpIO,
+  bufferRegister, bufferUnregister,
 ) where
 
+import Data.Array.Accelerate.Error
 import Data.Array.Accelerate.Lifetime
 
 import Data.Array.Accelerate.LLVM.State
@@ -28,9 +30,10 @@ import qualified Foreign.CUDA.Driver.Stream                         as CUDA
 import qualified Foreign.CUDA.Ptr                                   as CUDA
 import qualified Foreign.CUDA.Driver                                as CUDA
 
+import Foreign.Ptr
 import Foreign.ForeignPtr
 
-import Control.Monad                                                ( forM_, void )
+import Control.Monad                                                ( forM_, void, unless )
 import Control.Monad.IO.Class                                       ( MonadIO(liftIO) )
 import Control.Monad.Reader                                         ( MonadReader, ReaderT )
 import qualified Control.Monad.Reader                               as Reader
@@ -38,6 +41,11 @@ import Control.Monad.State                                          ( MonadState
 import qualified Control.Monad.State                                as State
 import Control.Monad.Trans                                          ( MonadTrans(lift) )
 import Control.Concurrent
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IntMap
+import Data.Word
+import System.IO.Unsafe                                             ( unsafePerformIO )
+
 
 newtype Par a = Par { runPar :: ReaderT Stream (StateT [CleanUp] (LLVM PTX)) a }
     deriving ( Functor, Applicative, Monad, MonadIO, MonadReader Stream, MonadState [CleanUp] )
@@ -46,7 +54,7 @@ newtype Par a = Par { runPar :: ReaderT Stream (StateT [CleanUp] (LLVM PTX)) a }
 data CleanUp where
   TouchLifetime :: Lifetime t -> CleanUp
   TouchForeignPtr :: ForeignPtr t -> CleanUp
-  Unregister :: CUDA.HostPtr t -> CleanUp
+  Unregister :: Ptr t -> CleanUp
   CleanUpIO :: IO () -> CleanUp
 
 -- | Evaluate a parallel computation
@@ -84,9 +92,9 @@ cleanUpTouchForeignPtr :: ForeignPtr t -> Par ()
 cleanUpTouchForeignPtr ptr =
   State.modify' (TouchForeignPtr ptr :)
 
-cleanUpUnregisterHostPtr :: CUDA.HostPtr t -> Par ()
-cleanUpUnregisterHostPtr hostPtr =
-  State.modify' (Unregister hostPtr :)
+cleanUpUnregisterBuffer :: Ptr t -> Par ()
+cleanUpUnregisterBuffer ptr =
+  State.modify' (Unregister ptr :)
 
 cleanUpIO :: IO () -> Par ()
 cleanUpIO action =
@@ -100,7 +108,7 @@ runCleanUp = do
   liftIO $ forM_ (reverse list) $ \case
     TouchLifetime lifetime -> touchLifetime lifetime
     TouchForeignPtr ptr -> touchForeignPtr ptr
-    Unregister hostPtr -> void $ CUDA.unregisterArray hostPtr
+    Unregister ptr -> bufferUnregister ptr
     CleanUpIO action -> action
 
 -- Synchronises the CPU with the GPU. Blocks execution on the CPU until all
@@ -110,6 +118,92 @@ block = do
   stream <- Reader.ask
   liftIO $ CUDA.block stream
   runCleanUp
+
+-- Keep track of which buffers (on the host) are registered to CUDA.
+-- Registering of buffers should only happen once per buffer, and thus
+-- needs extra protection for concurrent execution.
+data BufferState
+  -- | The buffer is registered to CUDA.
+  -- We keep track of the number of threads using this allocation.
+  = BufferStateRegistered {-# UNPACK #-} !Int
+  -- | A thread is registering or unregistering this buffer.
+  -- While this is in progress, other threads cannot register or
+  -- unregister this buffer. They can wait by reading from the MVar.
+  | BufferStateLocked !(MVar ())
+
+{-# NOINLINE bufferStates #-}
+bufferStates :: MVar (IntMap BufferState)
+bufferStates = unsafePerformIO $ newMVar IntMap.empty
+
+-- Concurrent uses of the same ptr should have the same size
+-- (which is the case for Accelerate arrays)
+bufferRegister :: Bool -> Int -> Ptr Word8 -> IO ()
+bufferRegister unique byteSize ptr = do
+  if unique then
+    -- If this thread is the only thread working with ptr (eg because we just
+    -- allocated a new array), then we do not need to worry about a lock.
+    go Nothing
+  else do
+    -- Otherwise, we first need to acquire the lock.
+    states <- takeMVar bufferStates
+    case states IntMap.!? key of
+      Nothing -> do
+        -- Not registered yet. Create a lock, to prevent other threads from
+        -- concurrently working with the same buffer.
+        lock <- newEmptyMVar
+        putMVar bufferStates $! IntMap.insert key (BufferStateLocked lock) states
+        go $ Just lock
+      Just (BufferStateLocked lock) -> do
+        -- Wait on lock, and try again
+        putMVar bufferStates states
+        readMVar lock -- Blocks until lock is released
+        bufferRegister unique byteSize ptr
+      Just (BufferStateRegistered count) -> do
+        -- Already registered. Increase the reference count
+        putMVar bufferStates $! IntMap.insert key (BufferStateRegistered $ count + 1) states
+  where
+    key = fromIntegral $ ptrToIntPtr ptr
+    go :: Maybe (MVar ()) -> IO ()
+    go lock = do
+      void $ CUDA.registerArray [] byteSize ptr
+      states <- takeMVar bufferStates
+      -- Set reference count to 1
+      putMVar bufferStates $! IntMap.insert key (BufferStateRegistered 1) states
+      -- Release the lock
+      case lock of
+        Nothing -> return ()
+        Just l -> putMVar l ()
+
+-- Note: while a buffer may have been unique in bufferRegister, it might now be
+-- shared, since clean-up code runs asynchronously
+bufferUnregister :: Ptr a -> IO ()
+bufferUnregister ptr = do
+  -- Decrement reference count and create lock when reference count becomes 0
+  states <- takeMVar bufferStates
+  case states IntMap.!? key of
+    Nothing -> internalError "Cannot unregister a pointer that was not registered"
+    Just (BufferStateLocked _) -> internalError "Invalid internal state of buffer. Buffer cannot be unregistered yet when a thread still holds a reference to the buffer."
+    Just (BufferStateRegistered count)
+      | count < 1 -> internalError "Non-positive reference count is not possible"
+      | count > 1 -> do
+        -- Decrement reference count
+        putMVar bufferStates $! IntMap.insert key (BufferStateRegistered $ count - 1) states
+      | otherwise -> do
+        -- Reference count becomes zero. Create a lock.
+        lock <- newEmptyMVar
+        putMVar bufferStates $! IntMap.insert key (BufferStateLocked lock) states
+
+        -- Unregister the pointer
+        void $ CUDA.unregisterArray $ CUDA.HostPtr ptr
+
+        -- Remove the entry from the state
+        states2 <- takeMVar bufferStates
+        putMVar bufferStates $! IntMap.delete key states2
+        -- Release the lock
+        putMVar lock ()
+  where
+    key = fromIntegral $ ptrToIntPtr ptr
+
 
 -- Implementation
 -- --------------

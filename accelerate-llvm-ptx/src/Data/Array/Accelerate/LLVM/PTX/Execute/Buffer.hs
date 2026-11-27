@@ -48,11 +48,14 @@ copyToDevice tp (Buffer hostPtr) = do
   devicePtr <- liftIO (CUDA.mallocArray byteSize')
   stream <- asks ptxStream
   hostPtr1 <- liftIO $ withForeignPtr hostPtr (return . castPtr)
-  hostPtr2 <- liftIO $ CUDA.registerArray [] byteSize' hostPtr1
-  liftIO $ CUDA.pokeArrayAsync byteSize' hostPtr2 devicePtr (Just stream)
 
-  -- Call 'CUDA.unregisterArray hostPtr2' when we next block (sync CPU with GPU)
-  cleanUpUnregisterHostPtr hostPtr2
+  -- Register the buffer to CUDA
+  liftIO $ bufferRegister False byteSize' hostPtr1
+
+  liftIO $ CUDA.pokeArrayAsync byteSize' (CUDA.HostPtr hostPtr1) devicePtr (Just stream)
+
+  -- Call 'CUDA.bufferUnregister buffer1' when we next block (sync CPU with GPU)
+  cleanUpUnregisterBuffer hostPtr1
   -- Same for touchForeignPtr hostPtr
   cleanUpTouchForeignPtr hostPtr
 
@@ -68,12 +71,15 @@ copyToHost tp (PTXBuffer size lifetime) = do
   let byteSize = scalarTypeSize tp * size
   buffer@(Buffer hostPtr) <- unsafeFreezeBuffer <$> liftIO (newBuffer tp size)
   hostPtr1 <- liftIO $ withForeignPtr hostPtr (return . castPtr)
-  hostPtr2 <- liftIO $ CUDA.registerArray [] byteSize hostPtr1
-  stream <- asks ptxStream
-  liftIO $ CUDA.peekArrayAsync byteSize devicePtr2 hostPtr2 (Just stream)
 
-  -- Call 'CUDA.unregisterArray hostPtr2' when we next block (sync CPU with GPU)
-  cleanUpUnregisterHostPtr hostPtr2
+  -- Register the buffer to CUDA
+  liftIO $ bufferRegister False byteSize hostPtr1
+
+  stream <- asks ptxStream
+  liftIO $ CUDA.peekArrayAsync byteSize devicePtr2 (CUDA.HostPtr hostPtr1) (Just stream)
+
+  -- Call 'bufferUnregister hostPtr1' when we next block (sync CPU with GPU)
+  cleanUpUnregisterBuffer hostPtr1
   -- Same for touchForeignPtr hostPtr
   cleanUpTouchForeignPtr hostPtr
   -- And touchLifetime lifetime
