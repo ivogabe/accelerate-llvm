@@ -29,17 +29,17 @@ module Data.Array.Accelerate.LLVM.Native (
   run, -- runWith,
   run1, -- run1With,
   runN, -- runNWith,
-  {- stream, streamWith,
+  -- stream, streamWith,
 
   -- * Asynchronous execution
   Async,
-  wait, poll, cancel,
+  wait, poll,
 
-  runAsync, runAsyncWith,
-  run1Async, run1AsyncWith,
-  runNAsync, runNAsyncWith,
+  runAsync, -- runAsyncWith,
+  run1Async, -- run1AsyncWith,
+  runNAsync, -- runNAsyncWith,
 
-  -- * Ahead-of-time compilation
+  {- -- * Ahead-of-time compilation
   runQ, runQWith,
   runQAsync, runQAsyncWith,
 
@@ -113,12 +113,10 @@ run = runAt @Native
 
 -- | As 'run', but allow the computation to run asynchronously and return
 -- immediately without waiting for the result. The status of the computation can
--- be queried using 'wait', 'poll', and 'cancel'.
+-- be queried using 'wait' and 'poll'.
 --
--- runAsync :: (Arrays a, HasCallStack) => Acc a -> IO (Async a)
--- runAsync a
---   = withFrozenCallStack
---   $ runAsyncWith defaultTarget a
+runAsync :: Arrays a => Acc a -> IO (Async a)
+runAsync = runAsyncAt @Native
 
 -- | As 'runAsync', but execute using the specified target (thread gang).
 --
@@ -226,23 +224,23 @@ runN = runNAt @Native
 --       return $ toArr arrs
 --     go _ _ _ = error "The moon is hanging upside down"
 
-{-
+
 -- | As 'run1', but execute asynchronously.
 --
-run1Async :: (Arrays a, Arrays b, HasCallStack) => (Acc a -> Acc b) -> a -> IO (Async b)
-run1Async = withFrozenCallStack $ run1AsyncWith defaultTarget
-
+run1Async :: (Arrays a, Arrays b) => (Acc a -> Acc b) -> a -> IO (Async b)
+run1Async = run1AsyncAt @Native
+{-
 -- | As 'run1Async', but execute using the specified target (thread gang).
 --
 run1AsyncWith :: (Arrays a, Arrays b, HasCallStack) => Native -> (Acc a -> Acc b) -> a -> IO (Async b)
 run1AsyncWith = withFrozenCallStack runNAsyncWith
-
+-}
 
 -- | As 'runN', but execute asynchronously.
 --
-runNAsync :: (Afunction f, RunAsync r, ArraysFunctionR f ~ RunAsyncR r, HasCallStack) => f -> r
-runNAsync = withFrozenCallStack $ runNAsyncWith defaultTarget
-
+runNAsync :: Afunction f => f -> AfunctionAsyncR f
+runNAsync = runNAsyncAt @Native
+{-
 -- | As 'runNWith', but execute asynchronously.
 --
 runNAsyncWith :: (Afunction f, RunAsync r, ArraysFunctionR f ~ RunAsyncR r, HasCallStack) => Native -> f -> r

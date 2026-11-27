@@ -54,17 +54,17 @@ module Data.Array.Accelerate.LLVM.PTX (
   run, --runWith,
   run1, --run1With,
   runN, --runNWith,
-  {- stream, streamWith,
+  -- stream, streamWith,
 
   -- * Asynchronous execution
   Async,
-  wait, poll, cancel,
+  wait, poll,
 
-  runAsync, runAsyncWith,
-  run1Async, run1AsyncWith,
-  runNAsync, runNAsyncWith,
+  runAsync, --runAsyncWith,
+  run1Async, --run1AsyncWith,
+  runNAsync, --runNAsyncWith,
 
-  -- * Ahead-of-time compilation
+  {- -- * Ahead-of-time compilation
   runQ, runQWith,
   runQAsync, runQAsyncWith, -}
 
@@ -91,14 +91,99 @@ instance Backend PTX where
   type Schedule PTX = UniformScheduleFun
   type Kernel PTX = PTXKernel
 
+-- Accelerate: LLVM backend for NVIDIA GPUs
+-- ----------------------------------------
+
+-- | Compile and run a complete embedded array program.
+--
+-- This will execute using the first available CUDA device. If you wish to run
+-- on a specific device, use 'runWith'.
+--
+-- The result is copied back to the host only once the arrays are demanded (or
+-- the result is forced to normal form). For results consisting of multiple
+-- components (a tuple of arrays or array of tuples) this applies per primitive
+-- array. Evaluating the result of 'run' to WHNF will initiate the computation,
+-- but does not copy the results back from the device.
+--
+-- /NOTE:/ it is recommended to use 'runN' or 'runQ' whenever possible.
+--
 run :: Arrays a => Acc a -> a
 run = runAt @PTX
 
+-- | As 'run', but run the computation asynchronously and return immediately
+-- without waiting for the result. The status of the computation can be queried
+-- using 'wait' and 'poll'.
+--
+-- This will run on the first available CUDA device. If you wish to run on
+-- a specific device, use 'runAsyncWith'.
+--
+runAsync :: Arrays a => Acc a -> IO (Async a)
+runAsync = runAsyncAt @PTX
+
+-- | This is 'runN', specialised to an array program of one argument.
+--
 run1 :: (Arrays a, Arrays b) => (Acc a -> Acc b) -> a -> b
 run1 = run1At @PTX
 
+-- | As 'run1', but the computation is executed asynchronously.
+--
+run1Async :: (Arrays a, Arrays b) => (Acc a -> Acc b) -> a -> IO (Async b)
+run1Async = run1AsyncAt @PTX
+
+-- | Prepare and execute an embedded array program.
+--
+-- This function can be used to improve performance in cases where the array
+-- program is constant between invocations, because it enables us to bypass
+-- front-end conversion stages and move directly to the execution phase. If you
+-- have a computation applied repeatedly to different input data, use this,
+-- specifying any changing aspects of the computation via the input parameters.
+-- If the function is only evaluated once, this is equivalent to 'run'.
+--
+-- In order to use 'runN' you must express your Accelerate program as a function
+-- of array terms:
+--
+-- > f :: (Arrays a, Arrays b, ... Arrays c) => Acc a -> Acc b -> ... -> Acc c
+--
+-- This function then returns the compiled version of 'f':
+--
+-- > runN f :: (Arrays a, Arrays b, ... Arrays c) => a -> b -> ... -> c
+--
+-- At an example, rather than:
+--
+-- > step :: Acc (Vector a) -> Acc (Vector b)
+-- > step = ...
+-- >
+-- > simulate :: Vector a -> Vector b
+-- > simulate xs = run $ step (use xs)
+--
+-- Instead write:
+--
+-- > simulate = runN step
+--
+-- You can use the debugging options to check whether this is working
+-- successfully. For example, running with the @-ddump-phases@ flag should show
+-- that the compilation steps only happen once, not on the second and subsequent
+-- invocations of 'simulate'. Note that this typically relies on GHC knowing
+-- that it can lift out the function returned by 'runN' and reuse it.
+--
+-- As with 'run', the resulting array(s) are only copied back to the host once
+-- they are actually demanded (forced to normal form). Thus, splitting a program
+-- into multiple 'runN' steps does not imply transferring intermediate
+-- computations back and forth between host and device. However note that
+-- Accelerate is not able to optimise (fuse) across separate 'runN' invocations.
+--
+-- See the programs in the 'accelerate-examples' package for examples.
+--
+-- See also 'runQ', which compiles the Accelerate program at _Haskell_ compile
+-- time, thus eliminating the runtime overhead altogether.
+--
 runN :: Afunction f => f -> AfunctionR f
 runN = runNAt @PTX
+
+-- | As 'runN', but execute asynchronously.
+--
+runNAsync :: Afunction f => f -> AfunctionAsyncR f
+runNAsync = runNAsyncAt @PTX
 
 {- import Data.Array.Accelerate.AST                                    ( PreOpenAfun(..), arraysR, liftALeftHandSide )
 import Data.Array.Accelerate.AST.LeftHandSide                       ( lhsToTupR )
