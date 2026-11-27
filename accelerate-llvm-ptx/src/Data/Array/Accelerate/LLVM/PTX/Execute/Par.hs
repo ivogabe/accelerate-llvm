@@ -33,7 +33,7 @@ import qualified Foreign.CUDA.Driver                                as CUDA
 import Foreign.Ptr
 import Foreign.ForeignPtr
 
-import Control.Monad                                                ( forM_, void, unless )
+import Control.Monad                                                ( forM_, void )
 import Control.Monad.IO.Class                                       ( MonadIO(liftIO) )
 import Control.Monad.Reader                                         ( MonadReader, ReaderT )
 import qualified Control.Monad.Reader                               as Reader

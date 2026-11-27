@@ -88,7 +88,7 @@ import Data.Array.Accelerate.LLVM.PTX.Kernel
 import Data.Array.Accelerate.LLVM.PTX.Execute ()
 
 instance Backend PTX where
-  type Schedule PTX = UniformScheduleFun
+  type Schedule PTX = UniformScheduleFunRC
   type Kernel PTX = PTXKernel
 
 -- Accelerate: LLVM backend for NVIDIA GPUs

@@ -12,12 +12,14 @@
 --
 
 module Data.Array.Accelerate.LLVM.PTX.Execute (
-  {- instance Execute UniformSchedule PTXKernel -}
+  {- instance Execute UniformScheduleRC PTXKernel -}
 ) where
 
 import Data.Array.Accelerate.Analysis.Match
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.AST.Idx
+import Data.Array.Accelerate.AST.IdxSet                             ( IdxSet )
+import qualified Data.Array.Accelerate.AST.IdxSet                   as IdxSet
 import Data.Array.Accelerate.AST.Execute
 import Data.Array.Accelerate.AST.Kernel
 import Data.Array.Accelerate.AST.LeftHandSide
@@ -66,14 +68,14 @@ import Control.Concurrent.MVar
 import Data.Maybe                                                   ( fromMaybe )
 import qualified Data.Text                                          as Text
 
-instance Execute UniformScheduleFun PTXKernel where
-  data Linked UniformScheduleFun PTXKernel t = PTXLinked (UniformScheduleFun PTXKernel () t)
+instance Execute UniformScheduleFunRC PTXKernel where
+  data Linked UniformScheduleFunRC PTXKernel t = PTXLinked (UniformScheduleFunRC PTXKernel () t)
 
   linkAfunSchedule = PTXLinked
 
   executeAfunSchedule _ (PTXLinked f) = executeFun f
 
-executeFun :: UniformScheduleFun PTXKernel () f -> IOFun f
+executeFun :: UniformScheduleFunRC PTXKernel () f -> IOFun f
 executeFun (Sbody _) = return ()
 executeFun (Slam lhs1 (Slam lhs2 f)) = \a -> \b ->
   executeFun (Slam (LeftHandSidePair lhs1 lhs2) f) (a, b)
@@ -82,18 +84,18 @@ executeFun (Slam lhs (Sbody body)) = \arguments -> evalPTX defaultTarget $ evalP
   let env = push' Empty (lhs, arguments')
   execute env body
 
-executeUnaryFun :: Gamma env -> UniformScheduleFun PTXKernel env (s -> ()) -> Distribute Value s -> Par ()
+executeUnaryFun :: Gamma env -> UniformScheduleFunRC PTXKernel env (s -> ()) -> Distribute Value s -> Par ()
 executeUnaryFun env (Slam lhs (Sbody body)) arguments =
   let env' = push' env (lhs, arguments)
   in execute env' body
 
-executeBinaryFun :: Gamma env -> UniformScheduleFun PTXKernel env (a -> b -> ()) -> Distribute Value a -> Distribute Value b -> Par ()
+executeBinaryFun :: Gamma env -> UniformScheduleFunRC PTXKernel env (a -> b -> ()) -> Distribute Value a -> Distribute Value b -> Par ()
 executeBinaryFun env (Slam lhs1 (Slam lhs2 f)) a b = executeUnaryFun env (Slam (LeftHandSidePair lhs1 lhs2) f) (a, b)
 
-executeTernaryFun :: Gamma env -> UniformScheduleFun PTXKernel env (a -> b -> c -> ()) -> Distribute Value a -> Distribute Value b -> Distribute Value c -> Par ()
+executeTernaryFun :: Gamma env -> UniformScheduleFunRC PTXKernel env (a -> b -> c -> ()) -> Distribute Value a -> Distribute Value b -> Distribute Value c -> Par ()
 executeTernaryFun env (Slam lhs1 (Slam lhs2 f)) a b = executeBinaryFun env (Slam (LeftHandSidePair lhs1 lhs2) f) (a, b)
 
-execute :: Gamma env -> UniformSchedule PTXKernel env -> Par ()
+execute :: Gamma env -> UniformScheduleRC PTXKernel env -> Par ()
 execute env = \case
   Return -> return ()
   Alet lhs bnd next -> do
@@ -103,19 +105,40 @@ execute env = \case
   Effect effect next -> do
     executeEffect env effect
     execute env next
-  Acond cond SplitDefault true false next -> do
-    let cond' = case prj' (varIdx cond) env of
-          ValueScalar _ c -> c
-    if cond' == 1 then
-      execute env true
-    else
-      execute env false
-    execute env next
-  Awhile SplitDefault SplitDefault io step initial next -> executeAwhile env io step (prjVars initial env) next
-  AwhileSeq SplitDefault SplitDefault io step initial next -> executeAwhileSeq env io step (prjVars initial env) next
-  Spawn SplitDefault a b -> do
-    spawnPar (execute env a)
-    execute env b
+  Acond cond split true false next
+    | Released subTrue true' <- leadingRelease true
+    , Released subFalse false' <- leadingRelease false
+    -> do
+      let cond' = case prj' (varIdx cond) env of
+            ValueScalar _ c -> c
+      if cond' == 1 then do
+        (env', _) <- executeSplitRelease env split subTrue
+        execute env' true'
+      else do
+        (env', _) <- executeSplitRelease env split subFalse
+        execute env' false'
+      -- The reference counts of bindings in the environment were already
+      -- updated in the true and false branch. Here we do not need to update
+      -- these counts, but we do need to construct the new environment.
+      let envNext = subsetEnv (splitSubsetRight split) env
+      execute envNext next
+  Awhile split1 split2 io step initial next -> do
+    (envI, env') <- executeSplitEnv env split1
+    -- TODO: Handle reference counts of bindings in envI:
+    -- Increment if used multiple times in 'initial', decrement if not used
+    executeAwhile env' split2 io step (prjVars initial envI) next
+  AwhileSeq split1 split2 io step initial next -> do
+    (envI, env') <- executeSplitEnv env split1
+    -- TODO: Handle reference counts of bindings in envI:
+    -- Increment if used multiple times in 'initial', decrement if not used
+    executeAwhileSeq env' split2 io step (prjVars initial envI) next
+  Spawn split a b -> do
+    (env1, env2) <- executeSplitEnv env split
+    spawnPar (execute env1 a)
+    execute env2 b
+  Release sub next -> do
+    env' <- executeRelease env sub
+    execute env' next
 
 executeBinding :: Gamma env -> BasesR t -> Binding env t -> Par (Distribute Value t)
 executeBinding env baseTp = \case
@@ -305,12 +328,26 @@ evalArrayInstr env = EvalArrayInstr $ \instr arg -> case instr of
 
 executeAwhile
   :: Gamma env
+  -> Split True env envS envN
   -> InputOutputR input output
-  -> UniformScheduleFun PTXKernel env (input -> Output PrimBool -> output -> ())
+  -> UniformScheduleFunRC PTXKernel envS (input -> Output PrimBool -> output -> ())
   -> Distribute Value input
-  -> UniformSchedule PTXKernel env
+  -> UniformScheduleRC PTXKernel envN
   -> Par ()
-executeAwhile env io step input next = do
+executeAwhile env split io step input next = do
+  -- Reference counting:
+  -- At the beginning of each iteration, we increment the reference counts of
+  -- all free variables of the step function. The step function then 'owns'
+  -- these references, and will decrement their reference counts or return
+  -- those values.
+  --
+  -- At the end of the loop, before we execute 'next',
+  -- we decrement the reference counts of all terms used by step that are not
+  -- used by 'next' (ie 'splitOnlyLeft split').
+  --
+  -- Here we increment the bindings used by the step function:
+  retain env (IdxSet.splitLeft split)
+
   -- Set up the output variables for this iteration (and the input for the next)
   eventVar <- liftIO newEmptyMVar
   let signal = PTXSignal eventVar
@@ -325,33 +362,47 @@ executeAwhile env io step input next = do
     condition <- liftIO $ readMVar mvar
     case condition of
       ValueScalar _ c
-        | c == 1 -> executeAwhile env io step nextInput next
-        | otherwise -> execute env next
+        | c == 1 -> executeAwhile env split io step nextInput next
+        | otherwise -> do
+          -- End of the while loop
+          -- Release bindings only used by step function
+          release env (IdxSet.splitOnlyLeft split)
+          let env' = subsetEnv (splitSubsetRight split) env
+          execute env' next
 
   -- Execute a step
-  executeTernaryFun env step input (ValueSignalResolver signal, ValueOutputRef mvar) output
+  let env' = subsetEnv (splitSubsetLeft split) env
+  executeTernaryFun env' step input (ValueSignalResolver signal, ValueOutputRef mvar) output
 
 executeAwhileSeq
   :: Gamma env
+  -> Split True env envS envN
   -> InputOutputR input output
-  -> UniformScheduleFun PTXKernel env (input -> OutputRef PrimBool -> output -> ())
+  -> UniformScheduleFunRC PTXKernel envS (input -> OutputRef PrimBool -> output -> ())
   -> Distribute Value input
-  -> UniformSchedule PTXKernel env
+  -> UniformScheduleRC PTXKernel envN
   -> Par ()
-executeAwhileSeq env io step input next = do
+executeAwhileSeq env split io step input next = do
+  -- Reference counting: same as in 'executeAwhile'
+  retain env (IdxSet.splitLeft split)
+
   -- Set up the output variables for this iteration (and the input for the next)
   mvar <- liftIO newEmptyMVar
   (output, nextInput) <- bindAwhileIO io
 
   -- Execute a step
-  executeTernaryFun env step input (ValueOutputRef mvar) output
+  let envS = subsetEnv (splitSubsetLeft split) env
+  executeTernaryFun envS step input (ValueOutputRef mvar) output
 
   -- Check condition
   condition <- liftIO $ readMVar mvar
   case condition of
     ValueScalar _ c
-      | c == 1 -> executeAwhileSeq env io step nextInput next
-      | otherwise -> execute env next
+      | c == 1 -> executeAwhileSeq env split io step nextInput next
+      | otherwise -> do
+        release env (IdxSet.splitOnlyLeft split)
+        let envN = subsetEnv (splitSubsetRight split) env
+        execute envN next
 
 bindAwhileIO :: InputOutputR input output -> Par (Distribute Value output, Distribute Value input)
 bindAwhileIO InputOutputRsignal = do
@@ -366,6 +417,32 @@ bindAwhileIO (InputOutputRpair io1 io2) = do
   return ((output1, output2), (input1, input2))
 bindAwhileIO InputOutputRunit =
   return ((), ())
+
+executeRelease :: Gamma env -> Subset env env' -> Par (Gamma env')
+executeRelease env subset = do
+  release env $ IdxSet.subsetDropped subset
+  return $ subsetEnv subset env
+
+executeSplitEnv :: Gamma env -> Split True env env1 env2 -> Par (Gamma env1, Gamma env2)
+executeSplitEnv env split = do
+  retain env $ IdxSet.splitBoth split
+  return
+    ( subsetEnv (splitSubsetLeft split) env
+    , subsetEnv (splitSubsetRight split) env )
+
+executeSplitRelease :: Gamma env -> Split True env env1 env2 -> Subset env1 env1' -> Par (Gamma env1', Gamma env2)
+executeSplitRelease env split subLeft = do
+  let subLeft' = splitSubsetLeft split `composeSubsets` subLeft
+  retain env (IdxSet.splitRight split IdxSet.\\ IdxSet.subsetDropped subLeft')
+  return
+    ( subsetEnv (splitSubsetLeft split `composeSubsets` subLeft) env
+    , subsetEnv (splitSubsetRight split) env )
+
+release :: Gamma env -> IdxSet env -> Par ()
+release env set = IdxSet.envForEach env set $ \_ -> return () -- TODO: Decrement reference count
+
+retain :: Gamma env -> IdxSet env -> Par ()
+retain env set = IdxSet.envForEach env set $ \_ -> return () -- TODO: Increment reference count
 
 {- -- Skeleton implementation
 -- -----------------------
