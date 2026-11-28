@@ -15,15 +15,13 @@ module Data.Array.Accelerate.LLVM.PTX.Execute.Event (
 
 ) where
 
-import Data.Array.Accelerate.Lifetime
-
-import qualified Data.Array.Accelerate.LLVM.PTX.Context             as Context
 import Data.Array.Accelerate.LLVM.PTX.Target                        ( PTX(..) )
 import Data.Array.Accelerate.LLVM.State
 import qualified Data.Array.Accelerate.LLVM.PTX.Debug               as Debug
 import Data.Array.Accelerate.LLVM.PTX.Execute.Stream                ( Stream )
 
 import Foreign.CUDA.Driver.Error
+import Foreign.CUDA.Driver.Event                                    ( Event )
 import qualified Foreign.CUDA.Driver.Event                          as Event
 import qualified Foreign.CUDA.Driver.Stream                         as Stream
 
@@ -33,30 +31,11 @@ import Control.Monad.Reader
 import Data.Text.Lazy.Builder
 import Formatting
 
-
--- | Events can be used for efficient device-side synchronisation between
--- execution streams and between the host.
---
-type Event = Lifetime Event.Event
-
-
 -- | Create a new event. It will not be automatically garbage collected, and is
 -- not suitable for timing purposes.
 --
-{-# INLINEABLE create #-}
 create :: LLVM PTX Event
 create = do
-  ctx   <- asks ptxContext
-  e     <- create'
-  event <- liftIO $ newLifetime e
-  liftIO $ addFinalizer event $ do
-             message ("destroy " % formatEvent) e
-             Context.contextFinalizeResource ctx $
-               Event.destroy e
-  return event
-
-create' :: LLVM PTX Event.Event
-create' = do
   -- PTX{ptxMemoryTable} <- asks llvmTarget
   me      <- attempt "create/new" (liftIO . catchOOM $ Event.create [Event.DisableTiming])
              {- `orElse` do
@@ -94,12 +73,12 @@ create' = do
         Nothing -> eb
     -}
 
-
 -- | Delete an event
 --
-{-# INLINEABLE destroy #-}
 destroy :: Event -> IO ()
-destroy = finalize
+destroy e = do
+  message ("destroy " % formatEvent) e
+  Event.destroy e
 
 -- | Create a new event marker that will be filled once execution in the
 -- specified stream has completed all previously submitted work.
@@ -107,43 +86,39 @@ destroy = finalize
 {-# INLINEABLE waypoint #-}
 waypoint :: Stream -> LLVM PTX Event
 waypoint stream = do
-  event <- create
-  liftIO $
-    withLifetime event $ \e -> do
-      message ("add waypoint " % formatEvent % " in stream " % formatStream) e stream
-      Event.record e (Just stream)
-      return event
+  e <- create
+  liftIO $ do
+    message ("add waypoint " % formatEvent % " in stream " % formatStream) e stream
+    Event.record e (Just stream)
+    return e
 
 record :: Event -> Stream -> IO ()
-record event stream =
-  withLifetime event $ \e -> do
-    message ("record " % formatEvent % " in stream " % formatStream) e stream
-    Event.record e (Just stream)
+record e stream = do
+  message ("record " % formatEvent % " in stream " % formatStream) e stream
+  Event.record e (Just stream)
 
 -- | Make all future work submitted to the given stream wait until the event
 -- reports completion before beginning execution.
 --
 {-# INLINEABLE after #-}
 after :: Event -> Stream -> IO ()
-after event stream =
-  withLifetime event $ \e -> do
-    message ("after " % formatEvent % " in stream " % formatStream) e stream
-    Event.wait e (Just stream) []
+after e stream = do
+  message ("after " % formatEvent % " in stream " % formatStream) e stream
+  Event.wait e (Just stream) []
 
 -- | Block the calling thread until the event is recorded
 --
 {-# INLINEABLE block #-}
 block :: Event -> IO ()
-block event =
-  withLifetime event $ \e -> do
-    message ("blocked on event " % formatEvent) e
-    Event.block e
+block e = do
+  message ("blocked on event " % formatEvent) e
+  Event.block e
 
 -- | Test whether an event has completed
 --
 {-# INLINEABLE query #-}
 query :: Event -> IO Bool
-query event = withLifetime event Event.query
+query = Event.query
 
 
 -- Debug

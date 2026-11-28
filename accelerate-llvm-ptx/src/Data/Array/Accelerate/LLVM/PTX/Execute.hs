@@ -81,13 +81,13 @@ executeFun (Slam lhs1 (Slam lhs2 f)) = \a -> \b ->
   executeFun (Slam (LeftHandSidePair lhs1 lhs2) f) (a, b)
 executeFun (Slam lhs (Sbody body)) = \arguments -> evalPTX defaultTarget $ evalPar $ do
   arguments' <- baseToValues (lhsToTupR lhs) arguments
-  let env = push' Empty (lhs, arguments')
+  env <- executeBind Empty lhs arguments'
   execute env body
 
 executeUnaryFun :: Gamma env -> UniformScheduleFunRC PTXKernel env (s -> ()) -> Distribute Value s -> Par ()
-executeUnaryFun env (Slam lhs (Sbody body)) arguments =
-  let env' = push' env (lhs, arguments)
-  in execute env' body
+executeUnaryFun env (Slam lhs (Sbody body)) arguments = do
+  env' <- executeBind env lhs arguments
+  execute env' body
 
 executeBinaryFun :: Gamma env -> UniformScheduleFunRC PTXKernel env (a -> b -> ()) -> Distribute Value a -> Distribute Value b -> Par ()
 executeBinaryFun env (Slam lhs1 (Slam lhs2 f)) a b = executeUnaryFun env (Slam (LeftHandSidePair lhs1 lhs2) f) (a, b)
@@ -100,7 +100,7 @@ execute env = \case
   Return -> return ()
   Alet lhs bnd next -> do
     bnd' <- executeBinding env (lhsToTupR lhs) bnd
-    let env' = push' env (lhs, bnd')
+    env' <- executeBind env lhs bnd'
     execute env' next
   Effect effect next -> do
     executeEffect env effect
@@ -129,8 +129,6 @@ execute env = \case
   AwhileSeq split1 split2 io step initial next -> do
     (envI, env') <- executeSplitEnv env split1
     executeAwhileInitial envI split1 initial
-    -- TODO: Handle reference counts of bindings in envI:
-    -- Increment if used multiple times in 'initial', decrement if not used
     executeAwhileSeq env' split2 io step (prjVars initial envI) next
   Spawn split a b -> do
     (env1, env2) <- executeSplitEnv env split
@@ -146,8 +144,7 @@ executeBinding env baseTp = \case
     result <- evalExp expr $ evalArrayInstr env
     return $ scalarToValues (mapTupR expectScalarType baseTp) result
   NewSignal _ -> do
-    eventVar <- liftIO newEmptyMVar
-    let signal = PTXSignal eventVar
+    signal <- liftIO signalNew -- sets reference count to 2: one for Signal, one for SignalResolver
     return (ValueSignal signal, ValueSignalResolver signal)
   NewRef _ -> do
     mvar <- liftIO newEmptyMVar
@@ -239,14 +236,14 @@ executeEffect env = \case
   SignalAwait signals -> do
     stream <- asks ptxStream
     liftIO $ forM_ signals $ \signal -> case prj' signal env of
-      ValueSignal (PTXSignal eventVar) -> do
+      ValueSignal (PTXSignal _ eventVar) -> do
         event <- readMVar eventVar
         Event.after event stream
       ValueScalar _ _ -> internalError "Signal impossible"
   SignalResolve signals -> do
     stream <- asks ptxStream
     forM_ signals $ \signal -> case prj' signal env of
-      ValueSignalResolver (PTXSignal eventVar) -> do
+      ValueSignalResolver (PTXSignal _ eventVar) -> do
         event <- liftPar $ Event.waypoint stream
         liftIO $ putMVar eventVar event
       ValueScalar _ _ -> internalError "SignalResolver impossible"
@@ -349,8 +346,7 @@ executeAwhile env split io step input next = do
   retain env (IdxSet.splitLeft split)
 
   -- Set up the output variables for this iteration (and the input for the next)
-  eventVar <- liftIO newEmptyMVar
-  let signal = PTXSignal eventVar
+  signal@(PTXSignal _ eventVar) <- liftIO signalNew
   mvar <- liftIO newEmptyMVar
   (output, nextInput) <- bindAwhileIO io
 
@@ -359,6 +355,7 @@ executeAwhile env split io step input next = do
     stream <- asks ptxStream
     event <- liftIO $ readMVar eventVar
     liftIO $ Event.after event stream
+    liftIO $ signalRelease signal
     condition <- liftIO $ readMVar mvar
     case condition of
       ValueScalar _ c
@@ -406,8 +403,8 @@ executeAwhileSeq env split io step input next = do
 
 bindAwhileIO :: InputOutputR input output -> Par (Distribute Value output, Distribute Value input)
 bindAwhileIO InputOutputRsignal = do
-  eventVar <- liftIO newEmptyMVar
-  return (ValueSignalResolver $ PTXSignal eventVar, ValueSignal $ PTXSignal eventVar)
+  signal <- liftIO signalNew
+  return (ValueSignalResolver signal, ValueSignal signal)
 bindAwhileIO (InputOutputRref _) = do
   mvar <- liftIO newEmptyMVar
   return (ValueOutputRef mvar, ValueRef mvar)
@@ -442,13 +439,23 @@ release :: Gamma env -> IdxSet env -> Par ()
 release env set = IdxSet.envForEach env set releaseValue
 
 releaseValue :: Value t -> Par ()
-releaseValue _ = return () -- TODO: Decrement reference count
+releaseValue = \case
+  ValueSignal s ->
+    liftIO $ signalRelease s
+  ValueSignalResolver s ->
+    liftIO $ signalRelease s
+  _ -> return () -- TODO: Handle reference counts of other objects
 
 retain :: Gamma env -> IdxSet env -> Par ()
 retain env set = IdxSet.envForEach env set $ retainValueBy 1
 
 retainValueBy :: Int -> Value t -> Par ()
-retainValueBy _ _ = return () -- TODO: Increment reference count
+retainValueBy refs = \case
+  ValueSignal s ->
+    liftIO $ signalRetainBy refs s
+  ValueSignalResolver s ->
+    liftIO $ signalRetainBy refs s
+  _ -> return () -- TODO: Handle reference counts of other objects
 
 -- | Returns whether values of this type track a reference count
 needsRC :: BaseR t -> Bool
@@ -460,6 +467,27 @@ executeAwhileInitial :: Gamma envI -> Split True env envI env' -> BaseVars envI 
 executeAwhileInitial env split initial =
   forM_ (awhileInitialRCRetains needsRC split initial)
     $ \(Exists var, count) -> retainValueBy count $ prj' (varIdx var) env
+
+-- | Binds new values in an environment, based on a LeftHandSide.
+-- If values are ignored (ie bound to LeftHandSideWildcard), their reference
+-- count is decremented (released).
+executeBind :: Gamma env -> BLeftHandSide t env env' -> Distribute Value t -> Par (Gamma env')
+executeBind env lhs values = do
+  go lhs values
+  return $ push' env (lhs, values)
+  where
+    -- Releases (decrements the reference count) of bindings that are not used
+    go :: BLeftHandSide s e1 e2 -> Distribute Value s -> Par ()
+    go (LeftHandSideSingle _) _ = return ()
+    go (LeftHandSidePair l1 l2) (v1, v2) = go l1 v1 >> go l2 v2
+    go (LeftHandSideWildcard t) v = releaseValues t v
+
+    releaseValues :: forall s. BasesR s -> Distribute Value s -> Par ()
+    releaseValues TupRunit _ = return ()
+    releaseValues (TupRpair t1 t2) (v1, v2) = releaseValues t1 v1 >> releaseValues t2 v2
+    releaseValues (TupRsingle t) v
+      | Refl <- reprIsSingle @BaseR @s @Value t
+      = releaseValue v
 
 {- -- Skeleton implementation
 -- -----------------------
