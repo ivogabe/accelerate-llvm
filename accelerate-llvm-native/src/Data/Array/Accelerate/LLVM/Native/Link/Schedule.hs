@@ -562,9 +562,12 @@ convert inAwhile (AwhileSeq SplitDefault SplitDefault io (Slam lhsInput (Slam lh
         getInput = stateField fullState ioType $ tupleLeft $ tupleLeft $ tupleLeft $ tupleLeft stateIdx
         getOutput = stateField fullState ioType $ tupleRight $ tupleLeft $ tupleLeft stateIdx
 
-      -- Split environment for 'initials' and the remainder ('step' and 'next')
+      -- Split environment for 'initial' and the remainder ('step' and 'next')
       (structVarsInit, localVarsInit, structVarsStart, _)
         <- forkEnv structVars localVars (IdxSet.fromVars initial) (stepVars `IdxSet.union` varsFree next1)
+      -- TODO: Is this sound when a variable is used multiple times in 'initial'?
+      -- We need to increment the reference count for variables that are used multiple times,
+      -- see awhileParRetainInput (or awhileInitialRCRetains after the RC rewrite)
 
       getInput >>= awhileSeqSetInitial structVarsInit localVarsInit io initial
       getOutput >>= awhilePrepareOutput io lhsInput

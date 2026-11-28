@@ -124,11 +124,11 @@ execute env = \case
       execute envNext next
   Awhile split1 split2 io step initial next -> do
     (envI, env') <- executeSplitEnv env split1
-    -- TODO: Handle reference counts of bindings in envI:
-    -- Increment if used multiple times in 'initial', decrement if not used
+    executeAwhileInitial envI split1 initial
     executeAwhile env' split2 io step (prjVars initial envI) next
   AwhileSeq split1 split2 io step initial next -> do
     (envI, env') <- executeSplitEnv env split1
+    executeAwhileInitial envI split1 initial
     -- TODO: Handle reference counts of bindings in envI:
     -- Increment if used multiple times in 'initial', decrement if not used
     executeAwhileSeq env' split2 io step (prjVars initial envI) next
@@ -439,10 +439,27 @@ executeSplitRelease env split subLeft = do
     , subsetEnv (splitSubsetRight split) env )
 
 release :: Gamma env -> IdxSet env -> Par ()
-release env set = IdxSet.envForEach env set $ \_ -> return () -- TODO: Decrement reference count
+release env set = IdxSet.envForEach env set releaseValue
+
+releaseValue :: Value t -> Par ()
+releaseValue _ = return () -- TODO: Decrement reference count
 
 retain :: Gamma env -> IdxSet env -> Par ()
-retain env set = IdxSet.envForEach env set $ \_ -> return () -- TODO: Increment reference count
+retain env set = IdxSet.envForEach env set $ retainValueBy 1
+
+retainValueBy :: Int -> Value t -> Par ()
+retainValueBy _ _ = return () -- TODO: Increment reference count
+
+-- | Returns whether values of this type track a reference count
+needsRC :: BaseR t -> Bool
+needsRC = \case
+  BaseRground (GroundRscalar _) -> False
+  _ -> True
+
+executeAwhileInitial :: Gamma envI -> Split True env envI env' -> BaseVars envI t -> Par ()
+executeAwhileInitial env split initial =
+  forM_ (awhileInitialRCRetains needsRC split initial)
+    $ \(Exists var, count) -> retainValueBy count $ prj' (varIdx var) env
 
 {- -- Skeleton implementation
 -- -----------------------
